@@ -35,6 +35,9 @@ on:
       - host/pad_sdl.c
       - tests/test_rumble_refresh.py
       - tests/test_upscale_label.py
+      - gpu/vk/movie_upscale_policy.h
+      - tests/test_movie_upscale_policy.cpp
+      - tests/test_movie_upscale_policy.py
       - nx2/test_import_windows.py
       - .github/workflows/source-regressions.yml
   pull_request:
@@ -71,6 +74,9 @@ on:
       - host/pad_sdl.c
       - tests/test_rumble_refresh.py
       - tests/test_upscale_label.py
+      - gpu/vk/movie_upscale_policy.h
+      - tests/test_movie_upscale_policy.cpp
+      - tests/test_movie_upscale_policy.py
       - nx2/test_import_windows.py
       - .github/workflows/source-regressions.yml
   workflow_dispatch:
@@ -150,6 +156,9 @@ jobs:
       - name: Check upscale menu labels
         if: runner.os == 'Linux'
         run: python -I -B tests/test_upscale_label.py
+      - name: Check movie upscale fallback policy
+        if: runner.os == 'Linux'
+        run: python -I -B tests/test_movie_upscale_policy.py
       - name: Check import windows
         if: runner.os == 'Linux'
         run: python -I -B nx2/test_import_windows.py --cxx g++

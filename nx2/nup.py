@@ -51,6 +51,12 @@ class Nup:
         if h[:4] != b"NUP\x01":
             raise SystemExit("%s: not a NUP package (magic %r)" % (path, h[:4]))
         self.file_size = struct.unpack_from("<Q", h, 0x40)[0]
+        # (a package that ends early (a download or copy that did not finish) failed 30 minutes in as "short read in the
+        # package": said now, with the sizes)
+        have = os.fstat(self.f.fileno()).st_size
+        if self.file_size and have < self.file_size:
+            raise SystemExit("the .nup file is incomplete: it is %d MB, its header says %d MB. Download or copy it again "
+                             "(wait for the download to finish) and check that the drive had room" % (have >> 20, self.file_size >> 20))
         t = self.f.read(0x30)
         if t[:4] != b"TOC\x01":
             raise SystemExit("%s: no TOC at 0x80" % path)
@@ -155,7 +161,8 @@ class Nup:
         while left:
             b = self.f.read(min(left, 8 << 20))
             if not b:
-                raise SystemExit("short read in the package")
+                raise SystemExit("the .nup file ends early (short read at %d of %d MB): it is incomplete. Download or copy it again"
+                                 % (self.f.tell() >> 20, os.fstat(self.f.fileno()).st_size >> 20))
             g.write(b)
             left -= len(b)
 

@@ -1,0 +1,108 @@
+name: Game problem
+description: Graphics, crashes, black screens, stutter, sound, controls or saves
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for testing. Before you start:
+        - **Check the [newest release](https://github.com/NotRexed/Hookshot/releases/latest) first.** Every release includes all the fixes before it, and yours may already be fixed.
+        - **Search the open issues.** If yours is there, add your details to it instead.
+        - English, please.
+        - **Never attach game files**: no hookshot.exe, image.bin, the `.bin` caches, romfs or exefs files, keys or saves.
+  - type: input
+    id: version
+    attributes:
+      label: Hookshot version
+      description: The release you built (its name on the Releases page, such as `movie-sync`), or the first line of `hookshot_log.txt` if it starts with `hookshot`.
+      placeholder: movie-sync
+    validations:
+      required: true
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What kind of problem
+      options:
+        - Graphics (missing, black or wrong-coloured things, lighting, flicker)
+        - Crash, freeze or black screen
+        - Low fps or stutter
+        - Sound, controls or saves
+        - Something else
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you saw, and what you expected instead.
+    validations:
+      required: true
+  - type: input
+    id: where
+    attributes:
+      label: Where in the game
+      description: The area, cutscene or menu, and what you were doing.
+      placeholder: Kokiri Forest, walking out of Link's house
+    validations:
+      required: true
+  - type: dropdown
+    id: often
+    attributes:
+      label: How often
+      options:
+        - Every time
+        - Sometimes
+        - Once so far
+    validations:
+      required: true
+  - type: input
+    id: gpu
+    attributes:
+      label: Graphics card and driver version
+      placeholder: RTX 3080 Ti, NVIDIA 596.21
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: CPU, RAM and operating system
+      placeholder: Ryzen 7 7700, 32 GB, Windows 11
+    validations:
+      required: true
+  - type: textarea
+    id: settings
+    attributes:
+      label: Changes from the defaults
+      description: Insert-menu options you changed, and the lines in `hookshot_env.txt` if you have one. Leave empty if none.
+  - type: dropdown
+    id: injectors
+    attributes:
+      label: Other software hooked into the game
+      description: ReShade, shader-cache tools (SCSKiller and the like), overlays or frame-generation injectors change what Hookshot does. Please test without them before reporting.
+      options:
+        - None
+        - Yes (named under "Changes from the defaults")
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: hookshot_log.txt
+      description: Drag the file here. It is beside hookshot.exe and holds the last run only, so attach it right after the problem. It has no game files in it.
+    validations:
+      required: true
+  - type: textarea
+    id: media
+    attributes:
+      label: Screenshots or video
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before you send it
+      options:
+        - label: I'm on the newest release, or the problem is still there on it.
+          required: true
+        - label: I searched the open issues for this problem.
+          required: true
+        - label: I'm not attaching game files, keys, hookshot.exe, the .bin caches or saves.
+          required: true

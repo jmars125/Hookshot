@@ -72,7 +72,7 @@ static const char *desired_language(void) {
     snprintf(lang, sizeof lang, "en-US");
     int found = 0;
     for (size_t i = 0; want[0] && i < sizeof languages / sizeof *languages; i++)
-        if (!strcmp(want, languages[i].code)) snprintf(lang, sizeof lang, "%s", languages[i].code), found = 1;
+        if (!_stricmp(want, languages[i].code)) snprintf(lang, sizeof lang, "%s", languages[i].code), found = 1;   /* (HOS_LANGUAGE=pt-br too, as language.txt) */
     if (want[0] && !found) hos_log("oe: language \"%s\" (%s) is not one the game has: English (US)", want, from);
     else hos_log("oe: language %s (%s)", lang, from);
     return lang;

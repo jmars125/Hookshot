@@ -2050,6 +2050,7 @@ bool readback_submit_wait() {
     vkResetFences(dev.device, 1, &rb_fence);
     {
         std::lock_guard qk(dev.present_mu);   // (one queue: submits and presents take turns)
+        queue_flush_locked();
         if (vkQueueSubmit2(dev.queue, 1, &si, rb_fence) != VK_SUCCESS) return false;
     }
     return vkWaitForFences(dev.device, 1, &rb_fence, VK_TRUE, 5000000000ull) == VK_SUCCESS;
@@ -2384,6 +2385,7 @@ bool sparse_flush(Texture* tex) {
         static const bool no_idle = getenv("RX_VK_SPARSE_IDLE") == nullptr;
         static int64_t binds;
         std::lock_guard qk(dev.present_mu);
+        queue_flush_locked();
         if (!no_idle) vkQueueWaitIdle(dev.queue);
         res = vkQueueBindSparse(dev.queue, 1, &bi, fence);
         if (++binds % 200 == 0) logf("vk: %lld sparse binds", (long long)binds);

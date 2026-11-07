@@ -50,6 +50,11 @@ VkSemaphore timeline = VK_NULL_HANDLE;
 std::atomic<uint64_t> pushed{0};
 std::atomic<uint64_t> q_values{0};   // the fence values handed out (a submit or a present takes one each)
 std::mutex replay_mu;   // one replay at a time (the game submits from several threads)
+// (RX_VK_BATCH: see queue_flush_locked)
+VkSemaphore batch_tl = VK_NULL_HANDLE;
+uint64_t batch_next = 0, batch_flushed = 0;
+struct { std::vector<VkCommandBufferSubmitInfo> cbs; uint64_t signal = 0; bool any_signal = false; } pend;
+int64_t st_flushes, st_batched_cbs;
 
 struct Recording {
     VkCommandPool pool = VK_NULL_HANDLE;
@@ -62,6 +67,7 @@ struct Recording {
     // as no older submission is unfinished (submit_job), and a slot waiting on its value could wait on the replay)
     VkFence fence = VK_NULL_HANDLE;
     bool submitted = false;
+    uint64_t batch = 0;   // (RX_VK_BATCH: the batch it went out in, waited for on batch_tl; 0: its own fence)
 };
 // (24: the event waits cut a frame's command buffers into pieces, each with recordings of its own, and with 16 the
 // replay waited ~1.5 ms a frame for a slot the GPU still had)
@@ -72,6 +78,20 @@ int recording_index = 0;
 /// (a recording slot's last submit done: before it is used again)
 void recording_wait(Recording& r) {
     if (!r.submitted) return;
+    if (r.batch) {
+        {
+            std::lock_guard lk(dev.present_mu);
+            if (batch_flushed < r.batch) queue_flush_locked();
+        }
+        VkSemaphoreWaitInfo wi{VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO};
+        wi.semaphoreCount = 1;
+        wi.pSemaphores = &batch_tl;
+        wi.pValues = &r.batch;
+        vkWaitSemaphores(dev.device, &wi, UINT64_MAX);
+        r.batch = 0;
+        r.submitted = false;
+        return;
+    }
     vkWaitForFences(dev.device, 1, &r.fence, VK_TRUE, UINT64_MAX);
     vkResetFences(dev.device, 1, &r.fence);
     r.submitted = false;
@@ -82,7 +102,50 @@ uint64_t completed() {
     vkGetSemaphoreCounterValue(dev.device, timeline, &v);
     return v;
 }
+// ---- (test) RX_VK_BATCH=1: the replay's submits held and sent as one vkQueueSubmit2 ----
+// On amdgpu every command submission pays for all imported host memory (userptr) again; the replay made ~6 a frame.
+// Held submits go out at the next point that needs the GPU's results or the queue's order: a wait, a readback, a
+// present, a sparse bind, another submit (queue_flush_locked under dev.present_mu).
+bool batch_on() {
+    static const bool on = [] {
+        const bool v = getenv("RX_VK_BATCH") && atoi(getenv("RX_VK_BATCH"));
+        logf("vk: batched submits %s (RX_VK_BATCH)", v ? "on" : "off");
+        return v;
+    }();
+    return on && batch_tl != VK_NULL_HANDLE;
+}
+} // namespace
+void queue_flush_locked() {   // (dev.present_mu held)
+    if (pend.cbs.empty()) return;
+    VkSemaphoreSubmitInfo sig[2]{{VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO}, {VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO}};
+    uint32_t n = 0;
+    if (pend.any_signal) {
+        sig[n].semaphore = timeline, sig[n].value = pend.signal, sig[n].stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+        n++;
+    }
+    sig[n].semaphore = batch_tl, sig[n].value = batch_next, sig[n].stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    n++;
+    VkSubmitInfo2 si{VK_STRUCTURE_TYPE_SUBMIT_INFO_2};
+    si.commandBufferInfoCount = (uint32_t)pend.cbs.size();
+    si.pCommandBufferInfos = pend.cbs.data();
+    si.signalSemaphoreInfoCount = n;
+    si.pSignalSemaphoreInfos = sig;
+    PROF(PROF_QSUBMIT);
+    const VkResult res = vkQueueSubmit2(dev.queue, 1, &si, VK_NULL_HANDLE);
+    static int failures;
+    if (res != VK_SUCCESS && failures++ < 8) logf("vk: batched submit %llu failed (%d)", (unsigned long long)batch_next, (int)res);
+    if (res == VK_ERROR_DEVICE_LOST) checkpoints_report();
+    batch_flushed = batch_next;
+    st_flushes++, st_batched_cbs += (int64_t)pend.cbs.size();
+    pend.cbs.clear(), pend.any_signal = false, pend.signal = 0;
+}
+void queue_flush() {
+    std::lock_guard lk(dev.present_mu);
+    queue_flush_locked();
+}
+namespace {
 void wait_value(uint64_t v) {
+    queue_flush();
     VkSemaphoreWaitInfo wi{VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO};
     wi.semaphoreCount = 1;
     wi.pSemaphores = &timeline;
@@ -170,6 +233,15 @@ void submit_recording(Recording& r, bool signal_value = true, uint64_t signal_at
     si.signalSemaphoreInfoCount = signal_value ? 1 : 0;
     si.pSignalSemaphoreInfos = signal_value ? &signal : nullptr;
     std::lock_guard lk(dev.present_mu);   // (one queue: submits and presents take turns)
+    if (batch_on()) {
+        if (pend.cbs.empty()) batch_next++;
+        for (uint32_t i = 0; i < n; i++) pend.cbs.push_back(cb[i]);
+        if (signal_value) pend.signal = std::max(pend.signal, signal.value), pend.any_signal = true;
+        r.batch = batch_next;
+        r.submitted = true;
+        if (pend.cbs.size() >= 32) queue_flush_locked();
+        return;
+    }
     PROF(PROF_QSUBMIT);
     const VkResult res = vkQueueSubmit2(dev.queue, 1, &si, r.fence);
     r.submitted = res == VK_SUCCESS;
@@ -1095,6 +1167,7 @@ void submit_segment_recording(Recording& r) {
     si.commandBufferInfoCount = 1;
     si.pCommandBufferInfos = &cb;
     std::lock_guard lk(dev.present_mu);
+    queue_flush_locked();
     const VkResult res = vkQueueSubmit2(dev.queue, 1, &si, r.fence);
     r.submitted = res == VK_SUCCESS;
     if (res != VK_SUCCESS) logf("vk: segment submit %llu failed (%d)", (unsigned long long)r.value, (int)res);
@@ -1249,6 +1322,7 @@ const uint8_t* replay_handle(VkCommandBuffer& cmd, const uint8_t* h, bool may_st
         si.commandBufferInfoCount = n;
         si.pCommandBufferInfos = cb;
         std::lock_guard lk(dev.present_mu);
+        queue_flush_locked();
         const VkResult res = vkQueueSubmit2(dev.queue, 1, &si, j->r->fence);
         j->r->submitted = res == VK_SUCCESS;
         if (res != VK_SUCCESS) logf("vk: segment submit %llu failed (%d)", (unsigned long long)j->r->value, (int)res);
@@ -1328,6 +1402,7 @@ void bench_frame(int64_t presents) {
     int64_t prof0[PROF_COUNT];
     std::memcpy(prof0, prof_ns, sizeof prof0);
     const size_t ub_before = ub_updates.size();
+    queue_flush();
     for (int i = 0; i < times; i++) {
         vkDeviceWaitIdle(dev.device);
         ub_updates.resize(ub_before);   // (the last time's uniform updates are written: as if pruned)
@@ -1691,11 +1766,13 @@ void submit_job(std::vector<uint64_t>& handles, uint64_t value, uint64_t queue) 
     burst_end();
 }
 uint64_t get_replayed() {
+    queue_flush();
     const uint64_t hold = replayed_hold.load();
     return hold ? std::min(hold, completed()) : completed();
 }
 int wait(uint64_t f, uint64_t timeout_ns) {
     if (completed() >= f) return 1;
+    queue_flush();
     // (a wait that needs stopped work: another queue's submit usually lets that on in a moment. Forced at once, as the main thread
     // waits ~15 times a second, 69000 waits went past in five minutes, and each one that mattered was a black frame.
     // RX_VK_WAIT_HOLD_US: how long the waiter gives it. A wait for older work than the stopped ones needs nothing of them)
@@ -1703,6 +1780,7 @@ int wait(uint64_t f, uint64_t timeout_ns) {
         static const int64_t hold_ns = (getenv("RX_VK_WAIT_HOLD_US") ? atoll(getenv("RX_VK_WAIT_HOLD_US")) : 3000) * 1000;
         const auto t0 = std::chrono::steady_clock::now();
         for (;;) {
+            queue_flush();
             if (completed() >= f) return 1;
             bool needs;
             {
@@ -1723,6 +1801,7 @@ int wait(uint64_t f, uint64_t timeout_ns) {
     wi.semaphoreCount = 1;
     wi.pSemaphores = &timeline;
     wi.pValues = &f;
+    queue_flush();
     const VkResult res = vkWaitSemaphores(dev.device, &wi, timeout_ns);
     static int logged;
     if (res != VK_SUCCESS && timeout_ns > 1000000000ull && logged++ < 8)
@@ -2690,6 +2769,13 @@ void present_image(VkImage src, uint32_t sw, uint32_t sh, const int crop[4], VkI
     si.signalSemaphoreInfoCount = 1;
     si.pSignalSemaphoreInfos = &signal;
     std::lock_guard qk(dev.present_mu);
+    queue_flush_locked();
+    static int64_t presents_counted, st_flushes0, st_cbs0;
+    if (st_flushes && ++presents_counted % 120 == 0) {
+        logf("vk: batched submits: %lld flushes, %.1f command buffers each, over 120 presents", (long long)(st_flushes - st_flushes0),
+             (double)(st_batched_cbs - st_cbs0) / std::max<int64_t>(1, st_flushes - st_flushes0));
+        st_flushes0 = st_flushes, st_cbs0 = st_batched_cbs;
+    }
     vkQueueSubmit2(dev.queue, 1, &si, f.done);
     VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
     pi.waitSemaphoreCount = 1;
@@ -3085,6 +3171,7 @@ bool replay_start() {
     VkSemaphoreCreateInfo tsi{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
     tsi.pNext = &ti;
     if (vkCreateSemaphore(dev.device, &tsi, nullptr, &timeline) != VK_SUCCESS) return false;
+    if (vkCreateSemaphore(dev.device, &tsi, nullptr, &batch_tl) != VK_SUCCESS) batch_tl = VK_NULL_HANDLE;
     VkCommandPoolCreateInfo pi{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
     pi.queueFamilyIndex = dev.queue_family;
     pi.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;

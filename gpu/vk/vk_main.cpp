@@ -367,6 +367,7 @@ bool create_swapchain(uint32_t width, uint32_t height) {
     VkSwapchainKHR sc;
     if (vkCreateSwapchainKHR(dev.device, &ci, nullptr, &sc) != VK_SUCCESS) return false;
     if (dev.swapchain) {
+        queue_flush_locked();
         vkDeviceWaitIdle(dev.device);
         vkDestroySwapchainKHR(dev.device, dev.swapchain, nullptr);
     }

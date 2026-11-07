@@ -363,6 +363,7 @@ bool started_up() {
             if (!tried) {
                 tried = true;
                 if (AllocConsole()) {
+#ifdef _WIN32
                     // This console is ours. Selection must not block preparation's progress writes.
                     const HANDLE input = CreateFileA("CONIN$", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
                                                      nullptr, OPEN_EXISTING, 0, nullptr);
@@ -372,6 +373,7 @@ bool started_up() {
                             SetConsoleMode(input, (mode & ~ENABLE_QUICK_EDIT_MODE) | ENABLE_EXTENDED_FLAGS);
                         CloseHandle(input);
                     }
+#endif
                     SetConsoleTitleA("Hookshot");
                     console = CreateFileA("CONOUT$", GENERIC_WRITE, FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
                     if (console == INVALID_HANDLE_VALUE) console = nullptr;

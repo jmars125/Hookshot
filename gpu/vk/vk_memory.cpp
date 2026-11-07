@@ -25,6 +25,7 @@
 
 #include "vk_internal.h"
 #include "vk_texture.h"   // (upload_command_buffer)
+#include "import_hold.h"
 
 namespace mkwvk {
 namespace {
@@ -69,6 +70,23 @@ uint32_t generation = ~0u;
 uint64_t align = 4096;
 uint64_t max_import_size = UINT64_MAX;
 int failures = 0;
+ImportHolds import_holds;          // (issue 218: a failed import is not tried again for ImportHolds::kGapMs)
+std::mutex import_holds_mu;
+thread_local bool import_cooling = false;
+thread_local VkResult import_result = VK_SUCCESS;
+
+int64_t import_now_ms() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+bool import_on_hold(uint64_t lo, uint64_t hi) {
+    std::lock_guard lk(import_holds_mu);
+    import_cooling = !import_holds.allow(lo, hi, import_now_ms());
+    return import_cooling;
+}
+void import_remember_failure(uint64_t lo, uint64_t hi) {
+    std::lock_guard lk(import_holds_mu);
+    import_holds.deny_for(lo, hi, import_now_ms());
+}
 
 constexpr VkBufferUsageFlags kUsage =
     VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT |
@@ -77,9 +95,13 @@ constexpr VkBufferUsageFlags kUsage =
     VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT;
 
 bool import_pool(uint64_t lo, uint64_t hi, Pool& p) {
+    import_cooling = false;
+    import_result = VK_SUCCESS;
+    if (import_on_hold(lo, hi)) return false;   // (tried recently and failed: not again until the hold ends)
     if (hi <= lo || hi - lo > max_import_size) {
         logf("vk: import %#llx..%#llx exceeds the device's allocation/buffer limit", (unsigned long long)lo,
              (unsigned long long)hi);
+        import_remember_failure(lo, hi);
         return false;
     }
     p.lo = lo;
@@ -117,14 +139,19 @@ bool import_pool(uint64_t lo, uint64_t hi, Pool& p) {
     if (type == UINT32_MAX) {
         VkMemoryHostPointerPropertiesEXT hp{VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT};
         if (vkGetMemoryHostPointerPropertiesEXT(dev.device, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT, ptr,
-                                                &hp) != VK_SUCCESS)
+                                                &hp) != VK_SUCCESS) {
+            import_remember_failure(lo, hi);
             return false;
+        }
         for (uint32_t i = 0; i < dev.memory.memoryTypeCount && type == UINT32_MAX; i++)   // (host visible, coherent)
             if ((hp.memoryTypeBits >> i & 1) &&
                 (dev.memory.memoryTypes[i].propertyFlags & (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) ==
                     (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT))
                 type = i;
-        if (type == UINT32_MAX) return false;
+        if (type == UINT32_MAX) {
+            import_remember_failure(lo, hi);
+            return false;
+        }
     }
     t1 = clk::now();
     VkExternalMemoryBufferCreateInfo eb{VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO};
@@ -133,7 +160,10 @@ bool import_pool(uint64_t lo, uint64_t hi, Pool& p) {
     bi.pNext = &eb;
     bi.size = bytes;
     bi.usage = kUsage;
-    if (vkCreateBuffer(dev.device, &bi, nullptr, &p.buffer) != VK_SUCCESS) return false;
+    if (vkCreateBuffer(dev.device, &bi, nullptr, &p.buffer) != VK_SUCCESS) {
+        import_remember_failure(lo, hi);
+        return false;
+    }
     t2 = clk::now();
     VkImportMemoryHostPointerInfoEXT im{VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT};
     im.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
@@ -145,9 +175,12 @@ bool import_pool(uint64_t lo, uint64_t hi, Pool& p) {
     ai.pNext = &im;
     ai.allocationSize = bytes;
     ai.memoryTypeIndex = type;
-    if (vkAllocateMemory(dev.device, &ai, nullptr, &p.memory) != VK_SUCCESS) {
+    const VkResult allocated = vkAllocateMemory(dev.device, &ai, nullptr, &p.memory);
+    if (allocated != VK_SUCCESS) {
+        import_result = allocated;
         vkDestroyBuffer(dev.device, p.buffer, nullptr);
         p.buffer = VK_NULL_HANDLE;
+        import_remember_failure(lo, hi);
         return false;
     }
     t3 = clk::now();
@@ -1163,9 +1196,14 @@ Pool* pool_lookup(uint64_t guest, uint64_t size) {
                      (unsigned long long)(range.hi - range.lo), ms, n, total_ms);
         }
         if (!ok) {
-            if (failures++ < 16)
-                logf("vk: pool %#llx+%#llx not imported", (unsigned long long)range.lo,
-                     (unsigned long long)(range.hi - range.lo));
+            if (!import_cooling && failures++ < 16) {
+                if (import_result != VK_SUCCESS)
+                    logf("vk: pool %#llx+%#llx not imported (VkResult %d)", (unsigned long long)range.lo,
+                         (unsigned long long)(range.hi - range.lo), (int)import_result);
+                else
+                    logf("vk: pool %#llx+%#llx not imported", (unsigned long long)range.lo,
+                         (unsigned long long)(range.hi - range.lo));
+            }
             return nullptr;
         }
         for (uint64_t k : overlapped) {   // (the pools it took in)

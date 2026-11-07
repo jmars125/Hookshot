@@ -24,7 +24,7 @@ import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-PY = [sys.executable, "-I", "-u"]   # (-u: the steps' output as it comes, not in 8 KB blocks minutes apart)
+PY = [sys.executable, "-I", "-u", "-X", "utf8"]   # (utf8: every step's output in UTF-8 whatever the console's code page: lift.py crashed on a letter, #180)   # (-u: the steps' output as it comes, not in 8 KB blocks minutes apart)
 BUILD_ID = "e0f3ccfa"   # (the version the patches, the hot list and the profile were made from)
 LINUX = os.name != "nt"
 BESIDE = ["hookshot", "hookshot_vk.so", "libSDL2-2.0.so.0"] if LINUX else ["hookshot.exe", "hookshot_vk.dll", "SDL2.dll", "wgpu_native.dll"]

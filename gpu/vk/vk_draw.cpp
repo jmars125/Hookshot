@@ -1347,7 +1347,7 @@ void build_descriptors(const NvnState& s, const Program& p) {
                     static const bool stretch = getenv("RX_VK_SSBO_STRETCH") != nullptr;
                     if (stretch && !d.is_written && addr && d.count == 1)
                         if (const uint64_t end = gpu_pool_end(base); end > base + n)
-                            n = std::max(n, std::min<uint64_t>(end - base, 64ull << 20) & ~3ull);
+                            n = std::max<uint64_t>(n, std::min<uint64_t>(end - base, 64ull << 20) & ~uint64_t{3});
                 }
                 const auto t0 = std::chrono::steady_clock::now();
                 // (hookshot) a storage buffer table's entries (count > 1, Info::global_tables): the ones past the table's

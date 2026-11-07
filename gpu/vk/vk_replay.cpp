@@ -419,6 +419,19 @@ void log_stage_bind(uint32_t op, int stage) {
 
 void maybe_split(VkCommandBuffer& cmd);
 
+/// The handles already stored, so a rebind of the same ones does not rebuild descriptors
+bool handles_unchanged(const uint64_t* have, const uint64_t* next, int n) {
+    if (n < 0) return false;
+    for (int i = 0; i < n; i++)
+        if (have[i] != next[i]) return false;
+    return true;
+}
+/// A uniform or storage binding already stored
+bool buf_unchanged(int32_t stage, int32_t index, uint64_t addr, uint64_t size, int32_t nstage, int32_t nindex,
+                   uint64_t naddr, uint64_t nsize) {
+    return stage == nstage && index == nindex && addr == naddr && size == nsize;
+}
+
 void replay(VkCommandBuffer& cmd, NvnState& s, const uint8_t* p, const uint8_t* end = nullptr) {
     const Mode mode = rmode;
     const bool dry = mode == Mode::Dry, worker = mode == Mode::Worker;
@@ -638,8 +651,10 @@ void replay(VkCommandBuffer& cmd, NvnState& s, const uint8_t* p, const uint8_t* 
             break;
         }
         case NOP_BIND_PROGRAM: {
-            s.bind_gen++;
             const auto b = payload<nvn_p_bind_program>(a, avail);
+            // (the same program bound again: its descriptors already stand)
+            const bool same = b.prog && s.has_prog ? std::memcmp(&s.prog, b.prog, sizeof s.prog) == 0 : !b.prog && !s.has_prog;
+            if (!same) s.bind_gen++;
             if (b.prog) s.prog = *b.prog;
             s.has_prog = b.prog != nullptr && b.prog->nstage > 0;
             break;
@@ -680,7 +695,6 @@ void replay(VkCommandBuffer& cmd, NvnState& s, const uint8_t* p, const uint8_t* 
             break;
         }
         case NOP_BIND_BUFS: {
-            s.bind_gen++;
             auto b = payload<nvn_p_bind_bufs>(a, avail);
             // (deferred binds: the ranges as the game's array held them at the submit, which the host copied into
             // the recording then (nvn_native.c resolve_deferred). Read again here, at the replay, the array was
@@ -717,12 +731,13 @@ void replay(VkCommandBuffer& cmd, NvnState& s, const uint8_t* p, const uint8_t* 
                              (unsigned long long)b.r[i].address, (unsigned long long)b.r[i].size);
                 }
                 nvn_p_bind_buf& u = (b.ssbo ? s.ssbo : s.ubo)[b.stage][index];
+                if (!buf_unchanged(u.stage, u.index, u.addr, u.size, b.stage, index, b.r[i].address, b.r[i].size))
+                    s.bind_gen++;
                 u.stage = b.stage, u.index = index, u.addr = b.r[i].address, u.size = b.r[i].size;
             }
             break;
         }
         case NOP_BIND_UBO: case NOP_BIND_SSBO: {
-            s.bind_gen++;
             const auto b = payload<nvn_p_bind_buf>(a, avail);
             if (b.stage >= kNvnStages) log_stage_bind(h.op, b.stage);
             {   // (hookshot) RX_VK_LOG_MESH_BINDS=1: what the game binds to the task and mesh stages, 80 lines
@@ -732,12 +747,14 @@ void replay(VkCommandBuffer& cmd, NvnState& s, const uint8_t* p, const uint8_t* 
                     logf("vk: bind %s stage %d index %d addr %#llx size %#llx", h.op == NOP_BIND_UBO ? "ubo" : "ssbo", b.stage, b.index,
                          (unsigned long long)b.addr, (unsigned long long)b.size);
             }
-            if (b.stage >= 0 && b.stage < kNvnStages && b.index >= 0 && b.index < 16)
-                (h.op == NOP_BIND_UBO ? s.ubo : s.ssbo)[b.stage][b.index] = b;
+            if (b.stage >= 0 && b.stage < kNvnStages && b.index >= 0 && b.index < 16) {
+                nvn_p_bind_buf& u = (h.op == NOP_BIND_UBO ? s.ubo : s.ssbo)[b.stage][b.index];
+                if (!buf_unchanged(u.stage, u.index, u.addr, u.size, b.stage, b.index, b.addr, b.size)) s.bind_gen++;
+                u = b;
+            }
             break;
         }
         case NOP_BIND_TEX: case NOP_BIND_SAMP: case NOP_BIND_IMG: {
-            s.bind_gen++;
             nvn_p_bind_handles b;
             std::memset(&b, 0, sizeof b);
             std::memcpy(&b, a, std::min<size_t>(sizeof b, h.size - 8));
@@ -750,7 +767,10 @@ void replay(VkCommandBuffer& cmd, NvnState& s, const uint8_t* p, const uint8_t* 
             if (b.stage < 0 || b.stage >= kNvnStages || b.first < 0) break;
             uint64_t* to = h.op == NOP_BIND_TEX ? s.tex[b.stage] : h.op == NOP_BIND_SAMP ? s.samp[b.stage] : s.img[b.stage];
             const int lim = h.op == NOP_BIND_IMG ? 32 : 128;
-            for (int k = 0; k < b.n && b.first + k < lim; k++) to[b.first + k] = b.h[k];
+            int n = 0;
+            while (n < b.n && b.first + n < lim) n++;
+            if (!handles_unchanged(to + b.first, b.h, n)) s.bind_gen++;   // (the same handles: the draw keeps its descriptors)
+            for (int k = 0; k < n; k++) to[b.first + k] = b.h[k];
             break;
         }
         case NOP_STENCIL: {
@@ -811,9 +831,11 @@ void replay(VkCommandBuffer& cmd, NvnState& s, const uint8_t* p, const uint8_t* 
         case NOP_PUSH_CONST: {   // (hookshot) compute push constants, kept in the state (vk_bank.cpp serves them from c0)
             const auto u = payload<nvn_p_push_const>(a, avail);
             if (u.size && u.size <= avail - sizeof u && (uint64_t)u.offset + u.size <= sizeof s.cs_push) {
-                std::memcpy(s.cs_push + u.offset, a + sizeof u, u.size);
+                const uint8_t* src = a + sizeof u;
+                const bool same = (uint64_t)u.offset + u.size <= s.cs_push_n && std::memcmp(s.cs_push + u.offset, src, u.size) == 0;
+                std::memcpy(s.cs_push + u.offset, src, u.size);
                 s.cs_push_n = std::max<uint32_t>(s.cs_push_n, u.offset + u.size);
-                s.bind_gen++;
+                if (!same) s.bind_gen++;
             }
             break;
         }

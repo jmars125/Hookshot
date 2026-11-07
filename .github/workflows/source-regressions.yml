@@ -10,6 +10,9 @@ on:
       - nx2/test_nup_paths.py
       - tests/test_make_game_cache.py
       - tests/test_child_unicode.py
+      - gpu/vk/vk_replay.cpp
+      - gpu/vk/vk_state.h
+      - tests/test_same_bind.py
       - tests/test_failure_reason.py
       - tests/test_import_hold.py
       - gpu/vk/vk_replay.cpp
@@ -55,6 +58,9 @@ on:
       - nx2/test_nup_paths.py
       - tests/test_make_game_cache.py
       - tests/test_child_unicode.py
+      - gpu/vk/vk_replay.cpp
+      - gpu/vk/vk_state.h
+      - tests/test_same_bind.py
       - tests/test_failure_reason.py
       - tests/test_import_hold.py
       - gpu/vk/vk_replay.cpp
@@ -184,3 +190,6 @@ jobs:
         run: python -I -B nx2/test_import_windows.py --cxx g++
       - name: Check a texture handle is looked up once
         run: python -I -B tests/test_handle_lookup.py
+      - name: Check a repeated bind keeps its descriptors
+        if: runner.os == 'Linux'
+        run: python -I -B tests/test_same_bind.py

@@ -44,6 +44,7 @@ on:
       - tests/test_audio_deadline.py
       - host/pad_sdl.c
       - tests/test_rumble_refresh.py
+      - tests/test_same_dyn.py
       - tests/test_upscale_label.py
       - gpu/vk/movie_upscale_policy.h
       - tests/test_movie_upscale_policy.cpp
@@ -94,6 +95,7 @@ on:
       - tests/test_audio_deadline.py
       - host/pad_sdl.c
       - tests/test_rumble_refresh.py
+      - tests/test_same_dyn.py
       - tests/test_upscale_label.py
       - gpu/vk/movie_upscale_policy.h
       - tests/test_movie_upscale_policy.cpp
@@ -186,6 +188,9 @@ jobs:
       - name: Check controller rumble keeps going
         if: runner.os == 'Linux'
         run: python -I -B tests/test_rumble_refresh.py
+      - name: Check a repeated draw keeps its dynamic state
+        if: runner.os == 'Linux'
+        run: python -I -B tests/test_same_dyn.py
       - name: Check upscale menu labels
         if: runner.os == 'Linux'
         run: python -I -B tests/test_upscale_label.py

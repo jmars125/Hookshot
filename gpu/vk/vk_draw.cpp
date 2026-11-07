@@ -2276,7 +2276,66 @@ thread_local DynState last_dyn;
 thread_local bool last_dyn_valid = false;
 #define DYN_CHANGED(f) (!last_dyn_valid || std::memcmp(&d.f, &last_dyn.f, sizeof d.f))
 
+/// The inputs a draw's dynamic state is built from. Most draws repeat the draw before them.
+bool dyn_same(const float* fp, int nf, const uint32_t* up, int nu, const uint8_t* raw, int nb, const float* cfp,
+              const uint32_t* cup, const uint8_t* craw) {
+    if (nf <= 0 || nu <= 0 || nb <= 0) return false;
+    for (int i = 0; i < nf; i++)
+        if (fp[i] != cfp[i]) return false;
+    for (int i = 0; i < nu; i++)
+        if (up[i] != cup[i]) return false;
+    for (int i = 0; i < nb; i++)
+        if (raw[i] != craw[i]) return false;
+    return true;
+}
+constexpr int kDynF = 13, kDynU = 35;
+struct DynFast {
+    bool on = false;
+    float fp[kDynF]{};
+    uint32_t up[kDynU]{};
+    uint8_t raw[160]{};
+    int nb = 0;
+    uint32_t wm0 = 0, wm_n = 0;
+};
+thread_local DynFast dyn_fast;
+int dyn_pack(const NvnState& s, const Targets& at, VkPrimitiveTopology topo, bool mesh, float* fp, uint32_t* up,
+             uint8_t* raw) {
+    fp[0] = s.viewport[0][0], fp[1] = s.viewport[0][1], fp[2] = s.viewport[0][2], fp[3] = s.viewport[0][3];
+    fp[4] = s.depth_near, fp[5] = s.depth_far;
+    std::memcpy(fp + 6, s.blend_color, sizeof s.blend_color);
+    fp[10] = s.poly_offset[0], fp[11] = s.poly_offset[1], fp[12] = s.poly_offset[2];
+    up[0] = (uint32_t)s.scissor[0], up[1] = (uint32_t)s.scissor[1], up[2] = (uint32_t)s.scissor[2], up[3] = (uint32_t)s.scissor[3];
+    up[4] = s.stencil_ref[0], up[5] = s.stencil_ref[1];
+    up[6] = s.stencil_value_mask[0], up[7] = s.stencil_value_mask[1];
+    up[8] = s.stencil_mask[0], up[9] = s.stencil_mask[1];
+    up[10] = at.width, up[11] = at.height, up[12] = (uint32_t)at.n, up[13] = (uint32_t)at.depth_format;
+    up[14] = at.depth != nullptr;
+    up[15] = (uint32_t)s.color.blend_en, up[16] = s.chmask.mask;
+    up[17] = (uint32_t)topo, up[18] = mesh ? 1u : 0u;
+    up[19] = s.restart ? 1u : 0u, up[20] = s.raster_discard ? 1u : 0u, up[21] = s.depth_clamp ? 1u : 0u, up[22] = s.ms.a2c ? 1u : 0u;
+    up[23] = (uint32_t)s.poly.cull, up[24] = (uint32_t)s.poly.front, up[25] = (uint32_t)s.poly.mode, up[26] = (uint32_t)s.poly.offset_en;
+    for (int i = 0; i < 8; i++) up[27 + i] = (uint32_t)at.color_format[i];
+    static_assert(sizeof(s.ds) + sizeof(s.blend) + 8 <= 160);
+    int atb = 0;
+    std::memcpy(raw + atb, &s.ds, sizeof s.ds);
+    atb += (int)sizeof s.ds;
+    std::memcpy(raw + atb, s.blend, sizeof s.blend);
+    atb += (int)sizeof s.blend;
+    const uint64_t prog = (uint64_t)(uintptr_t)cur_program;
+    std::memcpy(raw + atb, &prog, 8);
+    return atb + 8;
+}
+
 void dynamic_state(VkCommandBuffer cmd, const NvnState& s, const Targets& at, VkPrimitiveTopology topo, bool mesh) {
+    float df[kDynF];
+    uint32_t du[kDynU];
+    uint8_t db[160];
+    const int nb = dyn_pack(s, at, topo, mesh, df, du, db);
+    if (!dump_on() && last_dyn_valid && dyn_fast.on && dyn_fast.nb == nb &&
+        dyn_same(df, kDynF, du, kDynU, db, nb, dyn_fast.fp, dyn_fast.up, dyn_fast.raw)) {
+        pass.wm_or |= dyn_fast.wm0, pass.wm_n = dyn_fast.wm_n;   // (the pass trace still sees the masks)
+        return;
+    }
     DynState d;
     std::memset(&d, 0, sizeof d);   // (padding compared too)
     // (RX_VK_FOOTPRINT=<key>,...: those programs' draws write depth wherever they rasterize, both faces, whatever is
@@ -2418,7 +2477,12 @@ void dynamic_state(VkCommandBuffer cmd, const NvnState& s, const Targets& at, Vk
     }
     last_dyn = d;
     last_dyn_valid = true;
-    pass.wm_or |= d.n ? (uint32_t)d.wm[0] : 0, pass.wm_n = (uint32_t)d.n;
+    dyn_fast.on = true, dyn_fast.nb = nb;
+    std::memcpy(dyn_fast.fp, df, sizeof df);
+    std::memcpy(dyn_fast.up, du, sizeof du);
+    std::memcpy(dyn_fast.raw, db, (size_t)nb);
+    dyn_fast.wm0 = d.n ? (uint32_t)d.wm[0] : 0, dyn_fast.wm_n = (uint32_t)d.n;
+    pass.wm_or |= dyn_fast.wm0, pass.wm_n = dyn_fast.wm_n;
 }
 #undef DYN_CHANGED
 

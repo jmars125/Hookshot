@@ -28,6 +28,7 @@
 #include <vector>
 
 #include "vk_texture.h"
+#include "vk_menu.h"
 #include "vk_draw.h"
 #include "vk_dump.h"
 
@@ -2547,7 +2548,11 @@ void texture_frame(uint64_t completed) {
               : known                ? std::min<uint64_t>(allowed / 10 * 7, 6144ull << 20)   // (hookshot: at most 6 GB. A 16 GB
                                                                                              // card's 10.8 GB filled up, read as a leak: 105, 106)
                                      : 4096ull << 20;
-    uint64_t budget = own;
+    uint64_t budget = (opts.vram_mb > 0) ? ((uint64_t)opts.vram_mb << 20) : own;
+    if (opts.vram_mb > 0 && known) {
+        // Safety clamp: do not exceed 75% of driver-allowed memory on constrained VRAM (prevents VK_ERROR_DEVICE_LOST)
+        budget = std::min(budget, (allowed / 4) * 3);
+    }
     // (near what the driver allows, the budget shrinks by the excess. The excess of what the process holds less the
     // free space in VMA's blocks, which new images take before VMA makes a block: measured by the blocks alone, the
     // textures evicted freed space inside them that the driver still counted, so 10 frames later the budget shrank

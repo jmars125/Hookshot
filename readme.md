@@ -195,6 +195,7 @@ beside the game.
 
 | Option | Choices |
 |---|---|
+| Quality preset | Custom, Minimum (4GB), Low (6GB), Balanced (8GB), High (12GB), Ultra (16GB+) |
 | Frame generation | Off, 2x, 3x, 4x |
 | Frame pacing | Off, On |
 | Resolution | Auto (the game's own dynamic resolution), 100%, 75%, 67%, 50% |

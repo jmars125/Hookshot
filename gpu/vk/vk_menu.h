@@ -17,6 +17,9 @@ struct Options {
     int ultrawide = 0;    // the camera at the monitor's shape when it is wider than 16:9; read once, at the start (host/hos_main.c)
     int show_fps = 0;
     int fullscreen = 0;   // borderless, at the monitor's size: F11 is the same setting
+    int preset = 0;       // quality preset: 0 Custom, 1 Minimum (4GB), 2 Low (6GB), 3 Balanced (8GB), 4 High (12GB), 5 Ultra (16GB+)
+    int vram_mb = 0;      // dynamic texture cache budget limit in MB
+    int mirror_mb = 0;    // staging mirror limit in MB
 };
 extern Options opts;
 

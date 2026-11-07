@@ -28,6 +28,8 @@ on:
       - tests/test_pool_span.py
       - tests/test_submitted_page.py
       - tests/test_shader_census_cmd.py
+      - gpu/vk/vk_shader.cpp
+      - tests/test_same_draw.py
       - nx2/version.py
       - nx2/test_version.py
       - host/nn_audio.c
@@ -64,6 +66,8 @@ on:
       - tests/test_pool_span.py
       - tests/test_submitted_page.py
       - tests/test_shader_census_cmd.py
+      - gpu/vk/vk_shader.cpp
+      - tests/test_same_draw.py
       - nx2/version.py
       - nx2/test_version.py
       - host/nn_audio.c
@@ -141,6 +145,9 @@ jobs:
         run: python -I -B tests/test_shader_census_cmd.py
       - name: Check the build's version stamp
         run: python -I -B nx2/test_version.py
+      - name: Check a repeated draw keeps its program and pipeline
+        if: runner.os == 'Linux'
+        run: python -I -B tests/test_same_draw.py
       - name: Check the audio mixer's catch-up
         if: runner.os == 'Linux'
         run: python -I -B tests/test_audio_deadline.py

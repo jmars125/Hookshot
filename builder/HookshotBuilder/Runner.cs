@@ -116,6 +116,10 @@ sealed class Runner
         }
         catch (Exception)
         {
+            // (the package's own Python missing: an antivirus took it, most often, after a false alarm on the download)
+            if (tools.Python == "python" && Directory.Exists(Path.Combine(tools.Root, "python")))
+                return (false, "The builder's own Python (tools/python/python.exe) is missing. Your antivirus probably removed it: restore it " +
+                               "from quarantine, or unpack the zip again into a folder your antivirus allows, then try again.");
             return (false, "Python was not found. Install Python 3 or use the full Hookshot Builder package.");
         }
     }

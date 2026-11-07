@@ -140,6 +140,13 @@ static void call_guest(Ctx *c, uint64_t addr, uint64_t sp, const char *what) {
 }
 
 float hos_aspect_ratio = 0;   /* (the window's default shape: host/display.c) */
+#ifdef _WIN32
+/* (hookshot) On laptops with two GPUs, the drivers run a program on the dedicated one when it exports these (NVIDIA Optimus, AMD
+   PowerXpress): without them a laptop could put the game on its integrated GPU, 5 fps (issue 176) */
+__declspec(dllexport) unsigned long NvOptimusEnablement = 1;
+__declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
+#endif
+
 int main(int argc, char **argv) {
 #ifdef _WIN32
     {   // (hookshot_env.txt beside the game: NAME=VALUE lines set as environment variables before anything reads them, for the switches

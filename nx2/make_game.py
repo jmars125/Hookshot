@@ -24,7 +24,7 @@ import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-PY = [sys.executable, "-I", "-X", "utf8", "-u"]   # (-X utf8 survives -I; -u: output as it comes, not in 8 KB blocks)
+PY = [sys.executable, "-I", "-u", "-X", "utf8"]   # (utf8: every step's output in UTF-8 whatever the console's code page: lift.py crashed on a letter, #180)   # (-u: the steps' output as it comes, not in 8 KB blocks minutes apart)
 BUILD_ID = "e0f3ccfa"   # (the version the patches, the hot list and the profile were made from)
 BESIDE = ["hookshot.exe", "hookshot_vk.dll", "SDL2.dll", "wgpu_native.dll"]
 LANGUAGES = [("en-US", "English (US)"), ("en-GB", "English (UK)"), ("fr", "French (France)"), ("fr-CA", "French (Canada)"), ("de", "German"),
@@ -196,12 +196,22 @@ def compile_test(toolchain):
 
 
 def check_cpp_library(toolchain):
-    """The renderer needs C++20's formatting from Visual Studio's library: said now, not after 300 failed files (issue 39)"""
+    """Check the renderer's C++20 library features before the long build (issues 39 and 100)."""
     with tempfile.TemporaryDirectory() as d:
         src = os.path.join(d, "t.cpp")
         with open(src, "w") as f:
-            f.write(chr(10).join(("#include <format>", "#include <string>",
-                                  "std::string t(int v) { return std::vformat(\"{}\", std::make_format_args(v)); }", "")))
+            # Projected find: frontend/maxwell/structured_control_flow.cpp; predicate find and
+            # comparator sort: ir_opt/texture_pass.cpp (under gpu/vk/eden/shader_recompiler).
+            f.write(chr(10).join(("#include <algorithm>", "#include <format>", "#include <string>", "#include <vector>",
+                                  "std::string t(int v) { return std::vformat(\"{}\", std::make_format_args(v)); }",
+                                  "namespace { struct Entry { int value; }; }",
+                                  "bool ranges_test() {",
+                                  "    std::vector<Entry> entries{{2}, {1}};",
+                                  "    const auto found = std::ranges::find(entries, 1, &Entry::value);",
+                                  "    const auto matching = std::ranges::find_if(entries, [](const Entry& e) { return e.value == 2; });",
+                                  "    std::ranges::sort(entries, [](const Entry& a, const Entry& b) { return a.value < b.value; });",
+                                  "    return found != entries.end() && matching != entries.end();",
+                                  "}", "")))
         r = subprocess.run([toolchain.need(toolchain.find("clang++"))] + toolchain.native_target() + ["-std=c++20", "-c", src, "-o", os.path.join(d, "t.o")],
                            capture_output=True, text=True, encoding="utf-8", errors="replace")
     if r.returncode:

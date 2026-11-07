@@ -12,6 +12,8 @@ on:
       - tests/test_import_hold.py
       - tests/import_hold_test.cpp
       - gpu/vk/import_hold.h
+      - gpu/vk/vk_menu.cpp
+      - tests/test_fps_rate.py
       - .github/workflows/source-regressions.yml
   pull_request:
     branches: [main]
@@ -24,6 +26,8 @@ on:
       - tests/test_import_hold.py
       - tests/import_hold_test.cpp
       - gpu/vk/import_hold.h
+      - gpu/vk/vk_menu.cpp
+      - tests/test_fps_rate.py
       - .github/workflows/source-regressions.yml
   workflow_dispatch:
 
@@ -62,3 +66,6 @@ jobs:
       - name: Check failed-import backoff
         if: runner.os == 'Linux'
         run: python -I -B tests/test_import_hold.py
+      - name: Check the FPS counter's first sample
+        if: runner.os == 'Linux'
+        run: python -I -B tests/test_fps_rate.py

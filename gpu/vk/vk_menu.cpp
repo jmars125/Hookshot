@@ -377,6 +377,23 @@ void fullscreen_tick() {
     }
 }
 
+/// A rate over the half-second that just ended. The first call only starts that interval: the frames since launch,
+/// divided by one second, were shown as the rate the moment the counter was turned on.
+bool fps_take(int64_t now, int64_t shown, int64_t game, int64_t* next, int64_t* last_shown, int64_t* last_game,
+              double* shown_rate, double* game_rate) {
+    if (now < *next) return false;
+    const bool have = *next != 0;
+    if (have) {
+        const double secs = (now - *next + 500000000) / 1e9;
+        *shown_rate = (shown - *last_shown) / secs;
+        *game_rate = (game - *last_game) / secs;
+    }
+    *last_shown = shown;
+    *last_game = game;
+    *next = now + 500000000;
+    return have;
+}
+
 void menu_tick() {
     fullscreen_tick();
     static bool held[7];
@@ -413,15 +430,11 @@ void menu_tick() {
     if (opts.show_fps) {
         static int64_t next = 0, last_game = 0, last_shown = 0;
         const int64_t now = prof_now();
-        if (now >= next) {
-            const double secs = next ? (now - next + 500000000) / 1e9 : 1.0;
-            const int64_t g = game_frames.load(), sh = shown_frames.load();
-            const double shown = (sh - last_shown) / secs, game = (g - last_game) / secs;
+        double shown = 0, game = 0;
+        if (fps_take(now, shown_frames.load(), game_frames.load(), &next, &last_shown, &last_game, &shown, &game)) {
             snprintf(fps_text, sizeof fps_text, "%.0f", shown);
             if (opts.framegen >= 2) snprintf(fps_sub, sizeof fps_sub, "game %.0f", game);
             else fps_sub[0] = 0;
-            last_game = g, last_shown = sh;
-            next = now + 500000000;
             fps_bmp.keyed = true;
             gdi_draw(fps_bmp, 120u * scale, 54u * scale, paint_fps, scale);
         }

@@ -4210,11 +4210,18 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
     st_draws++, pass.draws++;
 }
 
+/// A dispatch over 2 ms is logged, 60 times, and only while RX_VK_SLOW_DISPATCH is set. Off, the clock is not read.
+bool slow_dispatch_timing() {
+    static const int on = getenv("RX_VK_SLOW_DISPATCH") != nullptr;
+    return on;
+}
+
 struct DispatchClock {   // (a dispatch over 2 ms: logged, with where its time went)
-    std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now(), t_prog{}, t_pipe{}, t_desc{};
+    std::chrono::steady_clock::time_point t0 = slow_dispatch_timing() ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{}, t_prog{}, t_pipe{}, t_desc{};
     uint64_t key = 0;
     bool made_pipeline = false;
     ~DispatchClock() {
+        if (!slow_dispatch_timing()) return;
         const auto t1 = std::chrono::steady_clock::now();
         const double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
         static int logged;
@@ -4708,7 +4715,7 @@ void dispatch(VkCommandBuffer cmd, NvnState& s, uint32_t x, uint32_t y, uint32_t
     }
     const uint8_t types[8]{};
     const Program* cp = program_for(s, ProgramKind::Compute, types);
-    dclock.t_prog = std::chrono::steady_clock::now();
+    dclock.t_prog = slow_dispatch_timing() ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     // (a program still being translated is waited for, as a draw's is: a dispatch left out is work never done again.
     // MKW updates its terrain height clipmaps a region at a time as the camera moves, and makes its sky's tables
     // once; a skipped update left holes and flat patches in the terrain, garbage in the sky)
@@ -4825,10 +4832,10 @@ void dispatch(VkCommandBuffer cmd, NvnState& s, uint32_t x, uint32_t y, uint32_t
         pcache_built_since_save++;
     }
     if (plk.on) par_mutex().unlock(), plk.on = false;
-    dclock.t_pipe = std::chrono::steady_clock::now();
+    dclock.t_pipe = slow_dispatch_timing() ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     end_pass(cmd);
     build_descriptors(s, p);
-    dclock.t_desc = std::chrono::steady_clock::now();
+    dclock.t_desc = slow_dispatch_timing() ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     if (dump_on())
         logf("vk: dump-in %03d dispatch %ux%ux%u prog %016llx:%s", dump_seq(), x, y, z, (unsigned long long)p.key,
              dump_inputs.c_str());

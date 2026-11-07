@@ -106,6 +106,7 @@ class NupCacheTests(unittest.TestCase):
             ]
             stack.enter_context(mock.patch.object(sys, "argv", argv))
             stack.enter_context(mock.patch.object(make_game, "check_windows_sdk"))
+            stack.enter_context(mock.patch.object(make_game, "drop_stale_objects"))
             stack.enter_context(mock.patch.object(make_game, "no_throttle"))
             stack.enter_context(mock.patch("ctypes.WinDLL", create=True))
             stack.enter_context(mock.patch.object(make_game, "run", side_effect=run))

@@ -1,0 +1,67 @@
+name: Build problem
+description: Hookshot Builder or make_game.py stops or gives an error
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before you start: check the [newest release](https://github.com/NotRexed/Hookshot/releases/latest) and the [build requirements](https://github.com/NotRexed/Hookshot#what-you-need) (Visual Studio Build Tools with "Desktop development with C++" and the Windows SDK, about 60 GB free), and search the open issues. English, please. Never attach game files.
+  - type: input
+    id: version
+    attributes:
+      label: Builder version
+      description: The release you downloaded (its name on the Releases page).
+      placeholder: movie-sync
+    validations:
+      required: true
+  - type: dropdown
+    id: how
+    attributes:
+      label: How you built
+      options:
+        - Hookshot Builder app (Windows)
+        - Command line (nx2/make_game.py)
+        - Linux AppImage
+    validations:
+      required: true
+  - type: dropdown
+    id: input
+    attributes:
+      label: Game files given to it
+      options:
+        - A .nup
+        - romfs and exefs folders
+    validations:
+      required: true
+  - type: textarea
+    id: error
+    attributes:
+      label: The error
+      description: Copy the text the builder shows, with the failed step's details (text, not a screenshot of it).
+      render: text
+    validations:
+      required: true
+  - type: input
+    id: toolchain
+    attributes:
+      label: Visual Studio or Build Tools version, and Windows SDK version
+      description: Windows only. Visual Studio Installer shows both.
+      placeholder: Build Tools 2022 17.14, Windows SDK 10.0.26100
+  - type: input
+    id: system
+    attributes:
+      label: Operating system and free space on the output drive
+      placeholder: "Windows 11 24H2, 210 GB free on D:"
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before you send it
+      options:
+        - label: I'm on the newest release, or it still fails on it.
+          required: true
+        - label: I searched the open issues for this error.
+          required: true
+        - label: I'm not attaching game files or anything built from them.
+          required: true

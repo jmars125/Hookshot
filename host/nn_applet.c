@@ -32,7 +32,7 @@ static const char *desired_language(void) {
         from = "HOS_LANGUAGE";
     } else {
         char path[300] = "language.txt";
-#if defined(_WIN32) && !defined(__EMSCRIPTEN__)
+#if !defined(__EMSCRIPTEN__)   /* (linux too: host/posix) */
         DWORD n = GetModuleFileNameA(NULL, path, 260);
         while (n > 0 && path[n - 1] != 92 && path[n - 1] != 47) n--;
         snprintf(path + n, sizeof path - n, "language.txt");
@@ -72,7 +72,7 @@ static const char *desired_language(void) {
     snprintf(lang, sizeof lang, "en-US");
     int found = 0;
     for (size_t i = 0; want[0] && i < sizeof languages / sizeof *languages; i++)
-        if (!strcmp(want, languages[i].code)) snprintf(lang, sizeof lang, "%s", languages[i].code), found = 1;
+        if (!_stricmp(want, languages[i].code)) snprintf(lang, sizeof lang, "%s", languages[i].code), found = 1;   /* (HOS_LANGUAGE=pt-br too, as language.txt) */
     if (want[0] && !found) hos_log("oe: language \"%s\" (%s) is not one the game has: English (US)", want, from);
     else hos_log("oe: language %s (%s)", lang, from);
     return lang;
@@ -91,7 +91,7 @@ static int handheld(void) {
         if (!getenv("HOS_HANDHELD")) {   /* (hookshot: the Insert menu's choice, gpu/vk/vk_menu.cpp) */
             char path[MAX_PATH];
             const DWORD n = GetModuleFileNameA(NULL, path, MAX_PATH);
-            char *slash = n ? strrchr(path, 92) : NULL;
+            char *slash = n ? (strrchr(path, 92) ? strrchr(path, 92) : strrchr(path, 47)) : NULL;   /* (linux: '/') */
             if (slash) {
                 snprintf(slash + 1, (size_t)(path + MAX_PATH - slash - 1), "hookshot_options.ini");
                 FILE *f = fopen(path, "r");
@@ -324,7 +324,13 @@ HLE(_ZN2nn7account26GetNetworkServiceAccountIdEPNS0_23NetworkServiceAccountIdERK
 }
 /* nn::oe::GetCurrentGraphicsScale() -> float (docked/handheld render scale): 1.0 */
 HLE(_ZN2nn2oe23GetCurrentGraphicsScaleEv) {
-    const float one = 1.0f;
+    /* (hookshot) HOS_GRAPHICS_SCALE=<f>: another scale, a test of whether the game sizes its picture by it (4K, issue 68) */
+    static float scale = 0;
+    static volatile LONG told;
+    if (scale == 0) scale = getenv("HOS_GRAPHICS_SCALE") ? (float)atof(getenv("HOS_GRAPHICS_SCALE")) : 1.0f;
+    if (scale <= 0) scale = 1.0f;
+    if (InterlockedIncrement(&told) <= 3) hos_log("oe: GetCurrentGraphicsScale -> %.2f", scale);
+    const float one = scale;
     uint32_t bits;
     memcpy(&bits, &one, 4);
     c->vreg[0][0] = bits, c->vreg[0][1] = 0;

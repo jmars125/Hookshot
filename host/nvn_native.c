@@ -215,8 +215,10 @@ NV(nvnDeviceSetWindowOriginMode) {
 }
 NV(nvnDeviceSetDepthMode) {
     ((nvn_dev *)P(0))->depth_mode = U32(1);
-    InterlockedExchange(&depth_minus_w, U32(1) == NVN_DEPTH_MODE_NEAR_IS_MINUS_W);
+    const LONG was = InterlockedExchange(&depth_minus_w, U32(1) == NVN_DEPTH_MODE_NEAR_IS_MINUS_W);
     hos_log("nvn: depth mode %s", U32(1) == NVN_DEPTH_MODE_NEAR_IS_MINUS_W ? "near = -w (GL)" : "near = 0");
+    if (was != (LONG)(depth_minus_w != 0))
+        hos_log("nvn: the depth mode is not the one the prepared shaders were made for: their vertex stages draw wrong");
 }
 NV(nvnDeviceFinalizeCommandHandle) {}
 /* (mkw-recomp) GPU time on the CPU's tick clock (31.25 MHz: 32 ns a tick), as on the console: MKW's frame pacer
@@ -501,13 +503,23 @@ NV(nvnTextureBuilderGetPackagedTextureData) { RET(CTB(P(0))->pkg_data); }
 static int storage_class(const nvn_texdesc *d) { return d->target == NVN_TEXTURE_TARGET_BUFFER ? 0 : 1; }
 NV(nvnTextureBuilderGetStorageClass) { RET(storage_class(&CTB(P(0))->d)); }
 NV(nvnTextureBuilderGetFlags) { RET((uint32_t)CTB(P(0))->d.flags); }
+/* (hookshot, issues 284 and 287) A size or alignment asked of no builder: the game passed 0 here while a scene loaded (thread
+   OptimizeChangeBanc, entering Castle Town), and the format read at +4 of it crashed the game. Size 0 then, and who asked, once */
+static int no_builder(Ctx *c, const char *what) {
+    if (c->x[0]) return 0;
+    static int told;
+    if (told++ < 4) hos_log("nvn: %s of no texture builder (lr %#llx): 0", what, (unsigned long long)c->x[30]);
+    return 1;
+}
 NV(nvnTextureBuilderGetStorageSize) {
+    if (no_builder(c, "storage size")) { RET(0); return; }
     nvn_texlayout L;
     nvn_tex_layout(&CTB(P(0))->d, &L);
     if (!L.bpb) hos_log("nvn: texture format %#x unknown: storage size 0", CTB(P(0))->d.format);
     RET(L.size);
 }
 NV(nvnTextureBuilderGetStorageAlignment) {
+    if (no_builder(c, "storage alignment")) { RET(512); return; }
     nvn_texlayout L;
     nvn_tex_layout(&CTB(P(0))->d, &L);
     RET(L.align);
@@ -523,6 +535,7 @@ NV(nvnTextureBuilderGetSamples) { RET((uint32_t)CTB(P(0))->d.samples); }
 NV(nvnTextureBuilderGetStride) { RET(CTB(P(0))->d.stride); }
 NV(nvnTextureBuilderGetMemoryOffset) { RET((uint64_t)CTB(P(0))->off); }
 NV(nvnTextureBuilderGetViewOffset) {
+    if (no_builder(c, "view offset")) { RET(0); return; }
     const nvn_tex_builder *b = CTB(P(0));
     const nvn_view *w = (const nvn_view *)P(1);
     if (!w) { RET(0); return; }
@@ -707,7 +720,8 @@ static LONG CALLBACK wts_handler(EXCEPTION_POINTERS *e) {
             static int all_threads = -1;   /* RX_NVN_WATCH_ALL=1: the Resource Memory thread's writes too */
             if (all_threads < 0) all_threads = getenv("RX_NVN_WATCH_ALL") != NULL;
             if ((all_threads || strcmp(tn, "Resource Memory")) && GetTickCount64() >= after && InterlockedIncrement(&wts_reports) <= 12) {   /* (not the allocation's zero fill) */
-                hos_log("nvn: write to a WriteTexels source at guest %#llx by %s", (unsigned long long)(a - (uintptr_t)GP(0)), tn);
+                hos_log("nvn: write to a WriteTexels source at guest %#llx by %s (host pc exe+%#llx)", (unsigned long long)(a - (uintptr_t)GP(0)), tn,
+                        (unsigned long long)((uintptr_t)e->ExceptionRecord->ExceptionAddress - (uintptr_t)GetModuleHandleA(NULL)));
                 hos_backtrace();
             }
             DWORD old;

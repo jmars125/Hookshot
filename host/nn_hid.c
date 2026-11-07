@@ -530,13 +530,35 @@ HLE(_ZN2nn3hid18SendVibrationValueERKNS0_21VibrationDeviceHandleERKNS0_14Vibrati
    hardware each is an IPC to hid. A device is an LRA on its side of the controller, always mounted and permitted. */
 /* A vibration value for one of the two motors of the pad (handle +2 = device index): the pads that rumble (SDL) get
    the stronger of the two sides' low and high band amplitudes. */
+/* (issue 263) An HD rumble amplitude is not a motor's: OoT asks for 0.02-0.06 for most effects, a few percent of a DualSense's or an
+   Xbox pad's motor, nothing you feel. Eden's SDL driver's mapping (Eglantine src/input_common/drivers/sdl_driver.cpp, GPL-3.0):
+   (a + a^0.35) / 2, then less for higher frequencies, to give some feel of them */
+static float rumble_motor(float amp, float freq, float start, float width) {
+    if (amp <= 0.0f) return 0.0f;
+    float scale = 1.0f;
+    if (freq > start) {
+        scale = 1.0f - (freq - start) / width;
+        if (scale < 0.3f) scale = 0.3f;
+    }
+    const float boosted = (amp + powf(amp, 0.35f)) * 0.5f;
+    return boosted * scale > 1.0f ? 1.0f : boosted * scale;
+}
 static void vibration_send(uint64_t handle, uint64_t value) {
     static float amp[2][2];
     float v[4];
     memcpy(v, GP(value), sizeof v);
     const int dev = (G32(handle) >> 16) & 1;
-    amp[dev][0] = v[0];
-    amp[dev][1] = v[2];
+    amp[dev][0] = rumble_motor(v[0], v[1], 140.0f, 400.0f);
+    amp[dev][1] = rumble_motor(v[2], v[3], 200.0f, 700.0f);
+    {   /* (hookshot, issue 263) what the game asks for: the first values, then a count now and then */
+        static long long n, strong;
+        static float peak;
+        if (v[0] > peak) peak = v[0];
+        if (v[2] > peak) peak = v[2];
+        if ((v[0] > 0.01f || v[2] > 0.01f) && strong++ < 6)
+            hos_log("hid: vibration #%lld: handle %08x, low %.2f @ %.0f Hz, high %.2f @ %.0f Hz", n, G32(handle), v[0], v[1], v[2], v[3]);
+        if ((++n & 4095) == 0) hos_log("hid: %lld vibration values, strongest %.2f since the last count", n, peak), peak = 0;
+    }
     void hos_sdl_rumble(float low, float high);   /* pad_sdl.c */
     hos_sdl_rumble(amp[0][0] > amp[1][0] ? amp[0][0] : amp[1][0], amp[0][1] > amp[1][1] ? amp[0][1] : amp[1][1]);
 }

@@ -6,6 +6,9 @@ namespace HookshotBuilder;
 /// Where nx2/make_game.py and its Python are: a "tools" folder beside the app when packaged, or the source tree it sits in.
 sealed record Tools(string Root, string Python)
 {
+    /// Which release these tools are (tools/version.txt, written when the release is packed); null from the source tree
+    public string? Version => File.Exists(Path.Combine(Root, "version.txt")) ? File.ReadAllText(Path.Combine(Root, "version.txt")).Trim() : null;
+
     public static Tools? Find()
     {
         var at = AppContext.BaseDirectory;
@@ -51,6 +54,8 @@ sealed class Runner
             RedirectStandardError = true,
         };
         si.Environment["PYTHONIOENCODING"] = "utf-8";
+        // (written into the game folder's hookshot_version.txt: the game starts this app again to update, host/hos_update.c)
+        if (Environment.ProcessPath != null) si.Environment["HOOKSHOT_BUILDER_EXE"] = Environment.ProcessPath;
         // (the folder's own compiler, headers and libraries, when it has them: nothing of the PC's but Windows' own)
         var sets = new[] { ("EMSDK", "emsdk"), ("RX_CPM", "cpm"), ("WGPU_NATIVE", "wgpu-native") };
         foreach (var (name, folder) in sets)
@@ -116,6 +121,10 @@ sealed class Runner
         }
         catch (Exception)
         {
+            // (the package's own Python missing: an antivirus took it, most often, after a false alarm on the download)
+            if (tools.Python == "python" && Directory.Exists(Path.Combine(tools.Root, "python")))
+                return (false, "The builder's own Python (tools/python/python.exe) is missing. Your antivirus probably removed it: restore it " +
+                               "from quarantine, or unpack the zip again into a folder your antivirus allows, then try again.");
             return (false, "Python was not found. Install Python 3 or use the full Hookshot Builder package.");
         }
     }

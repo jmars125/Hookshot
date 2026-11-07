@@ -43,6 +43,42 @@
 
 #include "vk_internal.h"
 #include "vk_jobs.h"
+
+// (EvilOOT, RX_VK_PTR_DIAG) the pointer pass's counts for this thread's translations
+// (global_memory_to_storage_buffer_pass.cpp, declared by hand so no Eden header changes)
+namespace Shader::Optimization {
+struct PointerDiag {
+    uint32_t tracked, fallback, fallback_table, mixed, split, fallback_split;
+};
+extern thread_local PointerDiag g_pointer_diag;
+// (collect_shader_info_pass.cpp: NVN2 compute's storage buffer table for the program translated on this thread, and
+// where its c0 layout ends: a pointer table at 0x880 when it ends before)
+extern thread_local uint32_t g_nvn2_compute_ssbo_base;
+extern thread_local uint32_t g_nvn2_compute_ssbo_count;
+extern thread_local uint32_t g_nvn2_compute_layout_end;
+extern thread_local bool g_nvn2_miss_log_this;
+extern thread_local bool g_all_global_this;
+}
+namespace mkwvk {
+struct NvnState;
+uint32_t compute_ssbo_table(const NvnState& s, uint32_t* count, uint32_t* layout_end);   // (vk_bank.cpp)
+}
+namespace {
+bool ptr_diag_on() {
+    static const bool on = getenv("RX_VK_PTR_DIAG") && atoi(getenv("RX_VK_PTR_DIAG")) != 0;
+    return on;
+}
+void ptr_diag_reset() { Shader::Optimization::g_pointer_diag = {}; }
+/// One line a program whose global memory accesses are not all plain constant buffer pointers
+void ptr_diag_log(uint64_t key, const char* kind) {
+    if (!ptr_diag_on()) return;
+    const auto& d = Shader::Optimization::g_pointer_diag;
+    if (!d.fallback && !d.mixed && !d.split) return;
+    mkwvk::logf("vk: pointers %s %016llx: %u bound (%u with memory in the address, %u SPLIT), %u run-time search (%u through a table, "
+         "%u split)",
+         kind, (unsigned long long)key, d.tracked, d.mixed, d.split, d.fallback, d.fallback_table, d.fallback_split);
+}
+} // namespace
 #include "vk_shader.h"
 
 namespace mkwvk {
@@ -485,7 +521,8 @@ uint32_t stage_cbuf_word(const NvnState& s, const Stage& st, uint32_t index, uin
         // handle read from it sampled their textures, for one frame: MKW's shadows in bands. RX_VK_HANDLES_LIVE=1:
         // as before)
         static const bool live = getenv("RX_VK_HANDLES_LIVE") != nullptr;
-        if (u.addr && (uint64_t)offset + 4 <= (uint64_t)u.size) {
+        // (EvilOOT: and a binding of no recorded size read as far as asked, as the storage buffer descriptors had it before)
+        if (u.addr && (!u.size || (uint64_t)offset + 4 <= (uint64_t)u.size)) {
             if (live) host->gpu_read(u.addr + offset, &v, 4);
             else ub_read(u.addr + offset, &v, 4);
         }
@@ -723,7 +760,10 @@ void dump_ir(const Program& p, const char* stage, const Shader::IR::Program& pro
 /// Translates a program variant's stages into p (on a worker for graphics programs: s and the codes are copies)
 // (hookshot) ir_opt/oot_visual_workaround.h, on the game's programs
 void oot_visual(Shader::IR::Program& program, uint64_t key) {
-    static const bool on = !getenv("RX_VK_OOT_VISUAL") || atoi(getenv("RX_VK_OOT_VISUAL")) != 0;
+    // (EvilOOT, 11-07: off unless RX_VK_OOT_VISUAL=1. With the foliage culling, the pointer reads and the first GPU work right, the
+    // game's own fog is the soft haze with sun shafts of the console's picture at Kokiri's rock; the 0.08 factor was tuned against
+    // the white wall those bugs made, and thinned every scene's fog)
+    static const bool on = getenv("RX_VK_OOT_VISUAL") && atoi(getenv("RX_VK_OOT_VISUAL")) != 0;
     if (!on) return;
     static const float fog = getenv("RX_VK_OOT_FOG") ? (float)atof(getenv("RX_VK_OOT_FOG")) : 0.08f;   // (0.25, Orchid's, left a white forest once the game no longer lost its start)
     // (1: the game's own exposure. 0.65 was for the washed-out outdoors before shaders followed pointers; with the lighting right it
@@ -761,8 +801,20 @@ uint64_t disk_stamp() {
     add(&translator, sizeof translator);
     const uint32_t depth = host->depth_minus_w() != 0;   // (d3zessete's PR 54: programs made in either depth mode are kept apart)
     add(&depth, sizeof depth);
+    // (the records keep Shader::Info as it lies in memory: a cache written by another C++ library (the MSVC build's, then the
+    // llvm-mingw one's libc++) has other layouts, and reading it crashed at start. The library and the sizes, so it starts again)
+    const uint32_t abi[] = {(uint32_t)sizeof(Shader::Info), (uint32_t)sizeof(Program), (uint32_t)sizeof(std::vector<uint32_t>),
+#if defined(_LIBCPP_VERSION)
+                            1u, (uint32_t)_LIBCPP_VERSION
+#elif defined(_MSVC_STL_VERSION)
+                            2u, (uint32_t)_MSVC_STL_VERSION
+#else
+                            3u, 0u
+#endif
+    };
+    add(abi, sizeof abi);
     for (char** e = _environ; e && *e; e++)
-        for (const char* pre : {"RX_VK_OOT", "RX_VK_MMA", "RX_VK_NATIVE", "RX_VK_NAN", "RX_VK_TASK_CAP", "RX_VK_NETWORK", "RX_VK_GP", "RX_VK_FOLLOW", "RX_VK_NO_FOLLOW", "RX_VK_NO_F16", "RX_VK_SHARED", "EDEN_"})
+        for (const char* pre : {"RX_VK_OOT", "RX_VK_MMA", "RX_VK_NATIVE", "RX_VK_NAN", "RX_VK_TASK_CAP", "RX_VK_NETWORK", "RX_VK_GP", "RX_VK_FOLLOW", "RX_VK_NO_FOLLOW", "RX_VK_NO_F16", "RX_VK_SHARED", "RX_VK_MESH", "EDEN_"})
             if (!strncmp(*e, pre, strlen(pre))) add(*e, strlen(*e));
     return h;
 }
@@ -965,23 +1017,58 @@ void program_cache_load(uint64_t key, std::vector<std::unique_ptr<Program>>& var
 void translate_into(Program& p, const NvnState& s, const Code* vsc, const Code* fsc, const Code* csc,
                     const uint8_t color_types[8]) {
     const auto t0 = std::chrono::steady_clock::now();
+    ptr_diag_reset();
     try {
         Shader::Backend::Bindings bindings{};
         int questions = 0;
         std::vector<std::vector<uint32_t>> kept;   // (each stage's SPIR-V, for the program cache)
         if (csc) {
             Env env{s, *csc, Shader::Stage::Compute};
+            {   // (EvilOOT) where this program's storage buffer table is in c0 (NVN2's layout, not Maxwell's 0x310)
+                uint32_t count = 0, end = 0;
+                const uint32_t base = compute_ssbo_table(s, &count, &end);
+                Shader::Optimization::g_nvn2_compute_ssbo_base = count ? base : 0;   // (no table found: Maxwell's, as before)
+                Shader::Optimization::g_nvn2_compute_ssbo_count = count ? count : 16;
+                Shader::Optimization::g_nvn2_compute_layout_end = count ? end : 0;
+                // (RX_VK_MISS_LOG_PROG=<key prefix>: the miss log for that program only)
+                static const char* only = getenv("RX_VK_MISS_LOG_PROG");
+                char hex[24];
+                snprintf(hex, sizeof hex, "%016llx", (unsigned long long)p.key);
+                Shader::Optimization::g_nvn2_miss_log_this = !only || !strncmp(hex, only, strlen(only));
+                // (RX_VK_ALL_GLOBAL_PROGS=<key prefix>[,...], a test: no access of those programs bound to a descriptor)
+                bool all_global = false;
+                if (const char* ag = getenv("RX_VK_ALL_GLOBAL_PROGS"))
+                    for (const char* q = ag; *q;) {
+                        const char* e = strchr(q, ',');
+                        const size_t len = e ? (size_t)(e - q) : strlen(q);
+                        if (len && !strncmp(hex, q, len)) all_global = true;
+                        q = e ? e + 1 : q + len;
+                    }
+                Shader::Optimization::g_all_global_this = all_global;
+                if (all_global) logf("vk: program %s: every memory access left global (RX_VK_ALL_GLOBAL_PROGS)", hex);
+            }
+            struct ResetTable {
+                ~ResetTable() {
+                    Shader::Optimization::g_nvn2_compute_ssbo_base = 0, Shader::Optimization::g_nvn2_compute_ssbo_count = 16;
+                    Shader::Optimization::g_nvn2_compute_layout_end = 0;
+                    Shader::Optimization::g_all_global_this = false;
+                }
+            } reset_table;
             auto t = translate(env, false);
             questions += env.texture_questions;
             oot_visual(t->program, csc->key);
             Shader::RuntimeInfo rt{};
             dump_ir(p, "compute", t->program);   // (before the SPIR-V: the programs it fails on are the ones to read)
+            if (getenv("RX_VK_IR"))
+                logf("vk: compute %016llx: workgroup %ux%ux%u, shared memory %u bytes, local memory %u", (unsigned long long)p.key,
+                     t->program.workgroup_size[0], t->program.workgroup_size[1], t->program.workgroup_size[2],
+                     t->program.shared_memory_size, t->program.local_memory_size);
             // (hookshot) The movie upscaler's dozen networks, on a card that cannot run them as the console does: their software matrix multiplies
             // took minutes each for AMD's compiler (the black screen with sound, Hookshot issue 26: JaredEzz's analysis) and the movies ran at 10 fps
             // (issues 38, 43). Left out, the last pass becomes a linear upscale of the movie (upscale_stub in vk_draw.cpp): the same picture at 60
             // fps, a little softer. The gameplay TAAU network stays. RX_VK_NETWORK_KEEP=<key prefixes>, "all": every one runs
             if (t->program.info.uses_cooperative_matrix) {
-                static const std::string keep = getenv("RX_VK_NETWORK_KEEP") ? getenv("RX_VK_NETWORK_KEEP") : "fd029a317a9a4b94";
+                static const std::string keep = getenv("RX_VK_NETWORK_KEEP") ? getenv("RX_VK_NETWORK_KEEP") : "fd029a317a9a4b94,9dc98871eb7fc101";   // (amd-fix: 9dc98871 resolves the dynamic-resolution scene to 2048x1152; left out, the 3D picture is black under the HUD)
                 char hex[24];
                 snprintf(hex, sizeof hex, "%016llx", (unsigned long long)p.key);
                 bool kept_one = keep == "all";
@@ -995,6 +1082,12 @@ void translate_into(Program& p, const NvnState& s, const Code* vsc, const Code* 
                     throw std::runtime_error("a network left out on this card");
             }
             const std::vector<uint32_t> spirv = Shader::Backend::SPIRV::EmitSPIRV(profile(), rt, t->program, bindings);
+            // (EvilOOT) RX_VK_DUMP_SPV=<folder>: the SPIR-V of the programs RX_VK_MISS_LOG_PROG names (all: unset), for spirv-val
+            if (const char* dir = getenv("RX_VK_DUMP_SPV"); dir && Shader::Optimization::g_nvn2_miss_log_this) {
+                char path[512];
+                snprintf(path, sizeof path, "%s/%016llx.spv", dir, (unsigned long long)p.key);
+                if (FILE* f = fopen(path, "wb")) fwrite(spirv.data(), 4, spirv.size(), f), fclose(f);
+            }
             if (const char* d = getenv("RX_VK_IR")) {   // (the SPIR-V too, for spirv-val)
                 char name[64];
                 snprintf(name, sizeof name, "spv_%016llx.spv", (unsigned long long)p.key);
@@ -1017,6 +1110,7 @@ void translate_into(Program& p, const NvnState& s, const Code* vsc, const Code* 
             auto vs = translate(vs_env, true);
             questions += vs_env.texture_questions;
             Shader::RuntimeInfo vrt{};
+            if (!vs->program.info.stores[Shader::IR::Attribute::PointSize]) vrt.fixed_state_point_size = 1.0f;
             // (an attribute the draw leaves unset: build_graphics gives it a stream of (0, 0, 0, 1). It took Disabled here, under the
             // same key)
             for (int i = 0; i < 16; i++) vrt.generic_input_types[i] = attribute_type_of(s.vattr[i]);
@@ -1072,6 +1166,7 @@ void translate_into(Program& p, const NvnState& s, const Code* vsc, const Code* 
             if (!st.module) throw Shader::LogicError("vkCreateShaderModule failed");
         if (questions) record_answers(p, s);
         st_translated++;
+        ptr_diag_log(p.key, csc ? "compute" : fsc ? "graphics" : "vertex");
         program_cache_save(p, kept);
     } catch (const std::exception& e) {
         p.failed = true;
@@ -1123,6 +1218,13 @@ int bank_stage(const Code& c) {
 void translate_mesh_into(Program& p, const NvnState& s, const Code* task, const Code& mesh, const Code* prim,
                          const Code* fsc, const uint8_t color_types[8]) {
     const auto t0 = std::chrono::steady_clock::now();
+    ptr_diag_reset();
+    {   // (EvilOOT, RX_VK_MISS_LOG_PROG=<key prefix>: the miss log for that program only)
+        static const char* only = getenv("RX_VK_MISS_LOG_PROG");
+        char hex[24];
+        snprintf(hex, sizeof hex, "%016llx", (unsigned long long)p.key);
+        Shader::Optimization::g_nvn2_miss_log_this = !only || !strncmp(hex, only, strlen(only));
+    }
     try {
         Shader::Backend::Bindings bindings{};
         std::vector<std::vector<uint32_t>> kept;   // (each stage's SPIR-V, for the program cache: mesh programs were never kept,
@@ -1204,6 +1306,7 @@ void translate_mesh_into(Program& p, const NvnState& s, const Code* task, const 
             if (!st.module) throw Shader::LogicError("vkCreateShaderModule failed");
         record_answers(p, s);   // (task questions not counted: kept conservative)
         (void)questions;
+        ptr_diag_log(p.key, task ? "task+mesh" : "mesh");
         program_cache_save(p, kept);
         // (where its stages read their storage buffers: the driver bank layout of NVN2's stages 6 and 7)
         static std::atomic<int> logged_ssbo;

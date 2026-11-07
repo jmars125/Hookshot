@@ -1,7 +1,8 @@
 /* Game controllers through SDL2 (third_party/sdl2/SDL2.dll, zlib license, loaded at run time): DualSense,
    DualShock 4, Switch Pro, Xbox and most other pads, over USB or Bluetooth. XInput alone sees only Xbox-style pads.
 
-   A thread of its own opens every controller SDL knows (and ones plugged in later), polls them every 4 ms and keeps
+   A thread of its own (on Linux the window's, which runs SDL there too) opens every controller SDL knows (and ones
+   plugged in later), polls them every 4 ms and keeps
    the merged state; nn_hid.c ORs it into the input with XInput, keyboard and mouse. Without SDL2.dll nothing
    changes. HOS_NO_SDL=1 leaves SDL out. Buttons map by position, as for XInput: the bottom face button is the
    Switch's B (cross on a DualSense, A on an Xbox pad), the right one A, left Y, top X. */
@@ -59,7 +60,7 @@ enum { AX_LX, AX_LY, AX_RX, AX_RY, AX_LT, AX_RT };
 enum { H_A = 0, H_B, H_X, H_Y, H_LS, H_RS, H_L, H_R, H_ZL, H_ZR, H_PLUS, H_MINUS, H_LEFT, H_UP, H_RIGHT, H_DOWN };
 
 #define MAX_PADS 8
-static struct { void *gc; int32_t id; } pads[MAX_PADS];
+static struct { void *gc; int32_t id; uint16_t rumble_lo, rumble_hi; int64_t rumble_ns; } pads[MAX_PADS];
 static SRWLOCK state_lock = SRWLOCK_INIT;
 static uint64_t state_buttons;
 static int32_t state_stick[4];
@@ -101,9 +102,8 @@ static int32_t stick_value(int16_t v, int flip) {
     return (a > 7849 || a < -7849) ? a : 0;   /* XInput's dead zone, as nn_hid.c uses */
 }
 
-static DWORD WINAPI pad_main(void *arg) {
-    (void)arg;
-    hos_host_thread_register_self("gamepads (SDL)");
+/* SDL's controller support started; 0 when it could not be */
+static int pads_start(void) {
     /* poll in the background, whatever window is in front (nn_hid.c decides when input counts) */
     sdl.SetHint("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "1");
     sdl.SetHint("SDL_JOYSTICK_HIDAPI_PS5_RUMBLE", "1");
@@ -116,10 +116,21 @@ static DWORD WINAPI pad_main(void *arg) {
         return 0;
     }
     hos_log("hid: SDL controller support ready (DualSense, DualShock 4, Switch Pro, Xbox and others)");
-    int64_t next_scan = 0;
-    uint16_t last_lo = 0, last_hi = 0;
-    for (;;) {
-        sdl.Update();
+    return 1;
+}
+
+/* SDL_GameControllerRumble runs only for the duration it is given, then stops, and a repeat of the same numbers was
+   skipped. A rumble the game holds, and one that was already playing when this controller opened, never reached it. */
+static int rumble_due(unsigned lo, unsigned hi, unsigned sent_lo, unsigned sent_hi, long long now, long long sent_ns) {
+    if (lo != sent_lo || hi != sent_hi) return 1;
+    if ((lo || hi) && now - sent_ns >= 500000000LL) return 1;   /* (half of the 1 s effect, so it does not lapse) */
+    return 0;
+}
+
+/* one poll: controllers plugged in or gone (each second), then every open one's buttons, sticks and rumble */
+static void pads_poll(void) {
+    static int64_t next_scan = 0;
+    sdl.Update();
         const int64_t now = hos_now_ns();
         if (now >= next_scan) {   /* new controllers (and ones that went away) */
             next_scan = now + 1000000000LL;
@@ -128,6 +139,8 @@ static DWORD WINAPI pad_main(void *arg) {
                     hos_log("hid: controller \"%s\" disconnected (SDL)", sdl.Name(pads[i].gc));
                     sdl.Close(pads[i].gc);
                     pads[i].gc = NULL;
+                    pads[i].rumble_lo = pads[i].rumble_hi = 0;
+                    pads[i].rumble_ns = 0;
                 }
             const int nj = sdl.NumJoysticks();
             for (int j = 0; j < nj; j++) {
@@ -143,6 +156,8 @@ static DWORD WINAPI pad_main(void *arg) {
                 if (!gc) continue;
                 pads[slot].gc = gc;
                 pads[slot].id = sdl.JoystickInstanceID(sdl.GetJoystick(gc));
+                pads[slot].rumble_lo = pads[slot].rumble_hi = 0;
+                pads[slot].rumble_ns = 0;
                 hos_log("hid: controller \"%s\" connected (SDL)", sdl.Name(gc));
             }
         }
@@ -166,18 +181,41 @@ static DWORD WINAPI pad_main(void *arg) {
                                   stick_value(sdl.GetAxis(gc, AX_RX), 0), stick_value(sdl.GetAxis(gc, AX_RY), 1)};
             for (int k = 0; k < 4; k++)
                 if ((v[k] < 0 ? -v[k] : v[k]) > (s[k] < 0 ? -s[k] : s[k])) s[k] = v[k];
-            if (lo != last_lo || hi != last_hi) sdl.Rumble(gc, lo, hi, lo || hi ? 1000 : 0);
+            if (rumble_due(lo, hi, pads[i].rumble_lo, pads[i].rumble_hi, now, pads[i].rumble_ns)) {
+                sdl.Rumble(gc, lo, hi, lo || hi ? 1000 : 0);
+                pads[i].rumble_lo = lo;
+                pads[i].rumble_hi = hi;
+                pads[i].rumble_ns = now;
+            }
         }
-        last_lo = lo;
-        last_hi = hi;
         AcquireSRWLockExclusive(&state_lock);
         state_buttons = b;
         memcpy(state_stick, s, sizeof s);
         state_count = count;
         ReleaseSRWLockExclusive(&state_lock);
+}
+
+static DWORD WINAPI pad_main(void *arg) {
+    (void)arg;
+    hos_host_thread_register_self("gamepads (SDL)");
+    if (!pads_start()) return 0;
+    for (;;) {
+        pads_poll();
         Sleep(4);
     }
 }
+#ifndef _WIN32
+int hos_display_owns_sdl(void);   /* host/posix/display_sdl.c */
+/* (linux) SDL also runs the window (host/posix/display_sdl.c), and its event queue is not for two threads. Polled
+   from the window's thread, between its events. Two threads pumping it corrupted the heap once a controller was
+   attached. */
+static volatile LONG pads_loaded;
+void hos_sdl_pads_pump(void) {
+    static int state;   /* 0 not started, 1 polling, -1 not available */
+    if (!state && pads_loaded) state = pads_start() ? 1 : -1;
+    if (state > 0) pads_poll();
+}
+#endif
 
 /* The controllers' merged state (nn_hid.c): ORs the buttons in, keeps the larger stick deflections; returns how many
    controllers SDL has open. Starts the SDL thread on the first call. */
@@ -189,7 +227,14 @@ int hos_sdl_pads(uint64_t *buttons, int32_t stick[4]) {
             hos_log("hid: SDL2.dll not found next to the exe: only XInput controllers (Xbox pads) work");
             return 0;
         }
+#ifdef _WIN32
         CreateThread(NULL, 0, pad_main, NULL, 0, NULL);
+#else
+        if (hos_display_owns_sdl())
+            InterlockedExchange(&pads_loaded, 1);   /* (the window's thread polls: hos_sdl_pads_pump) */
+        else
+            CreateThread(NULL, 0, pad_main, NULL, 0, NULL);   /* (no window: nothing else pumps SDL) */
+#endif
     }
     AcquireSRWLockShared(&state_lock);
     const int n = state_count;

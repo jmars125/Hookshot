@@ -15,13 +15,12 @@
     <ApplicationIcon Condition="Exists('..\..\work\hookshot.ico')">..\..\work\hookshot.ico</ApplicationIcon>
   </PropertyGroup>
 
-  <!-- One exe that needs nothing installed: dotnet publish -c Release -->
+  <!-- Needs nothing installed: dotnet publish -c Release. A folder (the app and .NET's own signed files), not one compressed exe:
+       antivirus programs took the self-extracting single file for a trojan and removed it -->
   <PropertyGroup Condition="'$(Configuration)' == 'Release'">
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <SelfContained>true</SelfContained>
-    <PublishSingleFile>true</PublishSingleFile>
-    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
-    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <PublishSingleFile>false</PublishSingleFile>
     <DebugType>none</DebugType>
   </PropertyGroup>
 

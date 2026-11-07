@@ -229,7 +229,8 @@ bool create_device() {
     vkGetPhysicalDeviceFeatures2(dev.physical, &f);
     dev.view_2d_of_3d = dev.view_2d_of_3d && v2d3d.sampler2DViewOf3D;
     coop.cooperativeMatrixRobustBufferAccess = VK_FALSE;
-    dev.coop_matrix = dev.coop_matrix && coop.cooperativeMatrix;
+    dev.coop_matrix = dev.coop_matrix && coop.cooperativeMatrix &&
+                      f12.vulkanMemoryModel && f12.vulkanMemoryModelDeviceScope;
     // (bounds-checked buffer access: an out-of-range access dropped instead of faulting the device. On by default now: the GPU
     // culling pass 53caac5f faulted the device while a save loaded, about one start in three, and the scene's lighting read garbage
     // for single frames (the black flashes); with it, neither in A/B runs at the same GPU time. Lichii's OoT branch keeps it on too.

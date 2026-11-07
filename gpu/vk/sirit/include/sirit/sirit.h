@@ -67,6 +67,9 @@ public:
     /// Sets module memory model.
     void SetMemoryModel(spv::AddressingModel addressing_model_, spv::MemoryModel memory_model_);
 
+    /// Sets the memory model while preserving the module's addressing model.
+    void SetMemoryModel(spv::MemoryModel memory_model_);
+
     /// Adds an entry point.
     void AddEntryPoint(spv::ExecutionModel execution_model, Id entry_point, std::string_view name,
                        std::span<const Id> interfaces = {});

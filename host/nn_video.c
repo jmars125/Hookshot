@@ -40,10 +40,14 @@ typedef struct {
     int w, h, format, count;
     uint8_t *rgba, *nv12;
     uint64_t mem, mem_size;   /* (hookshot) the pool's guest memory: where the hardware decoder writes its pictures */
+    int rgba_stale;           /* (hookshot) its NV12 picture not converted to RGBA yet (pool_rgba, when it is asked for) */
+    int read_by_api;          /* (hookshot) read through ReadDecoderOutputImage*: no copy into its memory (dec_acquire) */
+    struct SwsContext *sws;   /* (that conversion's) */
 } Pool;
 /* the preference MakeDecodeImagePreference returns (the caller's buffer is larger: only these fields are ours) */
 typedef struct { uint32_t magic; uint16_t w, h; uint32_t format, tiling; } Pref;
 
+/* (rgba NULL: a picture decoded as NV12 is kept as that alone; its pool makes the RGBA if a reader wants it) */
 typedef struct { uint8_t *rgba, *nv12; int w, h; int64_t pts; int last; } Picture;
 /* a submission waiting to be decoded (pkt NULL: the stream's end) */
 typedef struct Pending { AVPacket *pkt; struct Pending *next; } Pending;
@@ -126,12 +130,31 @@ HLE(_ZN2nn5codec26InitializeDecoderImagePoolEPNS0_25VideoDecoderImagePoolTypeEPv
 }
 HLE(_ZN2nn5codec24FinalizeDecoderImagePoolEPNS0_25VideoDecoderImagePoolTypeE) {
     Pool *o = (Pool *)host_of(ARG(0), POOL_MAGIC);
+    if (o && o->sws) sws_freeContext(o->sws);
     if (o) free(o->rgba), free(o->nv12), free(o);
     set_host(ARG(0), POOL_MAGIC, NULL);
 }
+/* (hookshot) the pool's picture as RGBA, from its NV12, if it was not made yet. Each 1080p frame of OoT's movies was
+   converted on the movie thread, in plain C, though OoT reads only the NV12: nearly half that thread's time, which put the
+   picture behind the sound */
+static SRWLOCK pool_rgba_lock = SRWLOCK_INIT;
+static void pool_rgba(Pool *o) {
+    AcquireSRWLockExclusive(&pool_rgba_lock);
+    if (o->rgba_stale) {
+        if (!o->sws)
+            o->sws = sws_getContext(o->w, o->h, AV_PIX_FMT_NV12, o->w, o->h, AV_PIX_FMT_RGBA, SWS_BILINEAR, NULL, NULL, NULL);
+        const uint8_t *src[4] = {o->nv12, o->nv12 + (size_t)o->w * o->h, NULL, NULL};
+        const int src_stride[4] = {o->w, o->w, 0, 0};
+        uint8_t *dst[4] = {o->rgba, NULL, NULL, NULL};
+        int dst_stride[4] = {o->w * 4, 0, 0, 0};
+        if (o->sws) sws_scale(o->sws, src, src_stride, 0, o->h, dst, dst_stride);
+        o->rgba_stale = 0;
+    }
+    ReleaseSRWLockExclusive(&pool_rgba_lock);
+}
 /* ReadDecoderOutputImageRgba(pool, u32 index, u16 x, u16 y, u16 w, u16 h, void* dst, size_t stride, size_t size) */
 HLE(_ZN2nn5codec26ReadDecoderOutputImageRgbaEPKNS0_25VideoDecoderImagePoolTypeEjttttPvmm) {
-    const Pool *o = (const Pool *)host_of(ARG(0), POOL_MAGIC);
+    Pool *o = (Pool *)host_of(ARG(0), POOL_MAGIC);
     const uint32_t i = (uint32_t)ARG(1), x = (uint16_t)ARG(2), y = (uint16_t)ARG(3), w = (uint16_t)ARG(4), h = (uint16_t)ARG(5);
     const uint64_t dst = ARG(6), stride = ARG(7) ? ARG(7) : (uint64_t)w * 4;
     {   /* (hookshot, HOS_VIDEO_LOG) the first reads, with where they go */
@@ -141,6 +164,8 @@ HLE(_ZN2nn5codec26ReadDecoderOutputImageRgbaEPKNS0_25VideoDecoderImagePoolTypeEj
                     o ? "ok" : "unknown", i, x, y, w, h, (unsigned long long)dst, (unsigned long long)stride);
     }
     if (!o || i >= (uint32_t)o->count || !dst || x >= (uint32_t)o->w) { RET(0); return; }
+    o->read_by_api = 1;
+    if (i == 0 && o->rgba_stale) pool_rgba(o);
     const uint8_t *src = o->rgba + (size_t)i * o->w * o->h * 4;
     const uint32_t cw = x + w <= (uint32_t)o->w ? w : o->w - x;
     for (uint32_t r = 0; r < h && y + r < (uint32_t)o->h; r++)
@@ -151,7 +176,7 @@ HLE(_ZN2nn5codec26ReadDecoderOutputImageRgbaEPKNS0_25VideoDecoderImagePoolTypeEj
 /* ReadDecoderOutputImageNv12(pool, u32 index, u16 x, u16 y, u16 w, u16 h, void* y_dst, size_t y_stride, [stack:]
    size_t y_size, void* uv_dst, size_t uv_stride, size_t uv_size) */
 HLE(_ZN2nn5codec26ReadDecoderOutputImageNv12EPKNS0_25VideoDecoderImagePoolTypeEjttttPvmmS4_mm) {
-    const Pool *o = (const Pool *)host_of(ARG(0), POOL_MAGIC);
+    Pool *o = (Pool *)host_of(ARG(0), POOL_MAGIC);
     const uint32_t i = (uint32_t)ARG(1), x = (uint16_t)ARG(2), y = (uint16_t)ARG(3), w = (uint16_t)ARG(4), h = (uint16_t)ARG(5);
     const uint64_t ydst = ARG(6), ystride = ARG(7) ? ARG(7) : w;
     const uint64_t uvdst = G64(c->x[31] + 8), uvstride = G64(c->x[31] + 16) ? G64(c->x[31] + 16) : w;
@@ -169,6 +194,7 @@ HLE(_ZN2nn5codec26ReadDecoderOutputImageNv12EPKNS0_25VideoDecoderImagePoolTypeEj
         }
     }
     if (!o || i >= (uint32_t)o->count || x >= (uint32_t)o->w) { RET(0); return; }
+    o->read_by_api = 1;
     const uint8_t *yp = o->nv12 + (size_t)i * o->w * o->h * 3 / 2, *uvp = yp + (size_t)o->w * o->h;
     const uint32_t cw = x + w <= (uint32_t)o->w ? w : o->w - x;
     for (uint32_t r = 0; ydst && r < h && y + r < (uint32_t)o->h; r++)
@@ -238,19 +264,20 @@ static void dec_finalize(Ctx *c) {
 static void queue_frame(Dec *d, const AVFrame *f) {
     const int w = f->width, h = f->height;
     if (w <= 0 || h <= 0) return;
-    if (!d->sws || d->sws_w != w || d->sws_h != h || d->sws_fmt != f->format) {
+    if (f->format != AV_PIX_FMT_NV12 && (!d->sws || d->sws_w != w || d->sws_h != h || d->sws_fmt != f->format)) {
         if (d->sws) sws_freeContext(d->sws);
         d->sws = sws_getContext(w, h, (enum AVPixelFormat)f->format, w, h, AV_PIX_FMT_RGBA, SWS_BILINEAR, NULL, NULL, NULL);
         d->sws_w = w, d->sws_h = h, d->sws_fmt = f->format;
     }
     Picture p = {0};
     p.w = w, p.h = h, p.pts = f->pts;
-    p.rgba = (uint8_t *)malloc((size_t)w * h * 4);
-    p.nv12 = (uint8_t *)calloc(1, (size_t)w * h * 3 / 2);
+    const int nv12 = f->format == AV_PIX_FMT_NV12;   /* (hookshot: Media Foundation's pictures, kept as NV12 alone) */
+    p.rgba = nv12 ? NULL : (uint8_t *)malloc((size_t)w * h * 4);
+    p.nv12 = nv12 ? (uint8_t *)malloc((size_t)w * h * 3 / 2) : (uint8_t *)calloc(1, (size_t)w * h * 3 / 2);
     uint8_t *dst[4] = {p.rgba, NULL, NULL, NULL};
     int dst_stride[4] = {w * 4, 0, 0, 0};
-    if (d->sws) sws_scale(d->sws, (const uint8_t *const *)f->data, f->linesize, 0, h, dst, dst_stride);
-    if (f->format == AV_PIX_FMT_NV12) {   /* (hookshot: Media Foundation's pictures) */
+    if (d->sws && p.rgba) sws_scale(d->sws, (const uint8_t *const *)f->data, f->linesize, 0, h, dst, dst_stride);
+    if (nv12) {
         for (int y = 0; y < h; y++) memcpy(p.nv12 + (size_t)y * w, f->data[0] + (size_t)y * f->linesize[0], (size_t)w);
         for (int y = 0; y < h / 2; y++)
             memcpy(p.nv12 + (size_t)w * h + (size_t)y * w, f->data[1] + (size_t)y * f->linesize[1], (size_t)w);
@@ -445,20 +472,23 @@ static void dec_acquire(Ctx *c) {
     /* (the picture at the pool's size: rows and columns past either are left out) */
     const int w = p->w < o->w ? p->w : o->w, h = p->h < o->h ? p->h : o->h;
     for (int y = 0; y < h; y++) {
-        memcpy(o->rgba + (size_t)y * o->w * 4, p->rgba + (size_t)y * p->w * 4, (size_t)w * 4);
+        if (p->rgba) memcpy(o->rgba + (size_t)y * o->w * 4, p->rgba + (size_t)y * p->w * 4, (size_t)w * 4);
         memcpy(o->nv12 + (size_t)y * o->w, p->nv12 + (size_t)y * p->w, (size_t)w);
     }
     for (int y = 0; y < h / 2; y++)
         memcpy(o->nv12 + (size_t)o->w * o->h + (size_t)y * o->w, p->nv12 + (size_t)p->w * p->h + (size_t)y * p->w,
                (size_t)w);
-    /* (hookshot) and into the pool's guest memory, as the hardware decoder leaves it: OoT copies it from there
-       straight into its luma and chroma textures (NV12, pitch = width, chroma right after the luma rows; RGBA when the
-       memory has room for it and the pool's format is not NV12's) */
-    if (o->mem && o->mem_size) {
+    o->rgba_stale = !p->rgba;
+    /* (hookshot) and into the pool's guest memory, as the hardware decoder leaves it (NV12, pitch = width, chroma right
+       after the luma rows; RGBA when the memory has room for it and the pool's format is not NV12's). Not once the
+       game reads the pool through ReadDecoderOutputImageNv12 / Rgba, as OoT's movie library does: its pools are
+       format 3, so each 1080p picture was made RGBA and copied there for nothing (the movie is the same without it) */
+    if (o->mem && o->mem_size && !o->read_by_api) {
         const size_t nv12_size = (size_t)o->w * o->h * 3 / 2, rgba_size = (size_t)o->w * o->h * 4;
         const int rgba = o->format != 0 && o->mem_size >= rgba_size;   /* (VideoDecoderOutputFormat 0: NV12) */
         const size_t need = rgba ? rgba_size : nv12_size;
         if (o->mem_size >= need) {
+            if (rgba && o->rgba_stale) pool_rgba(o);
             memcpy(GP(o->mem), rgba ? o->rgba : o->nv12, need);
             HOS_WRITTEN(GP(o->mem), need);
         }
@@ -480,7 +510,7 @@ static void dec_acquire(Ctx *c) {
         for (int y = 0; y < p->h; y += 37)
             for (int x = 0; x < p->w; x += 41, n++) {
                 sum += p->nv12[(size_t)y * p->w + x];
-                for (int k = 0; k < 3; k++) rgb[k] += p->rgba[((size_t)y * p->w + x) * 4 + k];
+                for (int k = 0; k < 3 && p->rgba; k++) rgb[k] += p->rgba[((size_t)y * p->w + x) * 4 + k];
             }
         hos_log("video: acquire %lld: %dx%d pts %lld%s into buffer %d (mean Y %llu, RGB %llu %llu %llu)",
                 (long long)d->acquires, p->w, p->h, (long long)p->pts, p->last ? " (last)" : "", slot,

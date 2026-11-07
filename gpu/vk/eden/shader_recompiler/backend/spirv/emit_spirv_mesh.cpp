@@ -187,6 +187,18 @@ Id EmitIsbeRead(EmitContext& ctx, Id address) {
     const Id workgroup{
         ctx.OpCompositeExtract(ctx.U32[1], ctx.OpLoad(ctx.U32[3], ctx.workgroup_id), 0U)};
     if (ctx.stage == Stage::Task) {
+        if (ctx.wants_mesh_first && Sirit::ValidId(ctx.rescaling_push_constants)) {
+            // (hookshot) + the draw's first workgroup: NVN draws [first, first + count). Without it every draw began at 0: the
+            // foliage's draws (first up to ~1900) drew the first records again and again, and the forest had no leaves
+            const Id table{ctx.OpLoad(ctx.U64, ctx.OpAccessChain(ctx.TypePointer(spv::StorageClass::PushConstant, ctx.U64),
+                                                                  ctx.rescaling_push_constants, ctx.Const(ctx.mesh_first_member_index)))};
+            const Id draw{ctx.OpLoad(ctx.U32[1], ctx.draw_index)};
+            const Id at{ctx.OpIAdd(ctx.U64, table, ctx.OpUConvert(ctx.U64, ctx.OpIMul(ctx.U32[1], draw, ctx.Const(16U))))};
+            const Id member{ctx.OpAccessChain(ctx.mesh_first_member_pointer, ctx.OpConvertUToPtr(ctx.mesh_first_block_pointer, at),
+                                              ctx.Const(0U))};
+            const Id first{ctx.OpLoad(ctx.U32[1], member, spv::MemoryAccessMask::Aligned, 4U)};
+            return ctx.OpIAdd(ctx.U32[1], workgroup, first);
+        }
         return workgroup; // the input region holds the workgroup index (VERTEX_ID)
     }
     const Id index{ctx.OpShiftRightLogical(ctx.U32[1], address, ctx.Const(2U))};

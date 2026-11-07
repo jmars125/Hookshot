@@ -27,6 +27,7 @@
     X(vkGetPhysicalDeviceQueueFamilyProperties)                                                                       \
     X(vkGetPhysicalDeviceMemoryProperties)                                                                            \
     X(vkGetPhysicalDeviceFormatProperties)                                                                            \
+    X(vkGetPhysicalDeviceImageFormatProperties)                                                                            \
     X(vkGetPhysicalDeviceSparseImageFormatProperties)                                                                 \
     X(vkEnumerateDeviceExtensionProperties)                                                                           \
     X(vkCreateDevice)                                                                                                 \

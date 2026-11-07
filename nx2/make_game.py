@@ -197,12 +197,22 @@ def compile_test(toolchain):
 
 
 def check_cpp_library(toolchain):
-    """The renderer needs C++20's formatting from Visual Studio's library: said now, not after 300 failed files (issue 39)"""
+    """Check the renderer's C++20 library features before the long build (issues 39 and 100)."""
     with tempfile.TemporaryDirectory() as d:
         src = os.path.join(d, "t.cpp")
         with open(src, "w") as f:
-            f.write(chr(10).join(("#include <format>", "#include <string>",
-                                  "std::string t(int v) { return std::vformat(\"{}\", std::make_format_args(v)); }", "")))
+            # Projected find: frontend/maxwell/structured_control_flow.cpp; predicate find and
+            # comparator sort: ir_opt/texture_pass.cpp (under gpu/vk/eden/shader_recompiler).
+            f.write(chr(10).join(("#include <algorithm>", "#include <format>", "#include <string>", "#include <vector>",
+                                  "std::string t(int v) { return std::vformat(\"{}\", std::make_format_args(v)); }",
+                                  "namespace { struct Entry { int value; }; }",
+                                  "bool ranges_test() {",
+                                  "    std::vector<Entry> entries{{2}, {1}};",
+                                  "    const auto found = std::ranges::find(entries, 1, &Entry::value);",
+                                  "    const auto matching = std::ranges::find_if(entries, [](const Entry& e) { return e.value == 2; });",
+                                  "    std::ranges::sort(entries, [](const Entry& a, const Entry& b) { return a.value < b.value; });",
+                                  "    return found != entries.end() && matching != entries.end();",
+                                  "}", "")))
         r = subprocess.run([toolchain.need(toolchain.find("clang++"))] + toolchain.native_target() + ["-std=c++20", "-c", src, "-o", os.path.join(d, "t.o")],
                            capture_output=True, text=True, encoding="utf-8", errors="replace")
     if r.returncode:

@@ -805,10 +805,7 @@ void replay(VkCommandBuffer& cmd, NvnState& s, const uint8_t* p, const uint8_t* 
                 // (DrawMeshTasks(first, count): the count of task workgroups, as Eden draws NVN2's mesh draws; a
                 // first task other than 0 has no Vulkan counterpart)
                 da.groups[0] = d.y, da.groups[1] = 1, da.groups[2] = 1;
-                if (d.kind == 0 && d.x) {
-                    static int logged_first;
-                    if (logged_first++ < 4) logf("vk: mesh draw from task %d: drawn from 0", d.x);
-                }
+                if (d.kind == 0) da.first_task = d.x;   // (hookshot: the task programs add it, vk_draw.cpp's mesh_args)
                 da.indirect = d.indirect, da.count_addr = d.count_addr, da.max = d.max, da.stride = d.stride;
                 draw(cmd, s, da);
             }

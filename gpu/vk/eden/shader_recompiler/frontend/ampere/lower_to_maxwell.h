@@ -174,9 +174,11 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
                 const u32 bit = bits[f], reg = insn.Bits(bit, 8);
                 // (ISBEWR's data too: not counted, a mesh program's output held in a high GPR was read from the plain register,
                 // never written, while what computes it wrote the extended one: vertices past the first 32 came out undefined.
-                // SUST and SURED's data as well, the same field)
+                // SUST and SURED's data as well, the same field. (amd-fix, Lichii #149) RED's too: a reduction's data in a high GPR
+                // read the plain register, never written)
                 const bool register_field = bit != 32 || insn.Bits(9, 3) == 1 || opcode == 0xb60 || opcode == 0xb66 ||
-                                            opcode == 0x927 || opcode == 0xb9b || opcode == 0x59f || opcode == 0x983 || (renameable & (1U << f));
+                                            opcode == 0x927 || opcode == 0xb9b || opcode == 0x59f || opcode == 0x983 ||
+                                            opcode == 0x98e || (renameable & (1U << f));
                 if (reg >= 255 || reg + 3 < reserved_base) continue;   // (a quad below may reach up)
                 if (register_field && reg >= reserved_base) any_high = true;
             }

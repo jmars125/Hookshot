@@ -324,7 +324,13 @@ HLE(_ZN2nn7account26GetNetworkServiceAccountIdEPNS0_23NetworkServiceAccountIdERK
 }
 /* nn::oe::GetCurrentGraphicsScale() -> float (docked/handheld render scale): 1.0 */
 HLE(_ZN2nn2oe23GetCurrentGraphicsScaleEv) {
-    const float one = 1.0f;
+    /* (hookshot) HOS_GRAPHICS_SCALE=<f>: another scale, a test of whether the game sizes its picture by it (4K, issue 68) */
+    static float scale = 0;
+    static volatile LONG told;
+    if (scale == 0) scale = getenv("HOS_GRAPHICS_SCALE") ? (float)atof(getenv("HOS_GRAPHICS_SCALE")) : 1.0f;
+    if (scale <= 0) scale = 1.0f;
+    if (InterlockedIncrement(&told) <= 3) hos_log("oe: GetCurrentGraphicsScale -> %.2f", scale);
+    const float one = scale;
     uint32_t bits;
     memcpy(&bits, &one, 4);
     c->vreg[0][0] = bits, c->vreg[0][1] = 0;

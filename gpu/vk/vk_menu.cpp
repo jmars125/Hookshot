@@ -23,6 +23,7 @@ struct Row {
     int* value;
     int lo, hi, step;
     const char* (*text)(int v);
+    const char* help;   // (shown under the list while the row is selected)
 };
 const char* tx_framegen(int v) {
     static const char* t[] = {"Off", "", "2x", "3x", "4x"};
@@ -47,18 +48,32 @@ const char* tx_handheld(int v) { return v ? "On (restart)" : "Off (restart)"; }
 const char* tx_ultrawide(int v) { return v ? "Monitor's shape (restart)" : "16:9 (restart)"; }
 
 Row rows[] = {
-    {"Fullscreen", &opts.fullscreen, 0, 1, 1, tx_onoff},
-    {"Frame generation", &opts.framegen, 0, 4, 1, tx_framegen},
-    {"Frame pacing", &opts.pace, 0, 1, 1, tx_onoff},
-    {"Resolution", &opts.resolution, 0, 4, 1, tx_resolution},
-    {"Upscaling", &opts.upscale, 0, 2, 1, tx_upscale},
-    {"Sharpness", &opts.sharpness, 0, 100, 10, tx_percent},
-    {"Game speed", &opts.realtime, 0, 1, 1, tx_speed},
-    {"Handheld profile", &opts.handheld, 0, 1, 1, tx_handheld},
-    {"Ultrawide", &opts.ultrawide, 0, 1, 1, tx_ultrawide},
-    {"FPS counter", &opts.show_fps, 0, 1, 1, tx_onoff},
+    {"Fullscreen", &opts.fullscreen, 0, 1, 1, tx_onoff,
+     "Fills the whole screen with the game, without the window's border. The same as F11."},
+    {"Frame generation", &opts.framegen, 0, 4, 1, tx_framegen,
+     "Makes extra frames between the game's own, for smoother motion. Adds a little input delay, and fast motion or camera cuts "
+     "can show artifacts."},
+    {"Frame pacing", &opts.pace, 0, 1, 1, tx_onoff,
+     "Shows each frame at an even interval instead of as soon as it is ready. Less stutter, at up to one frame of delay."},
+    {"Resolution", &opts.resolution, 0, 4, 1, tx_resolution,
+     "How sharp the 3D is drawn. Auto lets the game lower it when the GPU is busy. A fixed percentage stays steady: lower is "
+     "faster."},
+    {"Upscaling", &opts.upscale, 0, 2, 1, tx_upscale,
+     "The filter that scales the picture to your window. Off is the plain copy. Catmull-Rom is sharper, Lanczos sharper still."},
+    {"Sharpness", &opts.sharpness, 0, 100, 10, tx_percent,
+     "Sharpens the picture as it goes to the window, with or without an upscaling filter. Too much shows halos around edges."},
+    {"Game speed", &opts.realtime, 0, 1, 1, tx_speed,
+     "Per frame: the game slows down whenever it runs below 60 fps. Real time: it keeps normal speed down to 15 fps by taking "
+     "longer steps."},
+    {"Handheld profile", &opts.handheld, 0, 1, 1, tx_handheld,
+     "Runs the game as if the console were undocked: lower resolutions, lighter on the GPU. Applies after a restart."},
+    {"Ultrawide", &opts.ultrawide, 0, 1, 1, tx_ultrawide,
+     "Monitor's shape widens the camera to fill a screen wider than 16:9. The HUD is still stretched. Applies after a restart."},
+    {"FPS counter", &opts.show_fps, 0, 1, 1, tx_onoff,
+     "Shows frames per second in the top right corner. With frame generation on, it also shows the game's own rate."},
 };
 constexpr int kRows = sizeof rows / sizeof rows[0];
+constexpr int kMenuWidth = 360;   // (at a scale of 1: 720 lines)
 
 std::atomic<bool> open_now{false};
 int selected = 0;
@@ -149,6 +164,30 @@ HFONT font(int px, int weight) {
     return CreateFontA(-px, 0, 0, 0, weight, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                        DEFAULT_PITCH, "Segoe UI");
 }
+int help_px = 0;   // (the help text's height: measure_help)
+/// The help text word-wrapped to width, a TextOutA a line (the POSIX GDI stand-in has no DrawTextA), drawn at (x, y)
+/// when draw: its height in pixels either way
+int wrap_help(HDC dc, const char* text, int width, int x, int y, bool draw) {
+    SIZE sz{};
+    GetTextExtentPoint32A(dc, "Ag", 2, &sz);
+    const int line_h = (int)sz.cy;
+    int lines = 0;
+    for (const char* p = text; *p;) {
+        int n = 0;   // (the most whole words that fit; one word at least, however long)
+        for (int end = 0;; end++) {
+            while (p[end] && p[end] != ' ') end++;
+            GetTextExtentPoint32A(dc, p, end, &sz);
+            if (n && sz.cx > width) break;
+            n = end;
+            if (!p[end]) break;
+        }
+        if (draw) TextOutA(dc, x, y + lines * line_h, p, n);
+        lines++;
+        p += n;
+        while (*p == ' ') p++;
+    }
+    return lines * line_h;
+}
 void fill(HDC dc, int x, int y, int w, int h, COLORREF c) {
     RECT r{x, y, x + w, y + h};
     HBRUSH b = CreateSolidBrush(c);
@@ -176,12 +215,20 @@ void paint_menu(HDC dc, uint32_t w, uint32_t h, int s) {
         GetTextExtentPoint32A(dc, v, (int)strlen(v), &sz);
         TextOutA(dc, (int)w - 16 * s - sz.cx, y + 4 * s, v, (int)strlen(v));
     }
+    const int help_top = top + kRows * rh + 8 * s;
+    fill(dc, 16 * s, help_top - 4 * s, (int)w - 32 * s, std::max(1, s), RGB(52, 64, 56));
+    HFONT help = font(14 * s, FW_NORMAL);
+    SelectObject(dc, help);
+    SetTextColor(dc, RGB(176, 186, 180));
+    wrap_help(dc, rows[selected].help, (int)w - 32 * s, 16 * s, help_top + 4 * s, true);
+    SelectObject(dc, body);
     SetTextColor(dc, RGB(140, 150, 144));
     const char* hint = "Arrows change   Insert or F1 closes";
-    TextOutA(dc, 16 * s, top + kRows * rh + 6 * s, hint, (int)strlen(hint));
+    TextOutA(dc, 16 * s, help_top + 4 * s + help_px + 10 * s, hint, (int)strlen(hint));
     SelectObject(dc, old);
     DeleteObject(title);
     DeleteObject(body);
+    DeleteObject(help);
 }
 char fps_text[48] = "";
 char fps_sub[32] = "";
@@ -218,8 +265,23 @@ void paint_fps(HDC dc, uint32_t w, uint32_t h, int s) {
     DeleteObject(label);
     DeleteObject(big);
 }
+/// The tallest help text at scale s, in pixels: the menu keeps that height whichever row is selected
+int measure_help(int s) {
+    HDC dc = CreateCompatibleDC(nullptr);
+    HFONT f = font(14 * s, FW_NORMAL);
+    HGDIOBJ old = SelectObject(dc, f);
+    int most = 0;
+    for (const Row& r : rows) most = std::max(most, wrap_help(dc, r.help, (kMenuWidth - 32) * s, 0, 0, false));
+    SelectObject(dc, old);
+    DeleteObject(f);
+    DeleteDC(dc);
+    return most;
+}
 void redraw_menu(int s) {
-    gdi_draw(menu_bmp, 360u * s, (uint32_t)((44 + kRows * 28 + 34) * s), paint_menu, s);
+    static int measured_at = 0;
+    if (measured_at != s) help_px = measure_help(s), measured_at = s;
+    // (title and rows, the rule and the help text, the hint line)
+    gdi_draw(menu_bmp, (uint32_t)(kMenuWidth * s), (uint32_t)((44 + kRows * 28 + 12 + 10 + 30) * s + help_px), paint_menu, s);
 }
 
 std::atomic<int64_t> game_frames{0}, shown_frames{0};

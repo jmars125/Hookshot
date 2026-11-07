@@ -71,6 +71,9 @@ Row rows[] = {
      "Monitor's shape widens the camera to fill a screen wider than 16:9. The HUD is still stretched. Applies after a restart."},
     {"FPS counter", &opts.show_fps, 0, 1, 1, tx_onoff,
      "Shows frames per second in the top right corner. With frame generation on, it also shows the game's own rate."},
+    {"Controller in background", &opts.pad_background, 0, 1, 1, tx_onoff,
+     "On: the controller keeps playing the game while another window has the focus, for streaming or playing beside other "
+     "apps. The keyboard and mouse still need the game's window."},
 };
 constexpr int kRows = sizeof rows / sizeof rows[0];
 constexpr int kMenuWidth = 360;   // (at a scale of 1: 720 lines)

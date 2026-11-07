@@ -1088,7 +1088,11 @@ thread_local BankCache bank_cache[2][kNvnStages];   // [c0 or c2][NVN stage]: th
 VkDescriptorBufferInfo uniform_range(const NvnState& s, const Stage& st, uint32_t index) {
     VkDescriptorBufferInfo bi{VK_NULL_HANDLE, 0, VK_WHOLE_SIZE};
     const uint64_t align = std::max<uint64_t>(dev.props.limits.minUniformBufferOffsetAlignment, 16);
-    const uint32_t used = index < Shader::Info::MAX_CBUFS ? st.info.constant_buffer_used_sizes[index] : 0;
+    uint32_t used = index < Shader::Info::MAX_CBUFS ? st.info.constant_buffer_used_sizes[index] : 0;
+    // Global fallbacks read descriptor words added after the IR's constant-bank usage was collected.
+    if (st.info.uses_global_memory)
+        for (const auto& d : st.info.storage_buffers_descriptors)
+            if (d.cbuf_index == index) used = std::max(used, d.cbuf_offset + d.count * 16u);
     if (index == 0 || index == 2) {   // the driver's banks: only what the program reads of them
         const uint32_t n = std::clamp<uint32_t>((used + 15) & ~15u, 16, 0xA00);
         BankCache& c = bank_cache[index == 2][std::clamp(st.nvn_stage, 0, kNvnStages - 1)];

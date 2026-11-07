@@ -761,11 +761,67 @@ VkPipeline gpl_link(const Program& p, const NvnState& s, const Targets& at, VkPr
 }
 
 /// The pipeline entry of a draw (a new one is queued for a worker; RX_VK_SYNC_PIPELINES=1 builds it here)
+/// What a graphics pipeline was built from, so the next draw of the same material does not hash it again
+bool pipe_same(uint64_t prog, uint64_t variant, int topo, uint32_t samples, int n, uint32_t depth, const uint32_t* formats,
+               int nvattr, const uint32_t* vattr, const uint32_t* div, uint32_t blend_en, const uint64_t* blend,
+               uint32_t chmask, uint32_t poly, uint32_t clamp, uint32_t a2c, uint64_t cprog, uint64_t cvariant, int ctopo,
+               uint32_t csamples, int cn, uint32_t cdepth, const uint32_t* cformats, int cnvattr, const uint32_t* cvattr,
+               const uint32_t* cdiv, uint32_t cblend_en, const uint64_t* cblend, uint32_t cchmask, uint32_t cpoly,
+               uint32_t cclamp, uint32_t ca2c) {
+    if (prog != cprog || variant != cvariant || topo != ctopo || samples != csamples || n != cn || depth != cdepth ||
+        nvattr != cnvattr || blend_en != cblend_en || chmask != cchmask || poly != cpoly || clamp != cclamp || a2c != ca2c)
+        return false;
+    for (int i = 0; i < 8; i++)
+        if (formats[i] != cformats[i] || blend[i] != cblend[i]) return false;
+    for (int i = 0; i < 16; i++)
+        if (vattr[i] != cvattr[i] || div[i] != cdiv[i]) return false;
+    return true;
+}
+struct PipeFast {
+    bool on = false;
+    PipeEntry* pe = nullptr;
+    uint64_t prog = 0, variant = 0;
+    int topo = 0, n = 0, nvattr = 0;
+    uint32_t samples = 0, depth = 0, blend_en = 0, chmask = 0, poly = 0, clamp = 0, a2c = 0;
+    uint32_t formats[8]{}, vattr[16]{}, div[16]{};
+    uint64_t blend[8]{};
+};
+thread_local PipeFast pipe_fast[2];
+
 PipeEntry* graphics_pipeline(const Program& p, const NvnState& s, const Targets& at, VkPrimitiveTopology topo) {
     // the key: what is baked into it (the rest is dynamic state)
     // (hookshot: and which variant: p.key is the same for all the variants of a program by its textures' types, and a draw of
     // one ran another's shaders under its own descriptors)
-    uint64_t key = mix(mix(p.key, p.variant), (uint64_t)topology_class(topo) << 8 | (uint64_t)at.samples);
+    uint32_t formats[8]{};
+    uint32_t vattr[16]{}, divs[16]{};
+    uint64_t blend[8]{};
+    for (int i = 0; i < 8 && i < at.n; i++) formats[i] = (uint32_t)at.color_format[i];
+    for (int i = 0; i < 16; i++) vattr[i] = s.vattr[i], divs[i] = s.vstream[i].divisor;
+    for (int i = 0; i < 8; i++) std::memcpy(&blend[i], &s.blend[i], 8);
+    const int topo_c = topology_class(topo);
+    const uint32_t blend_en = (uint32_t)s.color.blend_en, chmask = s.chmask.mask, poly = (uint32_t)s.poly.mode;
+    const uint32_t clamp = s.depth_clamp ? 1u : 0u, a2c = s.ms.a2c ? 1u : 0u;
+    for (const PipeFast& f : pipe_fast)
+        if (f.on && f.pe &&
+            pipe_same((uint64_t)(uintptr_t)&p, p.variant, topo_c, (uint32_t)at.samples, at.n, (uint32_t)at.depth_format,
+                      formats, s.nvattr, vattr, divs, blend_en, blend, chmask, poly, clamp, a2c, f.prog, f.variant, f.topo,
+                      f.samples, f.n, f.depth, f.formats, f.nvattr, f.vattr, f.div, f.blend_en, f.blend, f.chmask, f.poly,
+                      f.clamp, f.a2c))
+            return f.pe;
+    auto remember = [&](PipeEntry* e) {
+        if (!e) return e;
+        if (!(pipe_fast[0].on && pipe_fast[0].pe == e)) pipe_fast[1] = pipe_fast[0];
+        PipeFast& f = pipe_fast[0];
+        f.on = true, f.pe = e, f.prog = (uint64_t)(uintptr_t)&p, f.variant = p.variant, f.topo = topo_c;
+        f.samples = (uint32_t)at.samples, f.n = at.n, f.depth = (uint32_t)at.depth_format, f.nvattr = s.nvattr;
+        f.blend_en = blend_en, f.chmask = chmask, f.poly = poly, f.clamp = clamp, f.a2c = a2c;
+        std::memcpy(f.formats, formats, sizeof formats);
+        std::memcpy(f.vattr, vattr, sizeof vattr);
+        std::memcpy(f.div, divs, sizeof divs);
+        std::memcpy(f.blend, blend, sizeof blend);
+        return e;
+    };
+    uint64_t key = mix(mix(p.key, p.variant), (uint64_t)topo_c << 8 | (uint64_t)at.samples);
     const Shader::Info& vs = p.stages[0].info;
     if (!p.mesh) {
         for (int i = 0; i < 16; i++)
@@ -790,10 +846,10 @@ PipeEntry* graphics_pipeline(const Program& p, const NvnState& s, const Targets&
     if (!dev.eds3_clamp) key = mix(key, (uint64_t)s.depth_clamp);
     if (!dev.eds3_a2c) key = mix(key, (uint64_t)s.ms.a2c);
     static thread_local std::unordered_map<uint64_t, PipeEntry*> mine;   // (entries live as long as the cache)
-    if (auto m = mine.find(key); m != mine.end()) return m->second;
+    if (auto m = mine.find(key); m != mine.end()) return remember(m->second);
     ParLock lk;
     auto it = pipelines.find(key);
-    if (it != pipelines.end()) return mine[key] = it->second.get();
+    if (it != pipelines.end()) return remember(mine[key] = it->second.get());
     pcache_init();
     PipeEntry* e = pipelines.emplace(key, std::make_unique<PipeEntry>()).first->second.get();
     pipeline_note(key, p, s, at, topo);
@@ -801,7 +857,7 @@ PipeEntry* graphics_pipeline(const Program& p, const NvnState& s, const Targets&
     if (sync) {
         e->pipeline = build_graphics(p, s, at, topo);
         e->ready = true;
-        return e;
+        return remember(e);
     }
     // (linked here, from the libraries: the draw goes ahead, and the worker's full build replaces it when it is done)
     if (gpl_wanted()) {
@@ -828,7 +884,7 @@ PipeEntry* graphics_pipeline(const Program& p, const NvnState& s, const Targets&
         if (const VkPipeline full = build_graphics(*job->p, job->s, job->at, job->topo)) job->e->pipeline = full;
         job->e->ready.store(true, std::memory_order_release);
     });
-    return e;
+    return remember(e);
 }
 
 /// part: -1 the whole pipeline, or the graphics pipeline library it stands for: 0 vertex input, 1 pre-rasterization, 2 fragment

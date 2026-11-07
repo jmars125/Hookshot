@@ -61,23 +61,35 @@ def fail(text):
     sys.exit(1)
 
 
+def failure_reason(lines):
+    """The line a stopped step is named with. Only the last 12 lines used to be kept, so a compiler's "error:" hundreds
+    of lines earlier was replaced by "compiled in 790s, 1 failed"."""
+    tail, seen = [], None
+    for line in lines:
+        tail = (tail + [line])[-12:]
+        if "error:" in line.lower() and "CalledProcessError" not in line:
+            seen = line
+    if seen is not None:
+        return seen
+    return tail[-1] if tail else "no output"
+
+
 def run(cmd, env=None, on_line=None):
     e = dict(os.environ, PYTHONIOENCODING="utf-8")
     e.update(env or {})
     p = subprocess.Popen(cmd, cwd=ROOT, env=e, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8",
                          errors="replace", bufsize=1)
     no_throttle(getattr(p, "_handle", None))
-    tail = []
+    lines = []
     for line in p.stdout:
         line = line.rstrip()
         print(line, flush=True)
-        tail = (tail + [line])[-12:]
+        lines.append(line)
         if on_line:
             on_line(line)
     if p.wait():
-        why = [l for l in tail if "error:" in l.lower() and "CalledProcessError" not in l]
         step = next((os.path.basename(c) for c in cmd[1:] if c.endswith(".py")), os.path.basename(cmd[-1]))   # (issue 154: not "-u")
-        fail("%s stopped: %s" % (step, why[-1] if why else tail[-1] if tail else "no output"))
+        fail("%s stopped: %s" % (step, failure_reason(lines)))
 
 
 def build_id(main):

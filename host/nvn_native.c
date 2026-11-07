@@ -956,7 +956,10 @@ static uint64_t held_count(void) { return (uint64_t)nheld; }
 
 NV(nvnQueueFenceSync) {
     held_init();
-    nvn_sync *s = (nvn_sync *)P(1); s->fenced = 1; s->fence = rx_nvn_fence() + held_count();
+    nvn_sync *s = (nvn_sync *)P(1); s->fenced = 1;
+    /* (hookshot) the queue's own work: with nothing held, its last submission (a wait for it no longer waits for another
+       queue's work stopped at an event wait) */
+    s->fence = held_count() ? rx_nvn_fence() + held_count() : rx_nvn_fence_q((uint64_t)(uintptr_t)P(0));
     if (sync_log()) hos_log("nvn: FenceSync %p -> %llu (lr %#llx)", (void *)s, (unsigned long long)s->fence, (unsigned long long)c->x[30]);
 }
 /* (the GPU waits the game makes: count and time by kind, logged every 5 s) */

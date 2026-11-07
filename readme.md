@@ -179,8 +179,9 @@ Never send game files.
 
 ## In-game menu
 
-Press <kbd>Insert</kbd> in game. Everything is off by default, and your choices are saved in `hookshot_options.ini`
-beside the game.
+Press <kbd>Insert</kbd> in game, or on a controller the Home button (or Select and Start together). Everything is off
+by default, and your choices are saved in `hookshot_options.ini` beside the game. On a controller the D-pad chooses
+and changes, the bottom face button changes too, and the right one closes the menu.
 
 | Option | Choices |
 |---|---|

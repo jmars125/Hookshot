@@ -380,6 +380,9 @@ static void binds_load(void) {
     InterlockedExchange(&state, 2);
 }
 
+static volatile LONG pad_raw_now;   /* the gamepads' inputs at the last read, 1 << HOS_PAD_* */
+uint32_t hos_pad_raw(void) { return (uint32_t)pad_raw_now; }
+
 static void pads_read(uint64_t *buttons, int32_t stick[4]) {
     static int64_t next_read, retry[XUSER_MAX_COUNT];
     static int was_connected[XUSER_MAX_COUNT];
@@ -445,6 +448,11 @@ static void pads_read(uint64_t *buttons, int32_t stick[4]) {
         }
         stick_max(s, v);
     }
+    InterlockedExchange(&pad_raw_now, (LONG)raw);
+    /* Back and Start together open the Insert menu (gpu/vk/vk_menu.cpp, for pads whose Home button the system
+       keeps): they reach the game only one at a time */
+    const uint64_t chord = 1ULL << HOS_PAD_BACK | 1ULL << HOS_PAD_START;
+    if ((raw & chord) == chord) raw &= ~chord;
     binds_load();
     uint64_t b = 0;
     for (int i = 0; i < HOS_SW_N; i++)
@@ -469,7 +477,19 @@ static void read_input(uint64_t *buttons, int32_t stick[4]) {
     if (exclusive < 0) exclusive = getenv("HOS_INPUT_EXCLUSIVE") != NULL;
     if ((exclusive && npresses > 0 && (hos_now_ns() - script_t0) / 1000000 < script_end_ms + 5000) || !game_in_front())
         return;
-    pads_read(buttons, stick);
+    {   /* (hookshot) while the Insert menu is open the pads are its own, as the keyboard is (key()), and after it
+           closed until they are let go (the press that closed it never reaches the game) */
+        uint64_t pb = 0;
+        int32_t ps[4] = {0};
+        pads_read(&pb, ps);
+        static int after_menu;
+        if (rx_option(1, 0)) after_menu = 1;
+        else if (after_menu && !pad_raw_now) after_menu = 0;
+        if (!after_menu) {
+            *buttons |= pb;
+            stick_max(stick, ps);
+        }
+    }
     binds_load();   /* (the keys: key_default's, or hookshot_options.ini's) */
     for (int i = 0; i < HOS_SW_N; i++)
         for (int k = 0; k < 2; k++)

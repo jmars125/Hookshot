@@ -11,6 +11,7 @@
 #include "hos.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #if defined(_WIN32) || defined(__EMSCRIPTEN__)
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -158,6 +159,27 @@ int main(int argc, char **argv) {
 static int game_main(int argc, char **argv) {
 #endif
 #ifdef _WIN32
+    {   // (hookshot_env.txt beside the game: NAME=VALUE lines set as environment variables before anything reads them, for the switches
+        // players are asked to test. Lines starting with # are notes)
+        char path[MAX_PATH + 32];
+        DWORD n = GetModuleFileNameA(NULL, path, MAX_PATH);
+        while (n && path[n - 1] != 92 && path[n - 1] != 47) n--;
+        memcpy(path + n, "hookshot_env.txt", 17);
+        FILE *f = fopen(path, "r");
+        if (f) {
+            char line[512];
+            while (fgets(line, sizeof line, f)) {
+                char *s = line;
+                if ((unsigned char)s[0] == 0xEF && (unsigned char)s[1] == 0xBB && (unsigned char)s[2] == 0xBF) s += 3;   // (Notepad's BOM)
+                while (*s == ' ' || *s == 9) s++;
+                size_t len = strlen(s);
+                while (len && (s[len - 1] == 10 || s[len - 1] == 13 || s[len - 1] == ' ' || s[len - 1] == 9)) s[--len] = 0;
+                if (!len || *s == '#' || !strchr(s, '=')) continue;
+                _putenv(s);
+            }
+            fclose(f);
+        }
+    }
     {   // (the whole process, not only the window's thread: the renderer asks the window's size from its own, and on a 4K screen at 150%
         // Windows answered such a thread 2560 x 1440: the picture was that size, in the corner of the window. Hookshot issues 15, 18, 20)
         typedef BOOL(WINAPI * SetAware)(void *);

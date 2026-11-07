@@ -75,7 +75,16 @@ bool create_image(const VkImageCreateInfo& ci, VkImage& image, VmaAllocation& al
         pai.usage = VMA_MEMORY_USAGE_UNKNOWN;
         if (vmaCreateImage(vma, &ci, &pai, &image, &allocation, nullptr) == VK_SUCCESS) return true;
     }
-    return vmaCreateImage(vma, &ci, &ai, &image, &allocation, nullptr) == VK_SUCCESS;
+    if (vmaCreateImage(vma, &ci, &ai, &image, &allocation, nullptr) == VK_SUCCESS) return true;
+    // (hookshot) VRAM is full (a 4 GB card at a high resolution, #96): an image left unmade is a black screen, so it goes
+    // to system memory instead, slow but drawn
+    if (getenv("RX_VK_IMAGES_VRAM_ONLY")) return false;
+    VmaAllocationCreateInfo sai{};
+    sai.usage = VMA_MEMORY_USAGE_AUTO;
+    if (vmaCreateImage(vma, &ci, &sai, &image, &allocation, nullptr) != VK_SUCCESS) return false;
+    static std::atomic<int> told{0};
+    if (told++ < 4) logf("vk: VRAM full: a %ux%u image (format %d) in system memory", ci.extent.width, ci.extent.height, (int)ci.format);
+    return true;
 }
 void destroy_image(VkImage image, VmaAllocation allocation) {
     vmaDestroyImage(vma, image, allocation);

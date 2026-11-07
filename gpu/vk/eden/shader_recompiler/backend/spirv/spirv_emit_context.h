@@ -304,6 +304,8 @@ public:
     u32 rescaling_textures_member_index{};
     u32 rescaling_images_member_index{};
     u32 rescaling_downfactor_member_index{};
+    u32 guest_pages_member_index{};   // (hookshot: GUEST_PAGES_PUSH_OFFSET's member, compute only)
+    bool wants_guest_pages{};
     u32 texture_rescaling_index{};
     u32 image_rescaling_index{};
 

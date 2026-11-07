@@ -3,7 +3,7 @@
 // the IR's shape here instead of Orchid's shader hashes: a visual workaround for Ocarina of Time, not a fix. The root
 // cause of the washed-out outdoors is open there and here.
 //  - fog: the one compute shader with an add of 2^x and -2^y, the fog integration: its slice distance scaled before
-//    the extinction and scattering accumulation (Orchid: 0.25; it thins interiors' fog too);
+//    the extinction and scattering accumulation (Orchid: 0.25; 0.08 here; it thins interiors' fog too);
 //  - exposure: a fragment shader with three loads of c3+0x38, the final pass's exposure before its filmic curve (0.65).
 // RX_VK_OOT_VISUAL=0: off. RX_VK_OOT_FOG, RX_VK_OOT_EXPOSURE: the factors.
 #pragma once

@@ -2521,7 +2521,8 @@ void texture_frame(uint64_t completed) {
     const bool known = vram_usage(&used, &allowed, &block_free);
     if (!own)   // (RX_VK_VRAM_MB, else 70% of what the driver allows the process at the first look)
         own = getenv("RX_VK_VRAM_MB") ? (uint64_t)atoi(getenv("RX_VK_VRAM_MB")) << 20
-              : known                ? allowed / 10 * 7
+              : known                ? std::min<uint64_t>(allowed / 10 * 7, 6144ull << 20)   // (hookshot: at most 6 GB. A 16 GB
+                                                                                             // card's 10.8 GB filled up, read as a leak: 105, 106)
                                      : 4096ull << 20;
     uint64_t budget = own;
     // (near what the driver allows, the budget shrinks by the excess. The excess of what the process holds less the

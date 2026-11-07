@@ -686,18 +686,16 @@ HLE(_ZN2nn2os23StartPeriodicTimerEventEPNS0_14TimerEventTypeENS_8TimeSpanES3_) {
     t->period_ns = (int64_t)ARG(2);
     t->signaled = 0;
     ReleaseSRWLockExclusive(&t->lk);
-    WakeAllConditionVariable(&t->cv);   /* (a WaitTimerEvent that came first) */
+    WakeAllConditionVariable(&t->cv);   /* (a first wait that beat this start sleeps on the cv) */
     poke_multiwait();
 }
 HLE(_ZN2nn2os14WaitTimerEventEPNS0_14TimerEventTypeE) {
     Obj *t = obj(ARG(0), K_TIMER);
     AcquireSRWLockExclusive(&t->lk);
-    /* not started yet: the wait lasts until it is, and then until it fires, as on Horizon. OoT's rmbl::VibrationThread
-       waits on its timer as soon as it runs, and the main thread that made it starts the timer just after starting the
-       thread: a new thread that ran at once (Linux) got here first, which was taken for a timer never started */
-    while (!t->due_ns) hos_cv_sleep(&t->cv, &t->lk, INFINITE);
+    while (!t->due_ns) hos_cv_sleep(&t->cv, &t->lk, INFINITE);   /* (the rumble thread can wait before the start, a pad connected at boot) */
     int64_t due = t->due_ns;
     ReleaseSRWLockExclusive(&t->lk);
+    /* (chrispository, PR 55: a first wait before the start blocks until it, as on Horizon) */
     hos_sleep_ns(due - hos_now_ns());
     AcquireSRWLockExclusive(&t->lk);
     if (t->period_ns > 0) {
@@ -1080,7 +1078,7 @@ HLE(_ZN2nn2os22StartOneShotTimerEventEPNS0_14TimerEventTypeENS_8TimeSpanE) {
     t->period_ns = 0;
     t->signaled = 0;
     ReleaseSRWLockExclusive(&t->lk);
-    WakeAllConditionVariable(&t->cv);   /* (a WaitTimerEvent that came first) */
+    WakeAllConditionVariable(&t->cv);
     poke_multiwait();
 }
 /* GenerateRandomBytes(void*, size_t) */

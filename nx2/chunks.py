@@ -91,7 +91,8 @@ def write(L, gen_dir, img_dir, rechunk=False):
         files = L.write(gen_dir, chunk_bytes=b)
     finally:
         del L.emit_function
-    n = len(files)
+    # (the numbered chunks only: files has code_hot.c too, and counting it skipped the first stale chunk, linked twice)
+    n = sum(1 for f in files if re.fullmatch(r"code_\d{3}\.c", os.path.basename(f)))
     while os.path.exists(os.path.join(gen_dir, "code_%03d.c" % n)):   # (fewer chunks than the last lift)
         os.remove(os.path.join(gen_dir, "code_%03d.c" % n))
         n += 1

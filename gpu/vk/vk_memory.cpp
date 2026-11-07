@@ -155,6 +155,45 @@ bool import_pool(uint64_t lo, uint64_t hi, Pool& p) {
 
 } // namespace
 
+// (hookshot) guest memory's page table, for the pointers shaders follow (spirv_emit_context.cpp): a page's device address, 0 for none. Written as
+// pools come and go, before the submissions that can reach them
+uint64_t* guest_pages = nullptr;
+uint64_t guest_pages_address = 0;
+void guest_pages_set(uint64_t lo, uint64_t hi, uint64_t address) {
+    if (!guest_pages) return;
+    // (two windows, as spirv_emit_context.cpp reads them: 8 GB from 0x1000000000, then 4 GB from 0x7f00000000)
+    const struct { uint64_t base, bytes, first; } windows[] = {{0x1000000000ull, 8ull << 30, 0}, {0x7f00000000ull, 4ull << 30, (8ull << 30) >> 12}};
+    for (const auto& w : windows)
+        for (uint64_t a = std::max(lo, w.base) & ~0xFFFull; a < std::min(hi, w.base + w.bytes); a += 0x1000)
+            guest_pages[w.first + ((a - w.base) >> 12)] = address ? address + (a - lo) : 0;
+}
+
+uint64_t memory_guest_pages() {
+    static std::mutex mu;
+    std::lock_guard lk(mu);
+    static bool tried = false;
+    if (tried) return guest_pages_address;
+    tried = true;
+    if (getenv("RX_VK_NO_FOLLOW")) return 0;   // (on: Kokiri's lighting. The menus' blank text was the rule in graphics stages, now compute only)
+    VkBuffer b = VK_NULL_HANDLE;
+    VmaAllocation a = nullptr;
+    void* mapped = nullptr;
+    const uint64_t bytes = ((8ull << 30 >> 12) + (4ull << 30 >> 12)) * 8;
+    if (!create_buffer(bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, true, b, a, &mapped) || !mapped) {
+        logf("vk: no page table of guest memory: pointers in no bound buffer read as 0");
+        return 0;
+    }
+    std::memset(mapped, 0, bytes);
+    VkBufferDeviceAddressInfo da{VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO};
+    da.buffer = b;
+    guest_pages_address = vkGetBufferDeviceAddress(dev.device, &da);
+    std::lock_guard pk(pools_mu);
+    guest_pages = (uint64_t*)mapped;
+    for (auto& kv : imported) guest_pages_set(kv.second.lo, kv.second.hi, kv.second.address);
+    logf("vk: page table of guest memory at %#llx (%zu pools)", (unsigned long long)guest_pages_address, imported.size());
+    return guest_pages_address;
+}
+
 bool memory_init() {
     if (!dev.external_memory_host) {
         logf("vk: no VK_EXT_external_memory_host: the guest memory cannot be imported (needed for now)");
@@ -1023,6 +1062,7 @@ void bg_drain() {
         }
         if (imp != imported.end()) retire_pool(imp);
         imported.emplace(lo, p);
+        guest_pages_set(p.lo, p.hi, p.address);
     }
 }
 
@@ -1120,6 +1160,7 @@ Pool* pool_lookup(uint64_t guest, uint64_t size) {
             if (o != imported.end()) retire_pool(o);
         }
         imp = imported.emplace(p.lo, p).first;
+        guest_pages_set(p.lo, p.hi, p.address);
         if (overlapped.size() > 1) {
             static int logged_merge;
             if (logged_merge++ < 16)
@@ -1160,6 +1201,9 @@ uint64_t mirror_budget() {
         uint64_t vram = 0;
         for (uint32_t h = 0; h < dev.memory.memoryHeapCount; h++)
             if (dev.memory.memoryHeaps[h].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) vram = std::max(vram, (uint64_t)dev.memory.memoryHeaps[h].size);
+        // (hookshot: an eighth on cards of 8 GB or less. A 6 GB laptop's 1.5 GB of mirrors and its textures went past what the
+        // driver allows, it paged, and the GPU timed out: device lost, issues 96 and 132)
+        if (vram && vram <= (8ull << 30)) return vram / 8;
         return vram ? std::min<uint64_t>(vram / 4, 3072ull << 20) : (uint64_t)(3072ull << 20);
     }();
     return b;
@@ -1183,6 +1227,7 @@ std::deque<std::map<uint64_t, Pool>::node_type> retired_pools;
 
 void retire_pool(std::map<uint64_t, Pool>::iterator it) {
     Pool* old = &it->second;
+    guest_pages_set(old->lo, old->hi, 0);
     old->retired_value = std::max(old->last_value, mem_rec_value);
     std::erase(mirror_wanted, old);   // (the new pool gets the mirror)
     if (old->mstate == Pool::MIRROR_WANTED) old->mstate = Pool::MIRROR_NONE;
@@ -1424,6 +1469,11 @@ int64_t st_mirrors_freed = 0;
 uint64_t st_mirror_bytes_freed = 0;
 void mirror_free(Pool& p) {
     p.was_mirrored = true;
+    {   // (the table back to guest memory, for a pool still in use only: a retired one's range is another pool's now, and its
+        // address there sent the foliage culling into freed memory, a device lost)
+        const auto live = imported.find(p.lo);
+        if (live != imported.end() && &live->second == &p) guest_pages_set(p.lo, p.hi, p.address);
+    }
     destroy_buffer(p.mirror, p.mirror_alloc);
     p.mirror = VK_NULL_HANDLE, p.mirror_alloc = nullptr;
     mirror_bytes -= p.hi - p.lo;
@@ -1502,7 +1552,9 @@ bool mirror_make(Pool& pool) {
     Pool* p = &pool;
     {
         const uint64_t n = p->hi - p->lo;
-        if (mirror_bytes + n > mirror_budget() || n > (1ull << 30)) {
+        uint64_t used = 0, allowed = 0;   // (hookshot: and none while VRAM is nearly full: a mirror is a speed-up, the pool works without)
+        const bool tight = vram_usage(&used, &allowed) && allowed && used > allowed / 100 * 90;
+        if (mirror_bytes + n > mirror_budget() || n > (1ull << 30) || tight) {
             p->mstate = n > (1ull << 30) ? Pool::MIRROR_REFUSED : Pool::MIRROR_NONE;
             static int logged;
             if (logged++ < 8)
@@ -1511,9 +1563,14 @@ bool mirror_make(Pool& pool) {
                      (unsigned long long)(mirror_budget() >> 20));
             return false;
         }
-        if (!create_device_buffer(n, kUsage & ~VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, p->mirror, p->mirror_alloc)) {
+        if (!create_device_buffer(n, kUsage, p->mirror, p->mirror_alloc)) {
             p->mstate = Pool::MIRROR_REFUSED;
             return false;
+        }
+        {   // (hookshot) the page table points at the mirror: what the GPU wrote is there, and guest memory has it only after the write-back
+            VkBufferDeviceAddressInfo da{VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO};
+            da.buffer = p->mirror;
+            guest_pages_set(p->lo, p->hi, vkGetBufferDeviceAddress(dev.device, &da));
         }
         const VkBufferCopy all{0, 0, n};
         vkCmdCopyBuffer(upload_command_buffer(), p->buffer, p->mirror, 1, &all);   // (all of it, at this generation)

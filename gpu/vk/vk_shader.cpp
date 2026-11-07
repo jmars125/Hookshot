@@ -65,6 +65,7 @@ struct Code {
     std::vector<uint64_t> code;   // header (0x50 bytes, zeros for compute), Maxwell instructions, native address map
     std::vector<uint8_t> c1;
     uint32_t local[3]{};
+    uint32_t shared_memory = 0;   // compute: bytes from the NVN2 control section (+0x64; klimovich008's PR 91)
     uint32_t texture_bound = ~0u;   // the bank native TEX instructions name (~0: none; TEXS take the stage's own)
     bool isbe = false;              // an NVN2 task (stage 6) or mesh (stage 7) program: it writes the internal stage buffer
     // (task / mesh: control section +0x58 threads 15:0, payload bytes 31:16; +0x60 max primitives 15:0, max vertices
@@ -241,7 +242,10 @@ Code parse_code(const uint8_t* ctl, const std::vector<uint8_t>& area) {
     c.code.push_back(0);
     Shader::Ampere::AppendNativeAddressMap(c.code, lowered.source_instruction_offsets);
     c.c1.assign(area.begin() + c1o, area.end());
-    if (!graphics) std::memcpy(c.local, ctl + 0x58, 12);
+    if (!graphics) {
+        std::memcpy(c.local, ctl + 0x58, 12);
+        std::memcpy(&c.shared_memory, ctl + 0x64, 4);
+    }
     c.ok = true;
     return c;
 }
@@ -345,7 +349,10 @@ public:
         return local_memory;
     }
     u32 SharedMemorySize() const override {
-        return 48u << 10;   // (the control section does not say yet: what a workgroup may have)
+        // (what the program declares, from the control section: 48 KB for every one was past an RX 9070 XT's 32 KB, and its
+        // pipelines were invalid. klimovich008, Hookshot PR 91. RX_VK_SHARED_48K=1: as before)
+        static const bool old = getenv("RX_VK_SHARED_48K") != nullptr;
+        return old ? 48u << 10 : nvn.shared_memory;
     }
     std::array<u32, 3> WorkgroupSize() const override {
         return {std::max(1u, nvn.local[0]), std::max(1u, nvn.local[1]), std::max(1u, nvn.local[2])};
@@ -421,7 +428,9 @@ Shader::Profile make_profile() {
 Shader::HostTranslateInfo host_info() {
     Shader::HostTranslateInfo h{};
     h.support_float64 = true;
-    h.support_float16 = true;
+    // (RX_VK_NO_F16, a test: the game's f16 math lowered to f32, as a card without f16 shaders would need (GTX 10xx, issue 98). Eden's
+    // lowering made a picture of noise of Kokiri on an RTX card, so it is not used by itself)
+    h.support_float16 = !getenv("RX_VK_NO_F16");
     h.support_int64 = true;
     h.needs_demote_reorder = false;
     h.support_snorm_render_buffer = true;
@@ -716,8 +725,10 @@ void dump_ir(const Program& p, const char* stage, const Shader::IR::Program& pro
 void oot_visual(Shader::IR::Program& program, uint64_t key) {
     static const bool on = !getenv("RX_VK_OOT_VISUAL") || atoi(getenv("RX_VK_OOT_VISUAL")) != 0;
     if (!on) return;
-    static const float fog = getenv("RX_VK_OOT_FOG") ? (float)atof(getenv("RX_VK_OOT_FOG")) : 0.25f;
-    static const float exposure = getenv("RX_VK_OOT_EXPOSURE") ? (float)atof(getenv("RX_VK_OOT_EXPOSURE")) : 0.65f;
+    static const float fog = getenv("RX_VK_OOT_FOG") ? (float)atof(getenv("RX_VK_OOT_FOG")) : 0.08f;   // (0.25, Orchid's, left a white forest once the game no longer lost its start)
+    // (1: the game's own exposure. 0.65 was for the washed-out outdoors before shaders followed pointers; with the lighting right it
+    // made scenes too dark, issue 103)
+    static const float exposure = getenv("RX_VK_OOT_EXPOSURE") ? (float)atof(getenv("RX_VK_OOT_EXPOSURE")) : 1.0f;
     if (const size_t n = Shader::Optimization::ApplyOotVisualWorkaround(program, fog, exposure))
         logf("vk: OoT visual workaround: %s program %016llx, %zu edits", program.stage == Shader::Stage::Compute ? "fog" : "exposure",
              (unsigned long long)key, n);
@@ -748,8 +759,10 @@ uint64_t disk_stamp() {
     // lost it)
     const uint64_t translator = HOOKSHOT_SHADER_STAMP;
     add(&translator, sizeof translator);
+    const uint32_t depth = host->depth_minus_w() != 0;   // (d3zessete's PR 54: programs made in either depth mode are kept apart)
+    add(&depth, sizeof depth);
     for (char** e = _environ; e && *e; e++)
-        for (const char* pre : {"RX_VK_OOT", "RX_VK_MMA", "RX_VK_NATIVE", "RX_VK_NAN", "RX_VK_TASK_CAP", "RX_VK_NETWORK", "EDEN_"})
+        for (const char* pre : {"RX_VK_OOT", "RX_VK_MMA", "RX_VK_NATIVE", "RX_VK_NAN", "RX_VK_TASK_CAP", "RX_VK_NETWORK", "RX_VK_GP", "RX_VK_FOLLOW", "RX_VK_NO_FOLLOW", "RX_VK_NO_F16", "RX_VK_SHARED", "EDEN_"})
             if (!strncmp(*e, pre, strlen(pre))) add(*e, strlen(*e));
     return h;
 }
@@ -978,10 +991,17 @@ void translate_into(Program& p, const NvnState& s, const Code* vsc, const Code* 
                     kept_one = !k.empty() && !strncmp(hex, k.c_str(), k.size());
                     at = e == std::string::npos ? keep.size() : e + 1;
                 }
-                if (!kept_one && (Shader::Backend::SPIRV::mma_software || dev.props.vendorID != 0x10DE))
+                if ((!kept_one && (Shader::Backend::SPIRV::mma_software || dev.props.vendorID != 0x10DE)) || getenv("RX_VK_NO_F16"))
                     throw std::runtime_error("a network left out on this card");
             }
             const std::vector<uint32_t> spirv = Shader::Backend::SPIRV::EmitSPIRV(profile(), rt, t->program, bindings);
+            if (const char* d = getenv("RX_VK_IR")) {   // (the SPIR-V too, for spirv-val)
+                char name[64];
+                snprintf(name, sizeof name, "spv_%016llx.spv", (unsigned long long)p.key);
+                if (strstr(d, name + 4 > name ? name + 4 : name) || true)
+                    if (std::string(d).find(std::string(name + 4, 16)) != std::string::npos)
+                        if (FILE* f = fopen(name, "wb")) fwrite(spirv.data(), 4, spirv.size(), f), fclose(f);
+            }
             Stage st;
             st.nvn_stage = 5;
             st.info = t->program.info;

@@ -5,6 +5,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <optional>
+#include <cstdlib>
+#include <vector>
+#include <unordered_set>
 #include <unordered_map>
 
 #include <boost/container/flat_set.hpp>
@@ -418,6 +421,51 @@ std::optional<StorageBufferAddr> TrackTable(const IR::Value& value) {
     return BreadthFirstSearch(value, pred);
 }
 
+/// (hookshot, from Lichii b8d81e20) Whether an address is a select or phi of which one input is a pointer loaded from memory: Ocarina's foliage
+/// placement records are read from c0[12] or from *c0[12]. Tracked to the constant buffer pointer alone, the loaded path read out of bounds
+/// as zeros, the near-leaf pass wrote NaN positions, and trees had no leaves. Such a load stays global: the backend's page table reads it
+bool MixesLoadedPointer(const IR::Value& value) {
+    if (value.IsImmediate()) {
+        return false;
+    }
+    std::vector<const IR::Inst*> todo{value.InstRecursive()};
+    std::unordered_set<const IR::Inst*> seen;
+    bool merge{}, loaded{};
+    while (!todo.empty() && seen.size() < 96) {
+        const IR::Inst* const inst{todo.back()};
+        todo.pop_back();
+        if (!seen.insert(inst).second) {
+            continue;
+        }
+        switch (inst->GetOpcode()) {
+        case IR::Opcode::Phi:
+        case IR::Opcode::SelectU32:
+        case IR::Opcode::SelectU64:
+            merge = true;
+            break;
+        case IR::Opcode::LoadStorage32:
+        case IR::Opcode::LoadStorage64:
+        case IR::Opcode::LoadStorage128:
+        case IR::Opcode::LoadGlobal32:
+        case IR::Opcode::LoadGlobal64:
+        case IR::Opcode::LoadGlobal128:
+            loaded = true;
+            continue;   // (what it loads from is another matter)
+        default:
+            break;
+        }
+        for (size_t i = 0; i < inst->NumArgs(); ++i) {
+            const IR::Value arg{inst->Arg(i)};
+            if (!arg.IsImmediate()) {
+                todo.push_back(arg.InstRecursive());
+            }
+        }
+    }
+    return merge && loaded;
+}
+
+thread_local bool g_follow_stage = false;   // (hookshot: the program being translated is compute, where the page table is)
+
 /// Collects the storage buffer used by a global memory instruction and the instruction itself
 void CollectStorageBuffers(IR::Block& block, IR::Inst& inst, StorageInfo& info) {
     // NVN puts storage buffers in a specific range, we have to bias towards these addresses to
@@ -433,6 +481,22 @@ void CollectStorageBuffers(IR::Block& block, IR::Inst& inst, StorageInfo& info) 
     if (!low_addr_info) {
         // Failed to track the low address, use NVN fallbacks
         return;
+    }
+    {
+        // (only where the page table is: compute. A graphics stage reads such a load as 0, and that blanked every menu text)
+        static const bool follow{std::getenv("RX_VK_NO_FOLLOW") == nullptr};
+        const IR::Opcode op{inst.GetOpcode()};
+        // (and the writes and 32-bit atomics through such an address: the culling's outputs and counters, which the backend's page
+        // table now reaches too. Tracked to the constant buffer alone they went to a buffer at address 0, and every count stayed 0)
+        const bool load{op == IR::Opcode::LoadGlobal32 || op == IR::Opcode::LoadGlobal64 || op == IR::Opcode::LoadGlobal128};
+        const bool store{op == IR::Opcode::WriteGlobal32 || op == IR::Opcode::WriteGlobal64 || op == IR::Opcode::WriteGlobal128 ||
+                         op == IR::Opcode::GlobalAtomicIAdd32 || op == IR::Opcode::GlobalAtomicUMax32 || op == IR::Opcode::GlobalAtomicUMin32 ||
+                         op == IR::Opcode::GlobalAtomicSMax32 || op == IR::Opcode::GlobalAtomicSMin32 || op == IR::Opcode::GlobalAtomicAnd32 ||
+                         op == IR::Opcode::GlobalAtomicOr32 || op == IR::Opcode::GlobalAtomicXor32 || op == IR::Opcode::GlobalAtomicExchange32};
+        static const bool no_store{std::getenv("RX_VK_FOLLOW_LOADS_ONLY") != nullptr};
+        if (follow && g_follow_stage && (load || (store && !no_store)) && MixesLoadedPointer(low_addr_info->value)) {
+            return;   // (left global: MixesLoadedPointer)
+        }
     }
     // First try to find storage buffers in the NVN address
     const IR::U32 low_addr{low_addr_info->value};
@@ -590,6 +654,8 @@ void Replace(IR::Block& block, IR::Inst& inst, const IR::U32& storage_index,
 } // Anonymous namespace
 
 void GlobalMemoryToStorageBufferPass(IR::Program& program, const HostTranslateInfo& host_info) {
+    static const bool no_mesh{std::getenv("RX_VK_FOLLOW_MESH") == nullptr};
+    g_follow_stage = program.stage == Stage::Compute || (!no_mesh && (program.stage == Stage::Task || program.stage == Stage::Mesh));
     StorageInfo info;
     for (IR::Block* const block : program.post_order_blocks) {
         for (IR::Inst& inst : block->Instructions()) {

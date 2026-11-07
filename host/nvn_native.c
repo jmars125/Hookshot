@@ -137,7 +137,9 @@ int nvn_gpu_write(uint64_t gpu, const void *src, uint64_t n) {
 }
 
 /* ---- device ---- */
-static volatile LONG depth_minus_w;
+static volatile LONG depth_minus_w = 1;   /* (OoT's mode from the start: the shaders prepared before the game made its device were
+                                            translated without the depth conversion, and the menu's text and logo fell outside the depth range
+                                            on a first start. d3zessete, Hookshot PR 54) */
 int nvn_depth_minus_w(void) { return depth_minus_w != 0; }
 uint64_t nvn_native_proc(const char *name);
 
@@ -2096,6 +2098,7 @@ static void resolve_deferred(uint8_t *p) {
     }
 }
 NV(nvnQueueSubmitCommands) {
+    { void hos_renderer_wait(void); static volatile LONG up; if (!up) { hos_renderer_wait(); up = 1; } }   /* (display.c) */
     nvn_queue *q = (nvn_queue *)P(0);
     const int n = I(1);
     uint64_t h[64];

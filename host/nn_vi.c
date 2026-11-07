@@ -175,9 +175,12 @@ static void scan_dt(long long presents) {
 extern volatile uint64_t hos_gfx_module;
 volatile int hos_fixed_resolution = 0;   /* (the lifted code reads these: nx2/oot_patches.py) */
 volatile uint32_t hos_fixed_scale_bits = 0x3f800000;   /* (HOS_RES_SCALE: the fixed path's scale) */
+volatile int hos_dynres_runs = 0;   /* (the dynamic path's frames: it fills fields the 3D reads, +8 +16 +168) */
 static void realtime_step(int64_t now) {
     int rx_option(int id, int otherwise);
-    hos_fixed_resolution = !rx_option(2, 1);
+    /* (Resolution 100% from the start: the fixed path skipped the dynamic block from the first frame, its fields stayed
+       unset and the 3D came out black. The dynamic path runs a few frames first, as when the menu turns it on in game) */
+    hos_fixed_resolution = !rx_option(2, 1) && hos_dynres_runs >= 30;
     {   /* (the Insert menu's Resolution: the fixed path's scale, live; HOS_RES_SCALE below stays over it) */
         const int percent = rx_option(3, 0);
         if (percent > 0 && !getenv("HOS_RES_SCALE")) {

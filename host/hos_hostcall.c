@@ -71,6 +71,15 @@ static volatile LONG ring_pos;
 void hos_setjmp_return(Ctx *c, uint64_t target);   /* hos_setjmp.c: a longjmp's BR to a setjmp site */
 int a64_call_miss(Ctx *c, uint64_t target) {
     hos_setjmp_return(c, target);   /* (hookshot; does not return when it is one) */
+    if (!target) {
+        /* (hookshot) a callback table entry zeroed at run time: OoT's UpdateTextBoxTextureThread reaches its text release trampoline
+           with a null function pointer at the same cutscene point every session. 0 is never a real function; returning 1 turns the
+           tail call into a plain return. chrispository, Hookshot PR 55 */
+        static volatile LONG logged;
+        if (InterlockedIncrement(&logged) <= 8)
+            hos_log("skipped an indirect call to 0 (lr %#llx, thread %s)", (unsigned long long)c->x[30], hos_thread_name(hos_self()));
+        return 1;
+    }
     if (target < HOS_HOSTCALL_BASE || (target - HOS_HOSTCALL_BASE) % 16) return 0;
     uint64_t i = (target - HOS_HOSTCALL_BASE) / 16;
     if (i >= (uint64_t)ncalls) return 0;

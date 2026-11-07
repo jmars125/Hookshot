@@ -59,6 +59,23 @@ def target():
     return toolchain.native_target() + (["--sysroot=" + SYSROOT] if LINUX and SYSROOT else [])
 
 
+def no_throttle(handle=None):
+    """(issue 87) Windows' power throttling (EcoQoS) slows a background window's processes to almost nothing on some machines: the
+    build sat at 0% CPU. Turned off for this process, or the one whose handle this is"""
+    if os.name != "nt":
+        return
+    import ctypes
+    class State(ctypes.Structure):
+        _fields_ = [("Version", ctypes.c_ulong), ("ControlMask", ctypes.c_ulong), ("StateMask", ctypes.c_ulong)]
+    k = ctypes.WinDLL("kernel32")
+    k.GetCurrentProcess.restype = ctypes.c_void_p
+    k.SetProcessInformation.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_ulong]
+    s = State(1, 1, 0)   # (PROCESS_POWER_THROTTLING_EXECUTION_SPEED in the mask, off in the state)
+    try:
+        k.SetProcessInformation(ctypes.c_void_p(int(handle)) if handle else k.GetCurrentProcess(), 4, ctypes.byref(s), ctypes.sizeof(s))
+    except (OSError, ValueError, TypeError):
+        pass
+
 def HOT_ORDER():
     p = os.path.join(kit.WORK, "hot_order.txt")
     if not os.path.exists(p) or os.environ.get("RX_NO_ORDER"):
@@ -263,7 +280,10 @@ def compile_one(job):
         open(stamp, "w").write(key)
         return src, 0.0, None
     t = time.time()
-    r = subprocess.run([cc] + fl + ["-c", src, "-o", obj], capture_output=True, text=True)
+    with subprocess.Popen([cc] + fl + ["-c", src, "-o", obj], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as p:
+        no_throttle(getattr(p, "_handle", None))
+        out, err = p.communicate()
+    r = subprocess.CompletedProcess(p.args, p.returncode, out, err)
     if r.returncode:
         return src, time.time() - t, r.stderr[-4000:]
     open(stamp, "w").write(key)

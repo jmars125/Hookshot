@@ -32,6 +32,9 @@ struct RenderAreaLayout {
 constexpr u32 RESCALING_LAYOUT_WORDS_OFFSET = offsetof(RescalingLayout, rescaling_textures);
 constexpr u32 RESCALING_LAYOUT_DOWN_FACTOR_OFFSET = offsetof(RescalingLayout, down_factor);
 constexpr u32 RENDERAREA_LAYOUT_OFFSET = offsetof(RenderAreaLayout, render_area);
+// (hookshot) guest memory's page table, a u64 device address pushed to every compute program that reads global memory, after the blocks
+// above. It was a constant in the SPIR-V, and the address changes from run to run: the drivers' pipeline caches never hit
+constexpr u32 GUEST_PAGES_PUSH_OFFSET = sizeof(RescalingLayout) + sizeof(RenderAreaLayout);
 
 [[nodiscard]] std::vector<u32> EmitSPIRV(const Profile& profile, const RuntimeInfo& runtime_info, IR::Program& program, Bindings& bindings);
 [[nodiscard]] inline std::vector<u32> EmitSPIRV(const Profile& profile, IR::Program& program) {

@@ -15,7 +15,7 @@ Status: the dump is read and lifted (100 % translated, the instruction test pass
 
 ## Use
 
-Requirements: Python 3 with `lz4`, `numpy`, `capstone`, `unicorn` (2.1); emsdk's clang at `C:\emsdk` (or `EMSDK`);
+Requirements: Python 3 with `lz4`, `numpy`, `capstone`, `unicorn` (2.1), `zstandard`; emsdk's clang at `C:\emsdk` (or `EMSDK`);
 for the Vulkan back end, Eden's CPM package cache (found in mkw-recomp's `work/eg` or `..\Eglantine\.cache\cpm`, or
 `RX_CPM`).
 

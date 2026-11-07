@@ -46,9 +46,18 @@ static const char *desired_language(void) {
                 whole = strchr(line, 10) != NULL;
                 if (!starts) continue;
                 const char *p = line;
+                if ((unsigned char)p[0] == 0xEF && (unsigned char)p[1] == 0xBB && (unsigned char)p[2] == 0xBF) p += 3;   /* (a BOM: Notepad's UTF-8) */
                 while (*p == ' ' || *p == '\t') p++;
                 if (*p == '#' || *p == '\r' || *p == '\n' || !*p) continue;
-                snprintf(want, sizeof want, "%s", p);
+                /* (only a code the game has: a stray line was taken before, and the game stayed in English, Hookshot issue 75) */
+                char code[32];
+                snprintf(code, sizeof code, "%s", p);
+                code[strcspn(code, " \t\r\n")] = 0;
+                int known = 0;
+                for (size_t i = 0; i < sizeof languages / sizeof *languages; i++)
+                    if (!_stricmp(code, languages[i].code)) snprintf(code, sizeof code, "%s", languages[i].code), known = 1;
+                if (!known) continue;
+                snprintf(want, sizeof want, "%s", code);
                 from = "language.txt";
                 break;
             }

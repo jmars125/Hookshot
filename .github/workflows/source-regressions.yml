@@ -1,0 +1,52 @@
+name: Game-free source regressions
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - nx2/nup.py
+      - nx2/make_game.py
+      - nx2/unpack.py
+      - nx2/test_nup_paths.py
+      - tests/test_make_game_cache.py
+      - .github/workflows/source-regressions.yml
+  pull_request:
+    branches: [main]
+    paths:
+      - nx2/nup.py
+      - nx2/make_game.py
+      - nx2/unpack.py
+      - nx2/test_nup_paths.py
+      - tests/test_make_game_cache.py
+      - .github/workflows/source-regressions.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  python:
+    name: Python source checks (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - name: Check extraction boundaries
+        run: python -I -B nx2/test_nup_paths.py
+      - name: Check source-cache coherency
+        run: python -I -B tests/test_make_game_cache.py

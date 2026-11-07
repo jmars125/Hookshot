@@ -65,6 +65,7 @@ struct BufferRef {
     }
 };
 bool memory_init();                                   // vk_memory.cpp
+uint64_t memory_guest_pages();                        // (hookshot: the device address of guest memory's page table, 0: none)
 void memory_sync();                                   // (at each submit: pools the game made or let go)
 BufferRef gpu_buffer(uint64_t gpu, uint64_t size);   // (empty when no pool holds the range)
 /// A range as a binding of the replay sees it: the pool's VRAM mirror when it has one (vk_memory.cpp), else the

@@ -118,9 +118,18 @@ To build from the command line you also need:
 
 - Python 3 with `lz4`, `numpy`, `capstone`, `unicorn` and `zstandard`:
   `pip install lz4 numpy capstone "unicorn>=2.1,<2.2" zstandard`
+  Use Python from python.org: the Microsoft Store's Python installs packages where `python -I` does not look.
 - The clang from [emsdk](https://github.com/emscripten-core/emsdk), at `C:\emsdk`.
 - Visual Studio 2022 with .NET 8, only if you want to change the builder itself.
 - The prebuilt tools that go in `third_party/`: `a64emit`, `lld-link`, `zbic` and SDL2.
+- What the HookshotBuilder zip carries in its `tools` folder and a clone does not. The builder sets the variables
+  below itself; from the command line, set them before you run `make_game.py`:
+  - `tools\cpm`: the Vulkan headers and FFmpeg. Set `RX_CPM` to this folder. Without it the build leaves out
+    `hookshot_vk.dll`, the Vulkan renderer, and says nothing.
+  - `tools\wgpu-native`: set `WGPU_NATIVE` to this folder.
+  - `tools\third_party\sdl2\SDL2.dll`: copy it to `third_party\sdl2\`.
+  - `tools\work`: copy it, with its `image` folder, to `work\`. It holds the hot-function list, the link order, the
+    profile and the icon; without them the game builds but runs slower.
 
 ### What this does on your PC
 

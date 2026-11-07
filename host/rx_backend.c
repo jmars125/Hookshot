@@ -188,7 +188,7 @@ static void flush_early(void) {
 static const MkwVkRenderer *load_vulkan(const char *dll) {
     char path[MAX_PATH];
     const DWORD n = GetModuleFileNameA(NULL, path, MAX_PATH);
-    char *slash = n ? strrchr(path, '\\') : NULL;
+    char *slash = n ? (strrchr(path, '\\') ? strrchr(path, '\\') : strrchr(path, '/')) : NULL;   /* (linux: '/') */
     if (!slash) return NULL;
     strcpy(slash + 1, dll);
     HMODULE m = LoadLibraryA(path);

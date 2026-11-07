@@ -709,7 +709,8 @@ static LONG CALLBACK wts_handler(EXCEPTION_POINTERS *e) {
             static int all_threads = -1;   /* RX_NVN_WATCH_ALL=1: the Resource Memory thread's writes too */
             if (all_threads < 0) all_threads = getenv("RX_NVN_WATCH_ALL") != NULL;
             if ((all_threads || strcmp(tn, "Resource Memory")) && GetTickCount64() >= after && InterlockedIncrement(&wts_reports) <= 12) {   /* (not the allocation's zero fill) */
-                hos_log("nvn: write to a WriteTexels source at guest %#llx by %s", (unsigned long long)(a - (uintptr_t)GP(0)), tn);
+                hos_log("nvn: write to a WriteTexels source at guest %#llx by %s (host pc exe+%#llx)", (unsigned long long)(a - (uintptr_t)GP(0)), tn,
+                        (unsigned long long)((uintptr_t)e->ExceptionRecord->ExceptionAddress - (uintptr_t)GetModuleHandleA(NULL)));
                 hos_backtrace();
             }
             DWORD old;

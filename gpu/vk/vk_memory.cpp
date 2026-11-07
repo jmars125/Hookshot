@@ -772,6 +772,41 @@ void memory_drop_shadow(uint64_t guest, uint64_t size) {
     shadow_drop_range(guest, guest + size);
 }
 
+// ---- (EvilBoyce) GPU results by page: the submission that last wrote a page into guest memory ----
+// For invalidate (vk_replay.cpp): a CPU read of GPU results waits until the submission that writes them there is done, as
+// the console's coherent memory has them once that work is. Guest page number -> the recording's timeline value (write-backs
+// from a mirror, and small bindings written in place). RX_VK_NO_READBACK_WAIT=1: none
+namespace {
+std::mutex wb_pages_mu;
+std::unordered_map<uint32_t, uint64_t> wb_pages;
+uint64_t wb_pruned_at = 0;
+void wb_pages_note(uint64_t guest_lo, uint64_t guest_hi, uint64_t value) {
+    static const bool off = getenv("RX_VK_NO_READBACK_WAIT") != nullptr;
+    if (off || !value || guest_hi <= guest_lo) return;
+    std::lock_guard lk(wb_pages_mu);
+    for (uint64_t p = guest_lo >> kPageShift; p <= (guest_hi - 1) >> kPageShift; p++) wb_pages[(uint32_t)p] = value;
+    if (wb_pages.size() > 200000 && mem_completed > wb_pruned_at) {   // (the ones done long ago: kept as "ever" with value 1)
+        for (auto& kv : wb_pages)
+            if (kv.second <= mem_completed) kv.second = 1;
+        wb_pruned_at = mem_completed;
+    }
+}
+} // namespace
+uint64_t memory_writeback_value(uint64_t guest, uint64_t size, bool* ever) {
+    uint64_t v = 0;
+    if (ever) *ever = false;
+    if (!size) return 0;
+    std::lock_guard lk(wb_pages_mu);
+    if (wb_pages.empty()) return 0;
+    for (uint64_t p = guest >> kPageShift; p <= (guest + size - 1) >> kPageShift; p++) {
+        auto it = wb_pages.find((uint32_t)p);
+        if (it == wb_pages.end()) continue;
+        if (ever) *ever = true;
+        v = std::max(v, it->second);
+    }
+    return v;
+}
+
 /// A copy that fails instead of faulting on a page unmapped meanwhile (structured exception handling: the common case
 /// costs a memcpy; ReadProcessMemory per page was ~2.3 us each). Not inlined, and the copy a call: without
 /// -fasync-exceptions clang catches a fault in a __try block only across a call, and a 4 KB memcpy inlined into the
@@ -1537,6 +1572,8 @@ BufferRef gpu_buffer_bind(uint64_t gpu, uint64_t size, bool written) {
         auto& e = direct_by_pool[p->lo];
         e.first++, e.second = (int)p->mstate;
         if (written) p->direct_write_epoch = mirror_epoch;
+        if (written && size <= (1u << 20))   // (EvilBoyce: GPU results written in place; small ones: the readbacks are)
+            wb_pages_note(p->lo + off, p->lo + std::min(off + size, p->hi - p->lo), mem_rec_value);
         return {p->buffer, off, size, 0};
     }
     if (p->synced_epoch != mirror_epoch || p->sync_seg > texture_segment()) mirror_sync(*p);
@@ -1818,6 +1855,7 @@ void memory_end_submission(VkCommandBuffer cmd) {
             checkpoint_mark(cmd, p->lo, 'b');
             vkCmdCopyBuffer(cmd, p->mirror, p->buffer, (uint32_t)runs.size(), runs.data());
             for (const VkBufferCopy& r : runs) st_wb_bytes += (int64_t)r.size;
+            for (const VkBufferCopy& r : runs) wb_pages_note(p->lo + r.dstOffset, p->lo + r.dstOffset + r.size, mem_rec_value);   // (EvilBoyce)
             {   // (hookshot) RX_VK_LOG_WRITEBACK=1: the pools written back the most, every 600 write-back submissions
                 static const bool log_wb = getenv("RX_VK_LOG_WRITEBACK") != nullptr;
                 if (log_wb) {

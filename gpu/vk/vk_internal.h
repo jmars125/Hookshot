@@ -146,6 +146,9 @@ bool ub_read(uint64_t addr, void* dst, uint64_t n);
 /// [guest, guest + n) as of the submit being replayed: live itself, or scratch holding it with the kept pages over it
 const uint8_t* memory_as_submitted(uint64_t guest, const uint8_t* live, uint64_t n, std::vector<uint8_t>& scratch);
 void memory_drop_shadow(uint64_t guest, uint64_t size);   // (a write the capture did not take: the copies go)
+/// (EvilBoyce) the newest submission value whose write-back reaches into [guest, guest + size) (0: none ever); *ever set
+/// when any write-back ever did
+uint64_t memory_writeback_value(uint64_t guest, uint64_t size, bool* ever);
 uint32_t memory_generation();
 /// 1: a page of [guest, guest + size) was written after generation gen; 0: none was
 bool memory_written_since(uint64_t guest, uint64_t size, uint32_t gen);

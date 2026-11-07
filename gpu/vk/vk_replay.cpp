@@ -1635,6 +1635,7 @@ bool tex_pages_any(uint64_t gpu, uint64_t size) {
     return false;
 }
 void texture_created_of(const nvn_tex* t) { tex_pages_add(t, +1); }
+uint64_t fence();
 void invalidate(uint64_t gpu, uint64_t size) {
     static const bool log_inv = getenv("RX_VK_LOG_INVALIDATE") != nullptr;
     static std::atomic<int> logged{0};
@@ -1646,6 +1647,58 @@ void invalidate(uint64_t gpu, uint64_t size) {
         }
         logf("vk: invalidate %#llx +%#llx:%s", (unsigned long long)gpu, (unsigned long long)size,
              hits.empty() ? " no texture the GPU wrote" : hits.c_str());
+    }
+    {   // (EvilBoyce, diagnostics) RX_VK_LOG_READBACK=<present>: from that present on, 300 invalidates with the fence handed
+        // out, the GPU's completed value, whether the replay is behind, and the first words the CPU is about to read
+        static const int64_t from = getenv("RX_VK_LOG_READBACK") ? atoll(getenv("RX_VK_LOG_READBACK")) : -1;
+        static std::atomic<int> n{0};
+        if (from >= 0 && presents_now >= from && n++ < 300) {
+            uint32_t w[8]{};
+            host->gpu_read(gpu, w, sizeof w);
+            logf("vk: readback %lld %#llx +%#llx: fence %llu done %llu behind %d | %08x %08x %08x %08x %08x %08x %08x %08x",
+                 (long long)presents_now, (unsigned long long)gpu, (unsigned long long)size, (unsigned long long)fence(),
+                 (unsigned long long)completed(), (int)replay_behind(), w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7]);
+        }
+    }
+    // (EvilBoyce) GPU results in buffers: the CPU reads them once the submission that writes them back is done. The game
+    // reads them when its own pacing says the GPU has finished that frame, which on the console's coherent memory means the
+    // values are there; here they reach guest memory only with the write-back at the end of the submission that the replay
+    // may not have recorded or the GPU not finished yet. OoT reads its exposure meter (a sum the GPU adds to each frame and
+    // the CPU reads and sets to 0) this way: it read 0 one frame, then the old sum came back over the CPU's 0 and the next
+    // frame added to it (2x): the exposure stepped 0.2 EV up and down several times a second (the white flashes).
+    // RX_VK_NO_READBACK_WAIT=1: as before
+    if (size) {
+        static const bool off = getenv("RX_VK_NO_READBACK_WAIT") != nullptr;
+        bool ever = false;
+        if (!off && (memory_writeback_value(host->gpu_guest(gpu), size, &ever), ever)) {
+            static std::atomic<int64_t> calls{0}, waited{0}, ns{0};
+            const auto w0 = std::chrono::steady_clock::now();
+            bool w = false;
+            const uint64_t f0 = fence(), c0 = completed();
+            const bool behind0 = replay_behind();
+            static const bool no_catchup = getenv("RX_VK_READBACK_NO_CATCHUP") != nullptr;   // (A/B: recorded work only)
+            if (behind0 && !no_catchup) wait_queue_empty(), w = true;   // (work handed over may write it back too)
+            const auto w1 = std::chrono::steady_clock::now();
+            const uint64_t v = memory_writeback_value(host->gpu_guest(gpu), size, nullptr);
+            if (v > completed()) wait_value(v), w = true;
+            if (w) {
+                waited++;
+                const int64_t d = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - w0).count();
+                ns += d;
+                static const bool log_each = getenv("RX_VK_LOG_READBACK_WAITS") != nullptr;
+                static std::atomic<int> logged{0};
+                if (log_each && presents_now > 4000 && logged++ < 300)
+                    logf("vk: readback wait %lld %#llx +%#llx: %.2f ms (catch-up %.2f) value %llu, fence %llu, done %llu, behind %d",
+                         (long long)presents_now, (unsigned long long)gpu, (unsigned long long)size, d / 1e6,
+                         std::chrono::duration_cast<std::chrono::nanoseconds>(w1 - w0).count() / 1e6, (unsigned long long)v,
+                         (unsigned long long)f0, (unsigned long long)c0, (int)behind0);
+            }
+            if (++calls % 3000 == 0) {
+                const int64_t n = waited.exchange(0);
+                logf("vk: readbacks of GPU results: %lld of 3000 waited for their write-back, %.2f ms each", (long long)n,
+                     n ? ns.exchange(0) / (double)n / 1e6 : 0.0);
+            }
+        }
     }
     // (textures the GPU wrote there: their texels into memory before the CPU reads it, as vmap_changing does. The game
     // waited for the work that wrote them; the replay is caught up first)
@@ -1983,6 +2036,21 @@ void do_present(const nvn_tex* t, const int crop[4]) {
         presents++;
         presents_now = presents;
         if (presents == 1) hang_watch_start();
+        {   // (EvilBoyce, diagnostics) RX_VK_WATCH_CPU=<present>:<gpu address>[,...] (hex addresses): from that present on, the
+            // CPU's writes to those 4 KB pages logged with the writer's stack (host page watch: 12 reports)
+            static bool armed = false;
+            static const char* e = getenv("RX_VK_WATCH_CPU");
+            if (e && !armed && host->watch_guest_writes && presents >= atoll(e)) {
+                armed = true;
+                for (const char* q = strchr(e, ':'); q && *q;) {
+                    char* end;
+                    const uint64_t a = strtoull(q + 1, &end, 16);
+                    if (end == q + 1) break;
+                    if (const uint64_t g = host->gpu_guest(a)) host->watch_guest_writes(g & ~4095ull, 4096);
+                    q = *end ? end : nullptr;
+                }
+            }
+        }
         ts_anchor_ns = host->ticks() * 32;
         dump_present(presents);
         if (src && (dev.offscreen || shots) && offscreen_init()) {

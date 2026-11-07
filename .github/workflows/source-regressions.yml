@@ -16,6 +16,8 @@ on:
       - gpu/vk/vk_menu.cpp
       - tests/test_fps_rate.py
       - builder/linux/hookshot-launch
+      - builder/linux/AppRun
+      - builder/linux/hookshot-builder.desktop
       - scripts/linux/appimage.sh
       - tests/test_hookshot_launch.py
       - .github/workflows/source-regressions.yml
@@ -34,6 +36,8 @@ on:
       - gpu/vk/vk_menu.cpp
       - tests/test_fps_rate.py
       - builder/linux/hookshot-launch
+      - builder/linux/AppRun
+      - builder/linux/hookshot-builder.desktop
       - scripts/linux/appimage.sh
       - tests/test_hookshot_launch.py
       - .github/workflows/source-regressions.yml

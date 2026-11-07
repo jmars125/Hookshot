@@ -1,6 +1,6 @@
 #!/bin/sh
-# Start the game Hookshot Builder wrote, from that folder, without this AppImage's libraries.
-# The builder's AppImage is the compiler. This one only launches the game the builder already made.
+# Start the game Hookshot Builder wrote, from that folder, without the AppImage's libraries.
+# The builder AppImage calls this for --play. The window's Play button does the same thing.
 #
 #   hookshot-launch                      the out= folder in ~/.config/hookshot/builder.ini
 #   hookshot-launch /path/to/the/game    that folder

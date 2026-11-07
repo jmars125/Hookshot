@@ -83,10 +83,9 @@ A build takes about 40 minutes, and you can use your PC in the meantime.
    make it executable (`chmod +x`) and start it. It is Hookshot Builder with everything it needs inside: the compiler,
    the libraries and the Vulkan renderer. Nothing else has to be installed.
 2. Choose your `.nup` (or your `romfs` and `exefs` folders), a language and a folder for the game, and build.
-3. When it finishes, press Play. The game is also added to your applications menu, and starting the AppImage again
-   offers Play. The game itself is `hookshot` in the folder you chose: it runs without the AppImage.
-4. `Hookshot-launcher-<version>-x86_64.AppImage` only starts that game. It reads the folder the builder saved
-   and does not carry the compiler. Pass a folder to start a different build: `./Hookshot-launcher-….AppImage ~/Games/Hookshot`.
+3. When it finishes, press Play. The game is also added to your applications menu. The same AppImage starts that
+   game without opening the builder: `./Hookshot-<version>-x86_64.AppImage --play`, or `--play ~/Games/Hookshot`
+   for a different folder. The game itself is `hookshot` in the folder you chose: it runs without the AppImage.
 
 From the command line: `./Hookshot-<version>-x86_64.AppImage --cli --nup ~/your-game.nup --out ~/Games/Hookshot`
 (the same options as `make_game.py`).

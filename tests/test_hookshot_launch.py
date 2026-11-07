@@ -103,13 +103,14 @@ class LaunchTests(unittest.TestCase):
         self.assertNotEqual(ran.returncode, 0)
         self.assertIn("no built game", ran.stderr)
 
-    def test_the_launcher_is_packed_beside_the_builder(self):
+    def test_play_is_the_builder_appimage(self):
         script = (ROOT / "scripts" / "linux" / "appimage.sh").read_text(encoding="utf-8")
-        self.assertIn("Hookshot-launcher-", script)
-        self.assertIn("hookshot-launch", script)
-        desktop = (ROOT / "builder" / "linux" / "hookshot-launcher.desktop").read_text(encoding="utf-8")
-        self.assertIn("Name=Hookshot\n", desktop)
-        self.assertIn("Exec=AppRun\n", desktop)
+        self.assertNotIn("Hookshot-launcher-", script)
+        apprun = (ROOT / "builder" / "linux" / "AppRun").read_text(encoding="utf-8")
+        self.assertIn("hookshot-launch", apprun)
+        desktop = (ROOT / "builder" / "linux" / "hookshot-builder.desktop").read_text(encoding="utf-8")
+        self.assertIn("Actions=Play;", desktop)
+        self.assertIn("Exec=AppRun --play\n", desktop)
 
 
 if __name__ == "__main__":

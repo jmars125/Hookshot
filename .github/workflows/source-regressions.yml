@@ -16,6 +16,7 @@ on:
       - gpu/vk/vk_menu.cpp
       - tests/test_fps_rate.py
       - tests/test_fps_overlay_order.py
+      - tests/test_dispatch_clock.py
       - gpu/vk/vk_framegen.cpp
       - tests/test_framegen_gate.py
       - gpu/vk/vk_draw.cpp
@@ -36,6 +37,7 @@ on:
       - gpu/vk/vk_menu.cpp
       - tests/test_fps_rate.py
       - tests/test_fps_overlay_order.py
+      - tests/test_dispatch_clock.py
       - gpu/vk/vk_framegen.cpp
       - tests/test_framegen_gate.py
       - gpu/vk/vk_draw.cpp
@@ -86,6 +88,8 @@ jobs:
       - name: Check FPS overlay transfer ordering
         if: runner.os == 'Linux'
         run: python -I -B tests/test_fps_overlay_order.py
+      - name: Check dispatch timing stays off
+        run: python -I -B tests/test_dispatch_clock.py
       - name: Check frame generation stays off until asked
         if: runner.os == 'Linux'
         run: python -I -B tests/test_framegen_gate.py

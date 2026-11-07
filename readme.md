@@ -211,6 +211,20 @@ With Game speed on Per frame, the game runs slower whenever it is below 60 fps. 
 Use a controller, or the keyboard and mouse. On the keyboard, <kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd> move
 and the arrow keys turn the camera.
 
+To change which gamepad button or key presses a Switch button, add lines to `hookshot_options.ini`:
+
+```ini
+pad_a=0
+key_a=69,13
+```
+
+`pad_<button>` is a gamepad input by position: 0 bottom face button, 1 right, 2 left, 3 top, 4 Select or Back, 5 Home,
+6 Start, 7 and 8 the stick presses, 9 and 10 the shoulder buttons, 11 to 14 the D-pad (up, down, left, right), 15 and
+16 the triggers, -1 none. `key_<button>` is one or two
+[Windows key codes](https://learn.microsoft.com/windows/win32/inputdev/virtual-key-codes) in decimal (69 is
+<kbd>E</kbd>, 13 <kbd>Enter</kbd>), 0 none. The buttons are `a` `b` `x` `y` `l` `r` `zl` `zr` `plus` `minus` `ls`
+`rs` `left` `up` `right` `down`. A button the file leaves out keeps its default.
+
 ## Mods
 
 Put mods in a `mods` folder beside `hookshot.exe` (or point `HOS_MODS` at another folder), in the layout emulators

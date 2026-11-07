@@ -451,7 +451,7 @@ static int game_main(int argc, char **argv) {
     hos_log("boot: image %zu MB at %#llx, %llu MB of memory for the game", n >> 20, IMAGE_BASE,
             (unsigned long long)(hos_total_memory >> 20));
     void hos_mods_init(const char *image_path);
-    hos_mods_init(image);   /* mods.c: <exe folder>\mods (RomFS files, exefs data patches) */
+    hos_mods_init(image);   /* mods.c: <exe folder>\mods (RomFS files) */
 
     Ctx *c = hos_boot_main_thread(hos_main_stack_size);
     uint64_t sp = c->x[31];

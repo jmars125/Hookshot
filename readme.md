@@ -211,6 +211,17 @@ With Game speed on Per frame, the game runs slower whenever it is below 60 fps. 
 Use a controller, or the keyboard and mouse. On the keyboard, <kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd> move
 and the arrow keys turn the camera.
 
+## Mods
+
+Put mods in a `mods` folder beside `hookshot.exe` (or point `HOS_MODS` at another folder), in the layout emulators
+use: `mods/<name>/romfs/...` holds files that replace or add to the game's own. Deeper layouts such as
+`mods/contents/<title id>/<name>/romfs` work too. A folder whose name starts with `-` or `_` is off. When two mods
+have the same file, the one whose folder name sorts last wins, so name them `01-...`, `02-...` to set the order.
+
+Only RomFS mods are loaded. `exefs` patches (`.pchtxt`, `.ips`) are left out: Hookshot compiles the game's code ahead
+of time, so patching its instructions would need a rebuild. The log (`hookshot_log.txt` when started from its icon)
+names each mod and the files read from it.
+
 ## How it works
 
 1. `nx2/lift.py` translates the game's ARM64 code to C.

@@ -10,7 +10,7 @@
 namespace mkwvk {
 namespace {
 
-constexpr int kSlots = 24;                // (vk_replay.cpp's kRecordings)
+constexpr int kSlots = 48;                // (vk_replay.cpp's kRecordings)
 constexpr uint32_t kPairs = 1024;         // spans a recording can time
 VkQueryPool pool = VK_NULL_HANDLE;
 struct Slot {

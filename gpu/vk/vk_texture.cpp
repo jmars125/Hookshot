@@ -221,7 +221,7 @@ Staging staging(uint64_t n, uint64_t align = 256) {
         }
     }
     Arena a;
-    a.size = std::max(kArena, (n + 0xFFFFF) & ~0xFFFFFull);
+    a.size = std::max(kArena, uint64_t((n + 0xFFFFF) & ~0xFFFFFull));
     void* m = nullptr;
     if (!create_buffer(a.size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true, a.buffer,
                        a.allocation, &m) || !m)

@@ -131,9 +131,8 @@ What a new build keeps and what it replaces in the game folder:
 
 ### What you need
 
-- The Visual Studio C++ tools and the Windows SDK. Microsoft does not allow these to be bundled, so install
-  [Visual Studio Build Tools](https://visualstudio.microsoft.com/downloads/) with "Desktop development with C++". The
-  builder tells you if they are missing.
+- Nothing to install for the build itself: Hookshot Builder brings its own compiler ([llvm-mingw](https://github.com/mstorsjo/llvm-mingw),
+  as TotK Recomp does), Python and libraries. Visual Studio and the Windows SDK are no longer needed.
 - 64-bit Windows 10 or 11.
 - A graphics card with Vulkan 1.3 and mesh shaders, with an up-to-date driver. Only NVIDIA has been tested.
 - 16 GB of RAM or more. A run uses about 10 GB.
@@ -146,7 +145,9 @@ To build from the command line you also need:
 - Python 3 with `lz4`, `numpy`, `capstone`, `unicorn` and `zstandard`:
   `pip install lz4 numpy capstone "unicorn>=2.1,<2.2" zstandard`
   Use Python from python.org: the Microsoft Store's Python installs packages where `python -I` does not look.
-- The clang from [emsdk](https://github.com/emscripten-core/emsdk), at `C:\emsdk`.
+- [llvm-mingw](https://github.com/mstorsjo/llvm-mingw) (the `ucrt-x86_64` build), with `HOOKSHOT_MINGW` set to its folder. Without
+  it the build uses the clang from [emsdk](https://github.com/emscripten-core/emsdk) at `C:\emsdk` with Visual Studio's C++ tools
+  and the Windows SDK (`HOOKSHOT_MSVC=1` forces that route).
 - Visual Studio 2022 with .NET 8, only if you want to change the builder itself.
 - The prebuilt tools that go in `third_party/`: `a64emit`, `lld-link`, `zbic` and SDL2.
 - What the HookshotBuilder zip carries in its `tools` folder and a clone does not. The builder sets the variables

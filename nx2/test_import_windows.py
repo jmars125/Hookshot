@@ -40,6 +40,11 @@ std::mutex bg_mu;std::condition_variable bg_done_cv;std::vector<uint64_t> bg_inf
 void logf(const char*,...){} void bg_drain(){}
 void guest_pages_set(uint64_t,uint64_t,uint64_t){}
 void retire_pool(std::map<uint64_t,Pool>::iterator it) { imported.erase(it);last_pool=nullptr;std::fill(std::begin(pool_cache),std::end(pool_cache),nullptr);retires++; }
+enum { VK_SUCCESS = 0 };
+thread_local bool import_cooling = false;
+thread_local int import_result = 0;
+bool import_on_hold(uint64_t, uint64_t) { import_cooling = false; return false; }
+void import_remember_failure(uint64_t, uint64_t) {}
 '''+guard+'''
     p.lo=lo;p.hi=hi;imports++;return true;
 }

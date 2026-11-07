@@ -10,6 +10,9 @@
 #include <vector>
 
 #include "vk_menu.h"
+#ifndef HOOKSHOT_VERSION   // (nx2/build.py gives it to this file: nx2/version.py)
+#define HOOKSHOT_VERSION "unknown"
+#endif
 
 namespace mkwvk {
 HWND app_window();
@@ -32,6 +35,7 @@ const char* tx_framegen(int v) {
 const char* tx_onoff(int v) { return v ? "On" : "Off"; }
 const char* tx_upscale(int v) {
     static const char* t[] = {"Off", "Catmull-Rom", "Lanczos"};
+    if ((unsigned)v >= sizeof t / sizeof t[0]) return t[0];   // (a setting past the row: the label, not the next bytes)
     return t[v];
 }
 const char* tx_percent(int v) {
@@ -203,6 +207,25 @@ void paint_menu(HDC dc, uint32_t w, uint32_t h, int s) {
     HGDIOBJ old = SelectObject(dc, title);
     SetTextColor(dc, RGB(236, 240, 236));
     TextOutA(dc, 16 * s, 12 * s, "Hookshot", 8);
+    {   // (which build, beside the title, so a report can say it without opening the log; the release alone when the whole
+        // line would run into the title)
+        SIZE tsz{};
+        GetTextExtentPoint32A(dc, "Hookshot", 8, &tsz);
+        HFONT small = font(12 * s, FW_NORMAL);
+        SelectObject(dc, small);
+        SetTextColor(dc, RGB(140, 150, 144));
+        std::string ver = HOOKSHOT_VERSION;
+        const int room = (int)w - 32 * s - tsz.cx - 12 * s;
+        SIZE sz{};
+        GetTextExtentPoint32A(dc, ver.c_str(), (int)ver.size(), &sz);
+        if (sz.cx > room && ver.find(" (") != std::string::npos) {
+            ver.resize(ver.find(" ("));
+            GetTextExtentPoint32A(dc, ver.c_str(), (int)ver.size(), &sz);
+        }
+        if (sz.cx <= room) TextOutA(dc, (int)w - 16 * s - sz.cx, 18 * s, ver.c_str(), (int)ver.size());
+        SelectObject(dc, title);
+        DeleteObject(small);
+    }
     SelectObject(dc, body);
     const int rh = 28 * s, top = 44 * s;
     for (int i = 0; i < kRows; i++) {
@@ -349,7 +372,9 @@ void menu_init() {
     if (opts.framegen == 1) opts.framegen = 2;
     if (const char* e = getenv("RX_VK_FRAMEGEN_MULT")) opts.framegen = std::min(std::max(atoi(e), 2), 8);
     if (const char* e = getenv("RX_VK_PACE")) opts.pace = atoi(e) != 0;
-    if (const char* e = getenv("RX_VK_UPSCALE")) opts.upscale = atoi(e);
+    if (const char* e = getenv("RX_VK_UPSCALE"))
+        for (Row& r : rows)
+            if (r.value == &opts.upscale) *r.value = std::min(std::max(atoi(e), r.lo), r.hi);
     if (const char* e = getenv("HOS_REALTIME_STEP")) opts.realtime = atoi(e) != 0;
     if (const char* e = getenv("HOS_DYNRES")) opts.resolution = atoi(e) != 0 ? 0 : 1;
 }

@@ -22,6 +22,20 @@ on:
       - gpu/vk/vk_draw.cpp
       - tests/test_table_track.py
       - tests/test_desc_clock.py
+      - gpu/vk/vk_internal.h
+      - tests/test_prof_clock.py
+      - gpu/vk/vk_memory.cpp
+      - tests/test_pool_span.py
+      - tests/test_submitted_page.py
+      - tests/test_shader_census_cmd.py
+      - nx2/version.py
+      - nx2/test_version.py
+      - host/nn_audio.c
+      - tests/test_audio_deadline.py
+      - host/pad_sdl.c
+      - tests/test_rumble_refresh.py
+      - tests/test_upscale_label.py
+      - nx2/test_import_windows.py
       - .github/workflows/source-regressions.yml
   pull_request:
     branches: [main]
@@ -44,6 +58,20 @@ on:
       - gpu/vk/vk_draw.cpp
       - tests/test_table_track.py
       - tests/test_desc_clock.py
+      - gpu/vk/vk_internal.h
+      - tests/test_prof_clock.py
+      - gpu/vk/vk_memory.cpp
+      - tests/test_pool_span.py
+      - tests/test_submitted_page.py
+      - tests/test_shader_census_cmd.py
+      - nx2/version.py
+      - nx2/test_version.py
+      - host/nn_audio.c
+      - tests/test_audio_deadline.py
+      - host/pad_sdl.c
+      - tests/test_rumble_refresh.py
+      - tests/test_upscale_label.py
+      - nx2/test_import_windows.py
       - .github/workflows/source-regressions.yml
   workflow_dispatch:
 
@@ -100,3 +128,28 @@ jobs:
         run: python -I -B tests/test_table_track.py
       - name: Check descriptor timing stays off
         run: python -I -B tests/test_desc_clock.py
+      - name: Check the replay clock skips the performance counter
+        if: runner.os == 'Linux'
+        run: python -I -B tests/test_prof_clock.py
+      - name: Check a pool span is reused without the lock
+        if: runner.os == 'Linux'
+        run: python -I -B tests/test_pool_span.py
+      - name: Check a captured page is read once
+        if: runner.os == 'Linux'
+        run: python -I -B tests/test_submitted_page.py
+      - name: Check the shader list's text encoding
+        run: python -I -B tests/test_shader_census_cmd.py
+      - name: Check the build's version stamp
+        run: python -I -B nx2/test_version.py
+      - name: Check the audio mixer's catch-up
+        if: runner.os == 'Linux'
+        run: python -I -B tests/test_audio_deadline.py
+      - name: Check controller rumble keeps going
+        if: runner.os == 'Linux'
+        run: python -I -B tests/test_rumble_refresh.py
+      - name: Check upscale menu labels
+        if: runner.os == 'Linux'
+        run: python -I -B tests/test_upscale_label.py
+      - name: Check import windows
+        if: runner.os == 'Linux'
+        run: python -I -B nx2/test_import_windows.py --cxx g++

@@ -764,6 +764,17 @@ static void commit(void) {   /* (with the lock held) */
     ncmds = 0;
 }
 
+/* The mixer's next deadline. `next` was the one just woken for; one frame is `period` later, on that same grid.
+   A wake more than 100 ms late used to move the grid to now. The frames in between were never mixed, so each stall
+   left the sound that far behind the picture: a little on the intro, and by seconds after a longer one. The loop
+   mixes the owed frames instead (a late wake returns at once until the grid has caught up). A pause of more than a
+   few seconds still jumps, so a suspend is not mixed out all at once. */
+static int64_t audio_mix_deadline(int64_t now, int64_t next, int64_t period) {
+    next += period;
+    if (now - next > 3000000000LL) next = now + period;
+    return next;
+}
+
 /* ---- the renderer thread --------------------------------------------------------------------------------------- */
 static uint64_t renderer_event;
 static volatile int renderer_running;
@@ -778,8 +789,7 @@ static DWORD WINAPI renderer_main(void *p) {
     static int16_t pcm[FRAME * 2];
     for (;;) {
         hos_sleep_ns(next - hos_now_ns());
-        next += period;
-        if (hos_now_ns() - next > 100000000) next = hos_now_ns() + period;   /* (fell far behind: catch up) */
+        next = audio_mix_deadline(hos_now_ns(), next, period);
         if (!renderer_running) continue;
         au_lock();
         if (ncmds && hos_now_ns() - last_update_ns > 50000000) commit();   /* (no update came: see "parameter updates") */

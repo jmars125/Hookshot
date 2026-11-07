@@ -460,13 +460,13 @@ static void dec_acquire(Ctx *c) {
     d->slot_pts[slot] = p->pts;
     d->slot_last[slot] = p->last;
     d->busy[slot] = 1;
-    {   /* (hookshot) HOS_VIDEO_LOG: the picture's time against the time since the first, to see the picture fall behind the sound */
-        static int64_t first_ns, first_pts;
-        if (d->acquires == 1) first_ns = hos_now_ns(), first_pts = p->pts;
-        if (video_log() && d->acquires % 60 == 0)
+    {   /* (hookshot) HOS_VIDEO_LOG: the picture's time against this decoder's movie clock, to see it fall behind the sound */
+        if (video_log() && d->acquires % 60 == 0) {
+            const int64_t now = hos_now_ns();
             hos_log("video: acquire %lld: picture at %.2f s, wall clock %.2f s (behind by %.2f s), %d decoded ahead", (long long)d->acquires,
-                    (double)(p->pts - first_pts) / 1e9, (double)(hos_now_ns() - first_ns) / 1e9,
-                    (double)(hos_now_ns() - first_ns - (p->pts - first_pts)) / 1e9, d->qn);
+                    (double)(p->pts - d->clock_pts) / 1e9, (double)(now - d->clock_ns) / 1e9,
+                    (double)(now - d->clock_ns - (p->pts - d->clock_pts)) / 1e9, d->qn);
+        }
     }
     if (video_log() && (d->acquires <= 8 || p->last || d->acquires % 300 == 0)) {
         uint64_t sum = 0, n = 0;   /* (the picture's mean luma and RGB, sampled: a black or garbage decode shows) */

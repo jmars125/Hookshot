@@ -78,20 +78,38 @@ void WriteStorageByCasLoop(EmitContext& ctx, const IR::Value& binding, const IR:
 }
 } // Anonymous namespace
 
-void EmitLoadGlobalU8(EmitContext&) {
-    throw NotImplementedException("SPIR-V Instruction");
+// (hookshot) 8- and 16-bit loads through a pointer no storage buffer was found for: the aligned 32-bit word by the same
+// search as LoadGlobal32, and the byte or half of it the address names (the console's loads are naturally aligned). They
+// threw "not implemented": 30 of OoT's mesh programs (LoadGlobalS16) were left untranslated on every card, issue 351
+namespace {
+Id LoadGlobalNarrow(EmitContext& ctx, Id address, u32 bits, bool is_signed) {
+    if (!ctx.profile.support_int64) {
+        LOG_WARNING(Shader_SPIRV, "Int64 not supported, ignoring memory operation");
+        return ctx.Const(0u);
+    }
+    const Id aligned{ctx.OpBitwiseAnd(ctx.U64, address, ctx.Constant(ctx.U64, u64{~u64{3}}))};
+    const Id word{ctx.OpFunctionCall(ctx.U32[1], ctx.load_global_func_u32, aligned)};
+    const Id low{ctx.OpUConvert(ctx.U32[1], ctx.OpBitwiseAnd(ctx.U64, address, ctx.Constant(ctx.U64, u64{3})))};
+    const Id shift{ctx.OpShiftLeftLogical(ctx.U32[1], low, ctx.Const(3u))};
+    return is_signed ? ctx.OpBitFieldSExtract(ctx.U32[1], word, shift, ctx.Const(bits))
+                     : ctx.OpBitFieldUExtract(ctx.U32[1], word, shift, ctx.Const(bits));
+}
+} // Anonymous namespace
+
+Id EmitLoadGlobalU8(EmitContext& ctx, Id address) {
+    return LoadGlobalNarrow(ctx, address, 8, false);
 }
 
-void EmitLoadGlobalS8(EmitContext&) {
-    throw NotImplementedException("SPIR-V Instruction");
+Id EmitLoadGlobalS8(EmitContext& ctx, Id address) {
+    return LoadGlobalNarrow(ctx, address, 8, true);
 }
 
-void EmitLoadGlobalU16(EmitContext&) {
-    throw NotImplementedException("SPIR-V Instruction");
+Id EmitLoadGlobalU16(EmitContext& ctx, Id address) {
+    return LoadGlobalNarrow(ctx, address, 16, false);
 }
 
-void EmitLoadGlobalS16(EmitContext&) {
-    throw NotImplementedException("SPIR-V Instruction");
+Id EmitLoadGlobalS16(EmitContext& ctx, Id address) {
+    return LoadGlobalNarrow(ctx, address, 16, true);
 }
 
 Id EmitLoadGlobal32(EmitContext& ctx, Id address) {

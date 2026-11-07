@@ -1211,16 +1211,19 @@ VkImageView texture_view_of(uint32_t handle, VkImageViewType want, ViewUse use, 
     const uint32_t version = texture_slot_version((int)(handle & 0xFFFFF));
     const uint64_t dgen = texture_destroy_generation();
     const uint64_t key = (uint64_t)(handle & 0xFFFFF) | (uint64_t)want << 20 | (uint64_t)use << 28 | (uint64_t)storage_as << 32;
+    static const bool log_hits = getenv("RX_VK_LOG_HITS") != nullptr;
     static int64_t st_hit, st_new, st_ver, st_gen, st_n;
-    if (++st_n % 200000 == 0 && getenv("RX_VK_LOG_HITS"))
-        logf("vk: handle hits %lld, new %lld, slot re-registered %lld, a texture destroyed %lld", (long long)st_hit,
-             (long long)st_new, (long long)st_ver, (long long)st_gen);
-    if (auto it = handle_hits.find(key); it == handle_hits.end()) st_new++;
-    else if (it->second.version != version) st_ver++;
-    else if (it->second.destroy_gen != dgen) st_gen++;
-    else st_hit++;
-    if (auto it = handle_hits.find(key);
-        it != handle_hits.end() && it->second.version == version && it->second.destroy_gen == dgen) {
+    const auto it = handle_hits.find(key);
+    if (log_hits) {   // (the counters were a second search of this map on every binding, with the log off)
+        if (++st_n % 200000 == 0)
+            logf("vk: handle hits %lld, new %lld, slot re-registered %lld, a texture destroyed %lld", (long long)st_hit,
+                 (long long)st_new, (long long)st_ver, (long long)st_gen);
+        if (it == handle_hits.end()) st_new++;
+        else if (it->second.version != version) st_ver++;
+        else if (it->second.destroy_gen != dgen) st_gen++;
+        else st_hit++;
+    }
+    if (it != handle_hits.end() && it->second.version == version && it->second.destroy_gen == dgen) {
         if (it->second.tex && it->second.tex_epoch != texture_epoch()) {   // (once a submission: its age and contents)
             if (!texture_touch_quick(it->second.tex, it->second.sampling)) {
                 ParLock lk;
@@ -1984,6 +1987,7 @@ void checkpoints_report() {
     static bool done;
     if (done) return;
     done = true;
+    if (getenv("RX_VK_FAULT_INFO")) device_fault_report();   // (now, while the process is still alive: the faulting address)
     {   // (RX_VK_FLASH_RECORD=<program,...>: those programs' last draws, sizes and all)
         const uint64_t f = texture_frame_no();
         draw_records_log(f > 6 ? f - 6 : 0, f);
@@ -3742,6 +3746,18 @@ uint32_t mesh_args_take(uint32_t n) {   // (n entries of the ring, never entry 0
     return at + 1;
 }
 
+/// A vertex stream bound earlier this submission, still the same buffer (a mirror made since, or a new submission, is not)
+bool vertex_bind_reuse(uint64_t addr, uint64_t size, uint64_t stamp, uint64_t cached_addr, uint64_t cached_size,
+                       uint64_t cached_stamp, int cached) {
+    return cached && addr && size && addr == cached_addr && size == cached_size && stamp == cached_stamp;
+}
+struct KeptVertex {
+    uint64_t addr = 0, size = 0, stamp = 0;
+    BufferRef ref{};
+    int ok = 0;
+};
+thread_local KeptVertex kept_vb[16];
+
 void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
     PROF(PROF_DRAW);
     stats_tick();
@@ -4136,12 +4152,22 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
         return;
     }
     // vertex streams (from their pools, strides dynamic) and the zero stream
+    // (the same streams are bound for draw after draw: the pool lookup, which was ~8% of a race under the lock, is
+    // skipped until the submission or the mirror changes)
     VkBuffer vbufs[16];
     VkDeviceSize voffs[16], vsizes[16], vstrides[16];
     for (uint32_t b = 0; b < 16; b++) {
         vbufs[b] = zero_buffer, voffs[b] = 0, vsizes[b] = 65536, vstrides[b] = 0;
         if (b == 15 || !s.vbuf[b].address) continue;
-        BufferRef r = gpu_buffer_bind(s.vbuf[b].address, std::max<uint64_t>(s.vbuf[b].size, 1), false);
+        const uint64_t vb_addr = s.vbuf[b].address, vb_size = std::max<uint64_t>(s.vbuf[b].size, 1);
+        const uint64_t vb_stamp = gpu_bind_stamp();
+        BufferRef r;
+        if (vertex_bind_reuse(vb_addr, vb_size, vb_stamp, kept_vb[b].addr, kept_vb[b].size, kept_vb[b].stamp, kept_vb[b].ok))
+            r = kept_vb[b].ref;
+        else {
+            r = gpu_buffer_bind(vb_addr, vb_size, false);
+            kept_vb[b] = {vb_addr, vb_size, gpu_bind_stamp(), r, r ? 1 : 0};
+        }
         if (!r) continue;
         vbufs[b] = r.buffer, voffs[b] = r.offset, vsizes[b] = s.vbuf[b].size ? s.vbuf[b].size : VK_WHOLE_SIZE;
         vstrides[b] = s.vstream[b].stride;

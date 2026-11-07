@@ -11,10 +11,14 @@ on:
       - tests/test_make_game_cache.py
       - tests/test_failure_reason.py
       - tests/test_import_hold.py
+      - gpu/vk/vk_replay.cpp
+      - tests/test_ub_gap.py
       - tests/import_hold_test.cpp
       - gpu/vk/import_hold.h
       - gpu/vk/vk_menu.cpp
       - tests/test_fps_rate.py
+      - gpu/vk/vk_memory.cpp
+      - tests/test_vertex_bind.py
       - tests/test_fps_overlay_order.py
       - tests/test_dispatch_clock.py
       - gpu/vk/vk_framegen.cpp
@@ -36,6 +40,7 @@ on:
       - tests/test_rumble_refresh.py
       - tests/test_upscale_label.py
       - nx2/test_import_windows.py
+      - tests/test_handle_lookup.py
       - .github/workflows/source-regressions.yml
   pull_request:
     branches: [main]
@@ -47,10 +52,14 @@ on:
       - tests/test_make_game_cache.py
       - tests/test_failure_reason.py
       - tests/test_import_hold.py
+      - gpu/vk/vk_replay.cpp
+      - tests/test_ub_gap.py
       - tests/import_hold_test.cpp
       - gpu/vk/import_hold.h
       - gpu/vk/vk_menu.cpp
       - tests/test_fps_rate.py
+      - gpu/vk/vk_memory.cpp
+      - tests/test_vertex_bind.py
       - tests/test_fps_overlay_order.py
       - tests/test_dispatch_clock.py
       - gpu/vk/vk_framegen.cpp
@@ -72,6 +81,7 @@ on:
       - tests/test_rumble_refresh.py
       - tests/test_upscale_label.py
       - nx2/test_import_windows.py
+      - tests/test_handle_lookup.py
       - .github/workflows/source-regressions.yml
   workflow_dispatch:
 
@@ -112,9 +122,15 @@ jobs:
       - name: Check failed-import backoff
         if: runner.os == 'Linux'
         run: python -I -B tests/test_import_hold.py
+      - name: Check uniform words skip a known gap
+        if: runner.os == 'Linux'
+        run: python -I -B tests/test_ub_gap.py
       - name: Check the FPS counter's first sample
         if: runner.os == 'Linux'
         run: python -I -B tests/test_fps_rate.py
+      - name: Check a vertex stream is bound once
+        if: runner.os == 'Linux'
+        run: python -I -B tests/test_vertex_bind.py
       - name: Check FPS overlay transfer ordering
         if: runner.os == 'Linux'
         run: python -I -B tests/test_fps_overlay_order.py
@@ -153,3 +169,5 @@ jobs:
       - name: Check import windows
         if: runner.os == 'Linux'
         run: python -I -B nx2/test_import_windows.py --cxx g++
+      - name: Check a texture handle is looked up once
+        run: python -I -B tests/test_handle_lookup.py

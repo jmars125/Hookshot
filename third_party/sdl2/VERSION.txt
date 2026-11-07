@@ -1,0 +1,3 @@
+SDL2.dll: sdl2-compat 2.32.74 (github.com/libsdl-org/sdl2-compat, release-2.32.74, win32-x64)
+SDL3.dll: SDL 3.4.20 (github.com/libsdl-org/SDL, release-3.4.20, win32-x64)
+Both zlib license (LICENSE.txt). sdl2-compat runs the SDL2 API on SDL3: newer controllers (Steam Controller and others).

@@ -1509,11 +1509,13 @@ void texture_begin_recording(VkCommandBuffer upload, uint64_t value) {
     if (value != rec_value) epoch++;   // (a submission's parts check a texture's memory once: nothing is collected between)
     rec_value = value;
     up_used = false;
+    memory_table_begin();
 }
 VkCommandBuffer upload_command_buffer() {
     return upload_cmd();
 }
 bool texture_uploads_recorded() {
+    memory_table_flush();   // (vk_memory.cpp: the page table's changes, after this recording's mirror copies)
     if (up_used) full_barrier(up_cmd);   // (before the recording that reads them)
     return up_used;
 }

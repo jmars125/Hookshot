@@ -334,6 +334,20 @@ static int game_main(int argc, char **argv) {
         if (!strcmp(argv[i], "--romfs") && i + 1 < argc) hos_romfs_dir = argv[++i];
         else if (!strcmp(argv[i], "--user") && i + 1 < argc) hos_user_dir = argv[++i];
         else if (!strcmp(argv[i], "--trace")) hos_trace = 1;
+        else if (!strcmp(argv[i], "--prepare-shaders")) {   /* (hookshot) a build's last step: no game */
+#ifdef _WIN32
+            _putenv("HOOKSHOT_PREPARE_ONLY=1");
+#else
+            setenv("HOOKSHOT_PREPARE_ONLY", "1", 1);
+#endif
+            int rx_prepare_shaders(void);
+            if (rx_prepare_shaders()) {
+                printf("@@done shaders\n");
+                return 0;
+            }
+            printf("@@error no usable Vulkan here: the game prepares its shaders at its first start\n");
+            return 3;
+        }
         else if (!image) image = argv[i];
     }
     static char beside_image[MAX_PATH], beside_romfs[MAX_PATH], beside_user[MAX_PATH];

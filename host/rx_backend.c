@@ -223,6 +223,12 @@ int rx_start(void *hwnd) {
     flush_early();
     return ok;
 }
+/* (hookshot) hookshot --prepare-shaders: the Vulkan back end started with no window and no game, which prepares
+   every shader in its start (gpu/vk/vk_main.cpp started_up) and is then let go. 0 when there is no usable Vulkan */
+int rx_prepare_shaders(void) {
+    const MkwVkRenderer *r = load_vulkan("hookshot_vk.dll");
+    return r && r->start(NULL);
+}
 void rx_resize(int width, int height) { vk ? vk->resize(width, height) : wgr_resize(width, height); }
 const char *rx_describe(void) { return vk ? vk->describe() : wgr_describe(); }
 void rx_stats(int64_t *draws, int64_t *skipped, int64_t *pipelines) {

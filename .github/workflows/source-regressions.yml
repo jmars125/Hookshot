@@ -9,6 +9,9 @@ on:
       - nx2/unpack.py
       - nx2/test_nup_paths.py
       - tests/test_make_game_cache.py
+      - gpu/vk/vk_replay.cpp
+      - gpu/vk/vk_state.h
+      - tests/test_same_bind.py
       - tests/test_failure_reason.py
       - tests/test_import_hold.py
       - tests/import_hold_test.cpp
@@ -45,6 +48,9 @@ on:
       - nx2/unpack.py
       - nx2/test_nup_paths.py
       - tests/test_make_game_cache.py
+      - gpu/vk/vk_replay.cpp
+      - gpu/vk/vk_state.h
+      - tests/test_same_bind.py
       - tests/test_failure_reason.py
       - tests/test_import_hold.py
       - tests/import_hold_test.cpp
@@ -153,3 +159,6 @@ jobs:
       - name: Check import windows
         if: runner.os == 'Linux'
         run: python -I -B nx2/test_import_windows.py --cxx g++
+      - name: Check a repeated bind keeps its descriptors
+        if: runner.os == 'Linux'
+        run: python -I -B tests/test_same_bind.py

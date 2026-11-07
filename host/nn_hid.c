@@ -169,6 +169,10 @@ static int mouse_stick(int32_t *rx, int32_t *ry, int pointing) {
     return 1;
 }
 
+/* A bound key is down: Enter held with Alt is no button (Alt+Enter is fullscreen, host/display.c and
+   host/posix/display_sdl.c). tests/test_alt_enter.py */
+static int kmap_down(int vk, int (*down)(int)) { return down(vk) && !(vk == VK_RETURN && down(VK_MENU)); }
+
 static int game_in_front(void) {
     DWORD pid = 0;
     HWND w = GetForegroundWindow();
@@ -543,7 +547,7 @@ static void read_input(uint64_t *buttons, int32_t stick[4]) {
     binds_load();   /* (the keys: key_default's, or hookshot_options.ini's) */
     for (int i = 0; i < HOS_SW_N; i++)
         for (int k = 0; k < 2; k++)
-            if (key_bind[i][k] && key(key_bind[i][k])) *buttons |= 1ULL << i;
+            if (key_bind[i][k] && kmap_down(key_bind[i][k], key)) *buttons |= 1ULL << i;
     int32_t mouse[4] = {0};
     /* left button Y (attack), right button ZL (shield, lock on), while the mouse is captured; a button held when
        the capture began counts only after it was let go (the click that captures never reaches the game) */

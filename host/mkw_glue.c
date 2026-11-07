@@ -6,6 +6,10 @@
 #include <stdlib.h>
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#ifndef _WIN32
+#include <dlfcn.h>
+#include <execinfo.h>
+#endif
 
 /* ---- the guest window ---------------------------------------------------------------------------------------
    The runtime commits what it hands out (image, system region, heap, address regions: hos_commit), because host
@@ -57,6 +61,7 @@ static LONG WINAPI report_crash(EXCEPTION_POINTERS *info) {
             rec->NumberParameters > 1 && rec->ExceptionInformation[0] == 1 ? "write" : "read",
             (unsigned long long)addr, (unsigned long long)(addr - (uint64_t)A64_MEM), base ? base + 1 : name,
             (unsigned long long)(rip - (uint64_t)mod));
+#ifdef _WIN32
     {   /* the host stack from the faulting frame (x64 unwind data), as module+offset (nx2/samap.py maps mkw.exe's) */
         CONTEXT ctx = *info->ContextRecord;
         char hb[1024];
@@ -78,6 +83,24 @@ static LONG WINAPI report_crash(EXCEPTION_POINTERS *info) {
         }
         hos_log("%s", hb);
     }
+#else
+    {   /* (hookshot) Linux: the host stack as module+offset, from glibc (the frames above the signal's included): the
+           x64 unwind data is Windows' */
+        void *pcs[24];
+        const int got = backtrace(pcs, 24);
+        char hb[1024];
+        int n = snprintf(hb, sizeof hb, "CRASH: host backtrace:");
+        for (int i = 0; i < got && n < (int)sizeof hb - 48; i++) {
+            Dl_info d;
+            const char *mn = "?", *mb;
+            uint64_t off = (uint64_t)(uintptr_t)pcs[i];
+            if (dladdr(pcs[i], &d) && d.dli_fname) mn = d.dli_fname, off -= (uint64_t)(uintptr_t)d.dli_fbase;
+            mb = strrchr(mn, '/');
+            n += snprintf(hb + n, sizeof hb - n, " %s+%#llx", mb ? mb + 1 : mn, (unsigned long long)off);
+        }
+        hos_log("%s", hb);
+    }
+#endif
     Ctx *c = hos_ctx();
     if (c) {
         hos_log("CRASH: thread %s, sp %#llx", hos_thread_name(hos_self()), (unsigned long long)c->x[31]);

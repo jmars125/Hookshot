@@ -48,6 +48,7 @@ namespace {
 // ---- submissions: a timeline semaphore; value n = the n-th submit done ----
 VkSemaphore timeline = VK_NULL_HANDLE;
 std::atomic<uint64_t> pushed{0};
+std::atomic<uint64_t> q_values{0};   // the fence values handed out (a submit or a present takes one each)
 std::mutex replay_mu;   // one replay at a time (the game submits from several threads)
 
 struct Recording {
@@ -1493,7 +1494,7 @@ bool run_submit(const uint64_t* handles, int n, uint64_t value, uint64_t queue, 
     return true;
 }
 void do_submit(const uint64_t* handles, int n) {   // (RX_VK_ASYNC=0: on the submitting thread, in its order)
-    run_submit(handles, n, pushed.load() + 1, 0, true);
+    run_submit(handles, n, ++q_values, 0, true);
 }
 
 /// A stopped queue on (forced: past the wait it stopped at), then its later submits, as far as their waits allow
@@ -2069,7 +2070,7 @@ void do_present(const nvn_tex* t, const int crop[4]) {
         SlowWatch slow("present");
         frame_submits.clear();
         PROF(PROF_PRESENT);
-        const uint64_t value = present_value ? present_value : pushed.load() + 1;
+        const uint64_t value = present_value ? present_value : ++q_values;
         present_value = 0;
         rec_value_now = value;
         ub_first_of_recording = ub_updates.size();
@@ -2713,7 +2714,6 @@ struct Job {
 std::mutex q_mu;
 std::condition_variable q_cv, q_space, q_idle;
 std::deque<Job> q_jobs;
-std::atomic<uint64_t> q_values{0};   // the fence values handed out (a submit or a present takes one each)
 int q_presents = 0;
 bool q_busy = false;
 int presents_ahead() {   // (RX_VK_PRESENTS_AHEAD=<n>: how many presents the game may hand over ahead of the replay)
@@ -2869,6 +2869,7 @@ bool replay_behind() {
 std::mutex submit_order_mu;   // (captures and submits queued in the same order)
 void submit_q(const uint64_t* handles, int n, uint64_t queue) {
     if (!async_on()) {
+        std::lock_guard order(sync_order_mu);
         // (the replay here is on the submitting thread, but the game's other threads go on writing their next frames: a pool
         // synced from guest memory later in the frame read those. The capture is taken here too)
         // (EvilOOT) on by default: without it every mirror sync read guest memory as it was at the replay, the game's later
@@ -2887,7 +2888,6 @@ void submit_q(const uint64_t* handles, int n, uint64_t queue) {
         if (sync_waits_on()) {
             static std::once_flag watch;
             std::call_once(watch, [] { std::thread(sync_watch).detach(); });
-            std::lock_guard lk(sync_order_mu);
             std::vector<uint64_t> h(handles, handles + std::max(n, 0));
             submit_job(h, ++q_values, queue);
             update_blocked();
@@ -2907,8 +2907,8 @@ void submit(const uint64_t* handles, int n) {
 }
 void present(const nvn_tex* t, const int crop[4]) {
     if (!async_on()) {
+        std::lock_guard order(sync_order_mu);
         if (sync_waits_on()) {
-            std::lock_guard lk(sync_order_mu);
             drain(0);   // (the frame's work whole before it is shown)
             update_blocked();
             present_value = ++q_values;

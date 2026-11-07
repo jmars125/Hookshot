@@ -27,6 +27,9 @@ on:
       - gpu/vk/vk_memory.cpp
       - tests/test_pool_span.py
       - tests/test_submitted_page.py
+      - gpu/vk/vk_replay.cpp
+      - gpu/vk/vk_draw.h
+      - tests/test_ub_memo.py
       - tests/test_shader_census_cmd.py
       - nx2/version.py
       - nx2/test_version.py
@@ -63,6 +66,9 @@ on:
       - gpu/vk/vk_memory.cpp
       - tests/test_pool_span.py
       - tests/test_submitted_page.py
+      - gpu/vk/vk_replay.cpp
+      - gpu/vk/vk_draw.h
+      - tests/test_ub_memo.py
       - tests/test_shader_census_cmd.py
       - nx2/version.py
       - nx2/test_version.py
@@ -137,6 +143,9 @@ jobs:
       - name: Check a captured page is read once
         if: runner.os == 'Linux'
         run: python -I -B tests/test_submitted_page.py
+      - name: Check a repeated uniform word is not read again
+        if: runner.os == 'Linux'
+        run: python -I -B tests/test_ub_memo.py
       - name: Check the shader list's text encoding
         run: python -I -B tests/test_shader_census_cmd.py
       - name: Check the build's version stamp

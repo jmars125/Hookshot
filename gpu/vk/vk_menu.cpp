@@ -96,9 +96,18 @@ const char* ini_key(const Row& r) {
     return k;
 }
 void save() {
+    // (hookshot) the lines that are not the menu's are kept: the controls, pad_ and key_ (host/nn_hid.c)
+    std::string kept;
+    if (FILE* f = fopen(ini_path().c_str(), "r")) {
+        char line[256];
+        while (fgets(line, sizeof line, f))
+            if (!strncmp(line, "pad_", 4) || !strncmp(line, "key_", 4)) kept += line;
+        fclose(f);
+    }
     if (FILE* f = fopen(ini_path().c_str(), "w")) {
         for (const Row& r : rows) fprintf(f, "%s=%d\n", ini_key(r), *r.value);
         fprintf(f, "options_version=2\n");   // (game_speed below 2 was only ever the old default, see menu_init)
+        fputs(kept.c_str(), f);
         fclose(f);
     }
 }

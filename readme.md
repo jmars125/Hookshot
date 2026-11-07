@@ -102,11 +102,37 @@ builds without it), Python 3 with `lz4`, `numpy`, `capstone`, `unicorn` and `zst
 with Vulkan-Headers, SPIRV-Headers and VulkanMemoryAllocator in CPM's layout (`scripts/linux/deps.sh` makes one).
 `scripts/linux/deps.sh` and `scripts/linux/appimage.sh` make the AppImage.
 
+### Updating to a newer release
+
+A new release is not a patch to your game folder: the game is built again from your copy, with the new code. Your
+saves and settings are kept.
+
+1. Close the game.
+2. To be safe, copy your saves somewhere first: the `user` folder beside `hookshot.exe` on Windows, or
+   `~/.local/share/hookshot` on Linux.
+3. Get the new release:
+   - **Hookshot Builder:** download the new HookshotBuilder zip and extract it to a new folder (with its `tools`
+     folder). The old builder folder can then be deleted.
+   - **Linux:** download the new AppImage and make it executable. The old one can be deleted, the game is not removed with it.
+   - **Command line:** `git pull` in your clone, and take the `tools` folder's contents (see
+     [What you need](#what-you-need)) from the new HookshotBuilder zip, as they can change between releases.
+4. Build again with the same `.nup` (or `romfs` and `exefs` folders) and **the same game folder** as before. With the
+   same `.nup`, the game is not read again, but the translation and the compile still run, so it takes about as long
+   as the first build.
+5. Start the game as before.
+
+What a new build keeps and what it replaces in the game folder:
+
+| Kept | Replaced |
+|---|---|
+| Your saves (`user`, or `~/.local/share/hookshot` on Linux) | `hookshot.exe` (`hookshot` on Linux) and its files |
+| `hookshot_options.ini`, the in-game menu's choices | `image.bin` and the shader list |
+| `hookshot_env.txt` | `language.txt`, written again with the language you choose |
+
 ### What you need
 
-- The Visual Studio C++ tools and the Windows SDK. Microsoft does not allow these to be bundled, so install
-  [Visual Studio Build Tools](https://visualstudio.microsoft.com/downloads/) with "Desktop development with C++". The
-  builder tells you if they are missing.
+- Nothing to install for the build itself: Hookshot Builder brings its own compiler ([llvm-mingw](https://github.com/mstorsjo/llvm-mingw),
+  as TotK Recomp does), Python and libraries. Visual Studio and the Windows SDK are no longer needed.
 - 64-bit Windows 10 or 11.
 - A graphics card with Vulkan 1.3 and mesh shaders, with an up-to-date driver. Only NVIDIA has been tested.
 - 16 GB of RAM or more. A run uses about 10 GB.
@@ -119,7 +145,9 @@ To build from the command line you also need:
 - Python 3 with `lz4`, `numpy`, `capstone`, `unicorn` and `zstandard`:
   `pip install lz4 numpy capstone "unicorn>=2.1,<2.2" zstandard`
   Use Python from python.org: the Microsoft Store's Python installs packages where `python -I` does not look.
-- The clang from [emsdk](https://github.com/emscripten-core/emsdk), at `C:\emsdk`.
+- [llvm-mingw](https://github.com/mstorsjo/llvm-mingw) (the `ucrt-x86_64` build), with `HOOKSHOT_MINGW` set to its folder. Without
+  it the build uses the clang from [emsdk](https://github.com/emscripten-core/emsdk) at `C:\emsdk` with Visual Studio's C++ tools
+  and the Windows SDK (`HOOKSHOT_MSVC=1` forces that route).
 - Visual Studio 2022 with .NET 8, only if you want to change the builder itself.
 - The prebuilt tools that go in `third_party/`: `a64emit`, `lld-link`, `zbic` and SDL2.
 - What the HookshotBuilder zip carries in its `tools` folder and a clone does not. The builder sets the variables
@@ -204,13 +232,18 @@ Hookshot exists thanks to the work of many people:
 - **[Eden](https://git.eden-emu.dev/eden-emu/eden)** and **Eglantine**: the shader recompiler and Switch 2 shader work.
 - **suyu**: the graphics decoders and the AArch64 translator.
 - **[seedds/nxnative](https://github.com/seedds/nxnative)**: reference for how task and mesh shaders work.
-- **[zortos293/Lichii](https://github.com/zortos293/Lichii)**: reference for Ampere shader lowering.
+- **[EvilBoyce / evilmfkr](https://github.com/evilmfkr/Hookshot)** (EvilOOT): the GPU culling that brings back Kokiri's foliage
+  (trees, ferns, grass, falling leaves, fireflies), the ambient light probes, the pond's water, the game's own fog, the freeze
+  after Load (Horizon's mutex handoff) and the exposure flicker fix.
+- **[zortos293/Lichii](https://github.com/zortos293/Lichii)**: reference for Ampere shader lowering, and its compare-exchange retry fix.
+- **[mstorsjo/llvm-mingw](https://github.com/mstorsjo/llvm-mingw)**: the bundled Windows compiler (no Visual Studio needed).
 - **[kinnay/zbic](https://github.com/kinnay/zbic)**, **Opus** and **SDL**: decompression, audio and controllers.
 - **[sostenesfreitas/ocarina-recomp](https://github.com/sostenesfreitas/ocarina-recomp)**: this README's layout, and its notes
   confirmed the mesh stage's control section.
 - **[MythosOfs/Orchid](https://github.com/MythosOfs/Orchid)**: the fog and exposure workaround for Ocarina of Time.
 - **Mesa (NAK)**: the reference for Ampere's instruction encoding.
-- Everyone who sent fixes: klimovich008, d3zessete, chrispository, vzeol, monsterlag and leonidasmark, among others.
+- Everyone who sent fixes: SkippySteve (Linux and the AppImage, and many more), klimovich008, d3zessete, chrispository, vzeol,
+  monsterlag, leonidasmark, Segmentree, Zorkats, ShyVortex, hiKareeem, gab9281 and i900gaming, among others.
 
 ## License
 

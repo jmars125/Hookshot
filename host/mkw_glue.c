@@ -164,6 +164,7 @@ void hos_mods_init(const char *image_path) { (void)image_path; } /* (mods.c) */
 /* HOS_PROFILE=<seconds> (in place of TOTKPort's hos_prof.c): every interval, the process's busiest threads and their
    share of a core (guest threads by their guest names, host threads by their descriptions): which one a frame rate
    waits for */
+#ifdef _WIN32
 #include <tlhelp32.h>
 int hos_thread_handles(HANDLE *out, const char **names, int max);   /* hos_thread.c */
 static DWORD WINAPI prof_thread(void *p) {
@@ -584,6 +585,7 @@ void hos_prof_start(void) {
     const char *watch = getenv("HOS_WATCH");
     if (watch && *watch) CreateThread(NULL, 0, watch_thread, (void *)watch, 0, NULL);
 }
+#endif   /* (linux) host/posix/prof.c */
 void hos_mem_checkpoint(const char *what) { (void)what; }        /* (hos_prof.c: HOS_MEM_TIMELINE) */
 int hos_game_cores(void) { return 0; }                           /* (totk_cores.c) */
 int hos_blank_cached_icon(const char *guest, const char *host) { (void)guest, (void)host; return 0; }   /* (TOTK) */

@@ -7,7 +7,17 @@ def emsdk():
     return os.environ.get("EMSDK") or (r"C:\emsdk" if os.name == "nt" else os.path.expanduser("~/emsdk"))
 
 
+def mingw():
+    """(hookshot) HOOKSHOT_MINGW=<llvm-mingw folder>: Windows builds with that toolchain's clang, headers and libraries (the GNU ABI
+    on the UCRT), as TotK Recomp's installer does: nothing of Visual Studio or the Windows SDK is needed. Empty: the MSVC target"""
+    return os.environ.get("HOOKSHOT_MINGW", "") if os.name == "nt" else ""
+
+
 def find(tool):
+    if mingw() and (tool in ("clang", "clang++", "lld") or tool.startswith("llvm-")):
+        path = os.path.join(mingw(), "bin", ("ld.lld" if tool == "lld" else tool) + ".exe")
+        if os.path.isfile(path):
+            return path
     root = emsdk()
     exts = (".exe", ".bat") if os.name == "nt" else ("",)
     native = tool in ("clang", "clang++", "lld") or tool.startswith("llvm-")
@@ -28,20 +38,31 @@ def need(path):
 
 def lld_link():
     """emsdk's lld under the name lld-link (lld picks its COFF linker from its own file name), made on first use"""
-    path = os.path.join(HERE, "lld-link.exe")
+    path = os.path.join(HERE, "lld-link-mingw.exe" if mingw() else "lld-link.exe")
     if not os.path.exists(path):
         shutil.copyfile(need(find("lld")), path)
     return path
 
 
 def native_target():
+    if mingw():   # (-fms-extensions: __try/__except and __declspec, which clang takes on this target too)
+        return ["--target=x86_64-w64-mingw32", "-fms-extensions", "-D_CRT_SECURE_NO_WARNINGS"]
     return ["--target=x86_64-pc-windows-msvc", "-fms-extensions", "-D_CRT_SECURE_NO_WARNINGS"] if os.name == "nt" else []
 
 
 def native_link():
     # (-fuse-ld=lld, found through -B: clang ignores --ld-path for the MSVC target and ran Microsoft's link.exe, which
     # cannot read the renderer's ThinLTO bitcode)
+    if mingw():   # (its own lld; the C++ runtime and winpthread linked in, so no DLLs of the toolchain go beside the game)
+        # (/nodefaultlib: libraries built with Microsoft's compiler, the CPM cache's FFmpeg, ask in their objects for its C runtime;
+        # the MinGW one stands in, with host/mingw_msvc_shims.c for what it lacks)
+        return ["-fuse-ld=lld", "-static"] + ["-Wl,-Xlink=/nodefaultlib:" + l for l in ("libcmt", "oldnames", "libvcruntime", "msvcrt")]
     return ["-fuse-ld=lld", "-B" + os.path.dirname(lld_link())] if os.name == "nt" else []
+
+
+def link_opt(opt):
+    """A link.exe-style option ("/map:x"): as it is for the MSVC target, through lld's MinGW driver (-Xlink) for llvm-mingw"""
+    return "-Wl,-Xlink=" + opt if mingw() else "-Wl," + opt
 
 
 def default_jobs(gb_per_job=3.5):

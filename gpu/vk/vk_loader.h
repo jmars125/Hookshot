@@ -153,6 +153,7 @@
     X(vkCmdSetAlphaToCoverageEnableEXT) X(vkCmdSetViewportWithCount) X(vkCmdSetScissorWithCount) \
     X(vkCmdBindVertexBuffers2) X(vkCmdWriteTimestamp2) X(vkCreateQueryPool) X(vkDestroyQueryPool) \
     X(vkCmdResetQueryPool) X(vkCmdBeginQuery) X(vkCmdEndQuery) X(vkCmdCopyQueryPoolResults) X(vkGetQueryPoolResults) \
+    X(vkResetQueryPool) \
     X(vkCmdSetDepthClipEnableEXT) X(vkCmdSetLogicOpEXT) X(vkCmdClearAttachments) X(vkCmdSetDepthBoundsTestEnable) \
     X(vkCmdSetCheckpointNV) X(vkGetQueueCheckpointDataNV) X(vkGetDeviceFaultInfoEXT)
 

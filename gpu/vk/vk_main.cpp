@@ -231,9 +231,11 @@ bool create_device() {
     coop.cooperativeMatrixRobustBufferAccess = VK_FALSE;
     dev.coop_matrix = dev.coop_matrix && coop.cooperativeMatrix &&
                       f12.vulkanMemoryModel && f12.vulkanMemoryModelDeviceScope;
-    // (only null descriptors, unbound slots; RX_VK_ROBUST=1: bounds-checked buffer access too, out-of-range
-    // accesses dropped instead of faulting the device)
-    static const bool robust = getenv("RX_VK_ROBUST") && atoi(getenv("RX_VK_ROBUST"));
+    // (bounds-checked buffer access: an out-of-range access dropped instead of faulting the device. On by default now: the GPU
+    // culling pass 53caac5f faulted the device while a save loaded, about one start in three, and the scene's lighting read garbage
+    // for single frames (the black flashes); with it, neither in A/B runs at the same GPU time. Lichii's OoT branch keeps it on too.
+    // RX_VK_ROBUST=0: off, null descriptors only)
+    static const bool robust = !getenv("RX_VK_ROBUST") || atoi(getenv("RX_VK_ROBUST")) != 0;
     const bool robust_ok = robust && robust2.robustBufferAccess2 && f.features.robustBufferAccess;
     robust2.robustBufferAccess2 = robust_ok ? VK_TRUE : VK_FALSE;
     robust2.robustImageAccess2 = VK_FALSE;

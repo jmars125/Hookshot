@@ -485,7 +485,12 @@ void hos_thread_start(HosThread *t) {
 void hos_thread_join(HosThread *t) {
     if (!t->handle) return;
     const int away = hos_vcore_away();
-    WaitForSingleObject(t->handle, INFINITE);
+    /* (EvilOOT, 11-07: a freeze after Load, one thread joining another for good: a join of over 10 s says who joins whom, once) */
+    if (WaitForSingleObject(t->handle, 10000) == WAIT_TIMEOUT) {
+        HosThread *self = hos_self();
+        hos_log("thread %s: joining %s for 10 s", self ? hos_thread_name(self) : "?", t->name);
+        WaitForSingleObject(t->handle, INFINITE);
+    }
     if (away) hos_vcore_back();
 }
 

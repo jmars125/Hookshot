@@ -31,7 +31,7 @@ namespace mkwvk {
 extern std::atomic<uint32_t> present_kind;   // (vk_replay.cpp: the frame log's)
 namespace {
 
-constexpr int kMaxMult = 4;
+constexpr int kMaxMult = 8;   // (up to 8x: players asked; the made frames are allocated for the multiplier chosen only)
 
 struct Img {
     VkImage image = VK_NULL_HANDLE;
@@ -74,6 +74,7 @@ struct State {
     bool thread_started = false;
     OutSet* recorded = nullptr;   // (the set the last framegen_record filled, for framegen_queue)
     int64_t recorded_at = 0;
+    int mult = 0;   // (the multiplier the sets' frames were made for)
 } fg;
 
 int64_t now_ns() {
@@ -181,7 +182,7 @@ void to_general(VkCommandBuffer cmd, VkImage image) {
 }
 
 bool ensure_size(VkCommandBuffer cmd, uint32_t w, uint32_t h) {
-    if (fg.w == w && fg.h == h) return true;
+    if (fg.w == w && fg.h == h && fg.mult == multiplier()) return true;
     {   // (the display thread is done with the old sets first)
         std::unique_lock lk(fg.mu);
         fg.cv.wait(lk, [] { return fg.jobs.empty() && !fg.sets[0].busy && !fg.sets[1].busy && !fg.sets[2].busy; });
@@ -201,9 +202,10 @@ bool ensure_size(VkCommandBuffer cmd, uint32_t w, uint32_t h) {
         ok = ok && make_img(fg.lumas[i], qw, qh, VK_FORMAT_R16_SFLOAT, rw);
         ok = ok && make_img(fg.flows[i], cw, ch, VK_FORMAT_R16G16B16A16_SFLOAT, rw);
     }
+    fg.mult = multiplier();
     for (OutSet& set : fg.sets)
-        for (Img& t : set.frame)
-            ok = ok && make_img(t, w, h, VK_FORMAT_R8G8B8A8_UNORM,
+        for (int k = 0; k < fg.mult; k++)
+            ok = ok && make_img(set.frame[k], w, h, VK_FORMAT_R8G8B8A8_UNORM,
                                 rw | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
     if (!ok) {
         fg.failed = true;
@@ -214,7 +216,8 @@ bool ensure_size(VkCommandBuffer cmd, uint32_t w, uint32_t h) {
         to_general(cmd, fg.frames[i].image), to_general(cmd, fg.lumas[i].image), to_general(cmd, fg.flows[i].image);
     }
     for (OutSet& set : fg.sets)
-        for (Img& t : set.frame) to_general(cmd, t.image);
+        for (Img& t : set.frame)
+            if (t.image) to_general(cmd, t.image);   // (only the multiplier's frames are made: a barrier on no image crashed the driver)
     fg.have_prev = false;
     return true;
 }
@@ -304,12 +307,16 @@ void display_main() {
 
 } // namespace
 
+// The Insert menu's Frame generation is off at 0. While it was ignored, every present still copied the frame and
+// reduced it to luma (framegen_record), then a second thread showed it. Open areas paid for that on a full GPU and
+// gained no made frames. 2x and up is the interpolation; RX_VK_FRAMEGEN=0 keeps it off entirely.
+bool framegen_wanted(int menu_value, int allow) {
+    return allow && menu_value >= 2;
+}
+
 bool framegen_on() {
-    // (RX_VK_FRAMEGEN=1: the game's ~50 fps shown at ~100. Off by default: block-matched frames flashed on fast
-    // motion, the HUD and camera cuts)
-    // (hookshot: available unless RX_VK_FRAMEGEN=0; the Insert menu turns it on, off by default)
-    static const bool on = !getenv("RX_VK_FRAMEGEN") || atoi(getenv("RX_VK_FRAMEGEN")) != 0;
-    return on && !dev.offscreen && !fg.failed;
+    static const int allow = !getenv("RX_VK_FRAMEGEN") || atoi(getenv("RX_VK_FRAMEGEN")) != 0;
+    return framegen_wanted(opts.framegen, allow) && !dev.offscreen && !fg.failed;
 }
 
 VkImage framegen_scale(VkCommandBuffer cmd, VkImageView src, VkImage image, uint32_t sw, uint32_t sh, const int crop[4], uint32_t dw, uint32_t dh) {

@@ -15,7 +15,7 @@ public partial class MainWindow : Window
     const long NeededBytes = 60L << 30;
     static readonly (string Id, S Text)[] Stages = { ("read", S.Read), ("lift", S.Lift), ("compile", S.Compile), ("finish", S.Finish) };
     Language lang = Strings.Default();
-    string T(S s) => lang.Text[(int)s];
+    string T(S s) => (int)s < lang.Text.Length ? lang.Text[(int)s] : Strings.All[0].Text[(int)s];
     string FindText => T(S.DropHint);
 
     readonly Dictionary<string, StageRow> rows = new();
@@ -44,6 +44,7 @@ public partial class MainWindow : Window
         LanguageBox.SelectedItem = lang;
         ApplyLanguage();
         Refresh();
+        Loaded += (_, _) => Updater.FromCommandLine(this);
     }
 
     void LanguageChanged(object sender, SelectionChangedEventArgs e)
@@ -186,12 +187,65 @@ public partial class MainWindow : Window
         if (UseNup.IsChecked == true) args.AddRange(new[] { "--nup", NupPath.Text });
         else args.AddRange(new[] { "--romfs", RomfsPath.Text, "--exefs", ExefsPath.Text });
         args.AddRange(new[] { "--out", OutPath.Text, "--language", lang.Code });
+        Run(tools, args);
+    }
 
+    // ---- the update (Updater.cs): the game started this app with --update <folder> ----
+
+    StageRow? downloadRow;
+    CancellationTokenSource? download;
+
+    /// The download's line at the top of the list, and the page shown
+    public void BeginUpdate(string folder)
+    {
+        OutPath.Text = folder;
+        downloadRow ??= new StageRow(T(S.Download));
+        if (!StageList.Children.Contains(downloadRow.Root)) StageList.Children.Insert(0, downloadRow.Root);
         foreach (var r in rows.Values) r.Reset();
+        downloadRow.Reset();
+        downloadRow.Begin();
         Log.Clear();
+        BuildTitle.Text = T(S.Updating);
+        BuildNote.Text = "";
+        BuildNote.Foreground = (Brush)FindResource("InkSoft");
+        ShowPage(building: true);
+        SetButtons(cancel: true);
+    }
+
+    public CancellationToken DownloadToken => (download = new CancellationTokenSource()).Token;
+    public void DownloadProgress(double f) => downloadRow?.Progress(f);
+    public void Note(string line) => Line(line);
+
+    public void DownloadFailed(string why)
+    {
+        download = null;
+        downloadRow?.Stopped();
+        BuildTitle.Text = T(S.UpdateFailed);
+        BuildNote.Text = why;
+        BuildNote.Foreground = (Brush)FindResource("Bad");
+        SetButtons(back: true);
+    }
+
+    /// The new tools are here: the folder built again with them
+    internal void UpdateBuild(Tools tools, string folder)
+    {
+        download = null;
+        downloadRow?.Done();
+        BuildTitle.Text = T(S.Updating);
+        Run(tools, new List<string> { "--update", folder }, keepRows: true);
+    }
+
+    void Run(Tools tools, List<string> args, bool keepRows = false)
+    {
+        if (!keepRows)
+        {
+            if (downloadRow != null) StageList.Children.Remove(downloadRow.Root);
+            BuildTitle.Text = T(S.Building);
+        }
+        foreach (var r in rows.Values) r.Reset();
+        if (!keepRows) Log.Clear();
         current = null;
         finished = "";
-        BuildTitle.Text = T(S.Building);
         BuildNote.Foreground = (Brush)FindResource("InkSoft");
         ShowPage(building: true);
         SetButtons(cancel: true);
@@ -272,7 +326,11 @@ public partial class MainWindow : Window
         BackButton.Visibility = back ? Visibility.Visible : Visibility.Collapsed;
     }
 
-    void CancelBuild(object sender, RoutedEventArgs e) => runner?.Cancel();
+    void CancelBuild(object sender, RoutedEventArgs e)
+    {
+        download?.Cancel();
+        runner?.Cancel();
+    }
     void Back(object sender, RoutedEventArgs e) => ShowPage(building: false);
 
     void LogToggled(object sender, RoutedEventArgs e)

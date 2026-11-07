@@ -37,7 +37,9 @@
 #include "vk_internal.h"
 
 namespace mkwvk {
+extern std::atomic<bool> movie_networks_slow;   // (vk_draw.cpp: the movie networks left out, issue 109)
 int64_t presents_now;   // (the presents so far, for SlowWatch)
+void hang_watch_start();   // (EvilOOT, vk_hangdump.cpp: RX_VK_HANG_DUMP)
 struct CondNote { int64_t present; uint64_t addr, x, y; int mode; bool on; };   // (the last render conditions, for a dark frame)
 CondNote cond_ring[1 << 15];
 uint32_t cond_ring_at = 0;
@@ -514,6 +516,15 @@ void replay(VkCommandBuffer& cmd, NvnState& s, const uint8_t* p, const uint8_t* 
             const auto c = c0;
             if (!c.size) break;
             BufferRef dst = gpu_buffer_bind(c.dst, c.size, true);
+            {   // (EvilOOT: RX_VK_WATCH_RANGE, the clears into it too)
+                unsigned long long lo = 0, hi = 0;
+                static const char* e = getenv("RX_VK_WATCH_RANGE");
+                if (e) sscanf(e, "%llx:%llx", &lo, &hi);
+                static int logged;
+                if (hi && c.dst < hi && c.dst + c.size > lo && logged++ < 400)
+                    logf("vk: watch range buffer clear %#llx (%#llx bytes) to %#x: %s", (unsigned long long)c.dst,
+                         (unsigned long long)c.size, (unsigned)c.value, dst ? "on the GPU" : "NOT bound");
+            }
             end_pass(cmd);
             full_barrier(cmd);
             if (dst && !(dst.offset & 3) && !(c.size & 3)) {
@@ -623,6 +634,20 @@ void replay(VkCommandBuffer& cmd, NvnState& s, const uint8_t* p, const uint8_t* 
             // often the next frame's already (MKW refills it as soon as the submit returns): the terrain patches
             // took other patches' placements (holes in the far terrain, the minimap's triangles). RX_VK_DEFERRED_LATE=1:
             // read at the replay, as before.)
+            {   // (EvilOOT, RX_VK_LOG_DEFERRED=1: compute's deferred binds, as at the submit and as the array holds them now)
+                static const bool on = getenv("RX_VK_LOG_DEFERRED") != nullptr;
+                static std::atomic<int> told{0};
+                if (on && b.src && b.stage == 5 && told < 400) {
+                    NVNbufferRange now[16]{};
+                    const int n = std::clamp(b.n, 0, 16);
+                    host->gpu_read(b.src, now, (uint64_t)n * sizeof(NVNbufferRange));
+                    for (int i = 0; i < n && told < 400; i++, told++)
+                        logf("vk: deferred %s stage 5 slot %d (array %#llx): submit %#llx+%#llx, now %#llx+%#llx%s", b.ssbo ? "ssbo" : "ubo",
+                             b.first + i, (unsigned long long)b.src, (unsigned long long)b.r[i].address, (unsigned long long)b.r[i].size,
+                             (unsigned long long)now[i].address, (unsigned long long)now[i].size,
+                             now[i].address != b.r[i].address || now[i].size != b.r[i].size ? "  DIFFERS" : "");
+                }
+            }
             if (b.src && deferred_late()) {
                 const int n = std::clamp(b.n, 0, 16);
                 std::memset(b.r, 0, sizeof b.r);
@@ -1611,6 +1636,7 @@ bool tex_pages_any(uint64_t gpu, uint64_t size) {
     return false;
 }
 void texture_created_of(const nvn_tex* t) { tex_pages_add(t, +1); }
+uint64_t fence();
 void invalidate(uint64_t gpu, uint64_t size) {
     static const bool log_inv = getenv("RX_VK_LOG_INVALIDATE") != nullptr;
     static std::atomic<int> logged{0};
@@ -1622,6 +1648,58 @@ void invalidate(uint64_t gpu, uint64_t size) {
         }
         logf("vk: invalidate %#llx +%#llx:%s", (unsigned long long)gpu, (unsigned long long)size,
              hits.empty() ? " no texture the GPU wrote" : hits.c_str());
+    }
+    {   // (EvilBoyce, diagnostics) RX_VK_LOG_READBACK=<present>: from that present on, 300 invalidates with the fence handed
+        // out, the GPU's completed value, whether the replay is behind, and the first words the CPU is about to read
+        static const int64_t from = getenv("RX_VK_LOG_READBACK") ? atoll(getenv("RX_VK_LOG_READBACK")) : -1;
+        static std::atomic<int> n{0};
+        if (from >= 0 && presents_now >= from && n++ < 300) {
+            uint32_t w[8]{};
+            host->gpu_read(gpu, w, sizeof w);
+            logf("vk: readback %lld %#llx +%#llx: fence %llu done %llu behind %d | %08x %08x %08x %08x %08x %08x %08x %08x",
+                 (long long)presents_now, (unsigned long long)gpu, (unsigned long long)size, (unsigned long long)fence(),
+                 (unsigned long long)completed(), (int)replay_behind(), w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7]);
+        }
+    }
+    // (EvilBoyce) GPU results in buffers: the CPU reads them once the submission that writes them back is done. The game
+    // reads them when its own pacing says the GPU has finished that frame, which on the console's coherent memory means the
+    // values are there; here they reach guest memory only with the write-back at the end of the submission that the replay
+    // may not have recorded or the GPU not finished yet. OoT reads its exposure meter (a sum the GPU adds to each frame and
+    // the CPU reads and sets to 0) this way: it read 0 one frame, then the old sum came back over the CPU's 0 and the next
+    // frame added to it (2x): the exposure stepped 0.2 EV up and down several times a second (the white flashes).
+    // RX_VK_NO_READBACK_WAIT=1: as before
+    if (size) {
+        static const bool off = getenv("RX_VK_NO_READBACK_WAIT") != nullptr;
+        bool ever = false;
+        if (!off && (memory_writeback_value(host->gpu_guest(gpu), size, &ever), ever)) {
+            static std::atomic<int64_t> calls{0}, waited{0}, ns{0};
+            const auto w0 = std::chrono::steady_clock::now();
+            bool w = false;
+            const uint64_t f0 = fence(), c0 = completed();
+            const bool behind0 = replay_behind();
+            static const bool no_catchup = getenv("RX_VK_READBACK_NO_CATCHUP") != nullptr;   // (A/B: recorded work only)
+            if (behind0 && !no_catchup) wait_queue_empty(), w = true;   // (work handed over may write it back too)
+            const auto w1 = std::chrono::steady_clock::now();
+            const uint64_t v = memory_writeback_value(host->gpu_guest(gpu), size, nullptr);
+            if (v > completed()) wait_value(v), w = true;
+            if (w) {
+                waited++;
+                const int64_t d = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - w0).count();
+                ns += d;
+                static const bool log_each = getenv("RX_VK_LOG_READBACK_WAITS") != nullptr;
+                static std::atomic<int> logged{0};
+                if (log_each && presents_now > 4000 && logged++ < 300)
+                    logf("vk: readback wait %lld %#llx +%#llx: %.2f ms (catch-up %.2f) value %llu, fence %llu, done %llu, behind %d",
+                         (long long)presents_now, (unsigned long long)gpu, (unsigned long long)size, d / 1e6,
+                         std::chrono::duration_cast<std::chrono::nanoseconds>(w1 - w0).count() / 1e6, (unsigned long long)v,
+                         (unsigned long long)f0, (unsigned long long)c0, (int)behind0);
+            }
+            if (++calls % 3000 == 0) {
+                const int64_t n = waited.exchange(0);
+                logf("vk: readbacks of GPU results: %lld of 3000 waited for their write-back, %.2f ms each", (long long)n,
+                     n ? ns.exchange(0) / (double)n / 1e6 : 0.0);
+            }
+        }
     }
     // (textures the GPU wrote there: their texels into memory before the CPU reads it, as vmap_changing does. The game
     // waited for the work that wrote them; the replay is caught up first)
@@ -1896,6 +1974,13 @@ void log_frame_stats() {
         static uint64_t l_made;
         logf("vk: GPU time %.1f ms a frame (the longest submission %.1f ms); %.1f textures made a frame",
              (st_gpu_ns - l_gpu) / 120.0 / 1e6, st_gpu_max_ns / 1e6, (texture_made() - l_made) / 120.0);
+        {   // (issue 109: the movie networks too slow on this card: left out from now on, vk_draw.cpp movie_networks_slow)
+            static const bool keep_all = getenv("RX_VK_NETWORK_KEEP") && !strcmp(getenv("RX_VK_NETWORK_KEEP"), "all");
+            const double gpu_ms = (st_gpu_ns - l_gpu) / 120.0 / 1e6, draws = (d - l_d) / 120.0;
+            if (!keep_all && gpu_ms > 40.0 && draws < 40.0 && !movie_networks_slow.exchange(true))
+                logf("vk: %.0f ms of GPU time a frame for %.0f draws (a movie): its upscaler networks are left out from now on "
+                     "(a linear upscale; RX_VK_NETWORK_KEEP=all keeps them)", gpu_ms, draws);
+        }
         l_made = texture_made();
         {
             static int64_t l_ub, l_un;
@@ -1958,6 +2043,22 @@ void do_present(const nvn_tex* t, const int crop[4]) {
         full_barrier(r.cmd);
         presents++;
         presents_now = presents;
+        if (presents == 1) hang_watch_start();
+        {   // (EvilBoyce, diagnostics) RX_VK_WATCH_CPU=<present>:<gpu address>[,...] (hex addresses): from that present on, the
+            // CPU's writes to those 4 KB pages logged with the writer's stack (host page watch: 12 reports)
+            static bool armed = false;
+            static const char* e = getenv("RX_VK_WATCH_CPU");
+            if (e && !armed && host->watch_guest_writes && presents >= atoll(e)) {
+                armed = true;
+                for (const char* q = strchr(e, ':'); q && *q;) {
+                    char* end;
+                    const uint64_t a = strtoull(q + 1, &end, 16);
+                    if (end == q + 1) break;
+                    if (const uint64_t g = host->gpu_guest(a)) host->watch_guest_writes(g & ~4095ull, 4096);
+                    q = *end ? end : nullptr;
+                }
+            }
+        }
         ts_anchor_ns = host->ticks() * 32;
         dump_present(presents);
         if (src && (dev.offscreen || shots) && offscreen_init()) {
@@ -2717,8 +2818,12 @@ std::mutex submit_order_mu;   // (captures and submits queued in the same order)
 void submit_q(const uint64_t* handles, int n, uint64_t queue) {
     if (!async_on()) {
         // (the replay here is on the submitting thread, but the game's other threads go on writing their next frames: a pool
-        // synced from guest memory later in the frame read those. RX_VK_SYNC_CAPTURE=1: the capture is taken here too)
-        static const bool capture = getenv("RX_VK_SYNC_CAPTURE") != nullptr;
+        // synced from guest memory later in the frame read those. The capture is taken here too)
+        // (EvilOOT) on by default: without it every mirror sync read guest memory as it was at the replay, the game's later
+        // frames. OoT's GPU culling alternates two list sets: every other frame its setup read the next frame's records,
+        // counted into the other set, and the foliage, grass, characters and particles of that frame were never drawn.
+        // With it the syncs take the submits' captures, as the console's GPU sees its memory. RX_VK_SYNC_CAPTURE=0: off.
+        static const bool capture = !getenv("RX_VK_SYNC_CAPTURE") || atoi(getenv("RX_VK_SYNC_CAPTURE")) != 0;
         if (capture) memory_capture_submit();
         // (RX_VK_SUBMIT_DELAY_US=<us> (a test): a console's GPU starts later than this replay does. Does what a submission reads
         // arrive just after it, from the game's other threads?)

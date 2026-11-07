@@ -10,6 +10,16 @@
 #include "vk_loader.h"
 #include "vk_api.h"
 
+#if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
+#include <intrin.h>
+#define HOOKSHOT_RDTSC() ((uint64_t)__rdtsc())
+#define HOOKSHOT_PAUSE() _mm_pause()
+#elif defined(__x86_64__) || defined(__i386__)
+#include <x86intrin.h>
+#define HOOKSHOT_RDTSC() ((uint64_t)__rdtsc())
+#define HOOKSHOT_PAUSE() _mm_pause()
+#endif
+
 typedef struct VmaAllocation_T* VmaAllocation;   // (vk_mem_alloc.h's handle)
 
 namespace mkwvk {
@@ -136,6 +146,7 @@ bool memory_has_shadow(uint64_t guest, uint64_t n);
 /// there (the game writes several submits ahead of the replay), the rest from guest memory. False when unreadable
 bool memory_read_as_submitted(uint64_t gpu, void* dst, uint64_t n);
 uint64_t gpu_pool_end(uint64_t gpu);   // (hookshot) where the memory pool holding that address ends, 0: in none (vk_memory.cpp)
+uint64_t gpu_pool_start(uint64_t gpu); // (EvilOOT) and where it begins
 bool create_buffer_cached(uint64_t size, VkBufferUsageFlags usage, VkBuffer& buffer, VmaAllocation& allocation,
                           void** mapped);   // (vk_vma.cpp: cached host memory, mapped)
 void flush_mapped(VmaAllocation allocation, uint64_t size);
@@ -145,6 +156,9 @@ bool ub_read(uint64_t addr, void* dst, uint64_t n);
 /// [guest, guest + n) as of the submit being replayed: live itself, or scratch holding it with the kept pages over it
 const uint8_t* memory_as_submitted(uint64_t guest, const uint8_t* live, uint64_t n, std::vector<uint8_t>& scratch);
 void memory_drop_shadow(uint64_t guest, uint64_t size);   // (a write the capture did not take: the copies go)
+/// (EvilBoyce) the newest submission value whose write-back reaches into [guest, guest + size) (0: none ever); *ever set
+/// when any write-back ever did
+uint64_t memory_writeback_value(uint64_t guest, uint64_t size, bool* ever);
 uint32_t memory_generation();
 /// 1: a page of [guest, guest + size) was written after generation gen; 0: none was
 bool memory_written_since(uint64_t guest, uint64_t size, uint32_t gen);
@@ -195,11 +209,40 @@ namespace mkwvk {
 enum ProfPhase { PROF_SUBMIT, PROF_PRESENT, PROF_DRAW, PROF_DESC, PROF_TEXGET, PROF_UPLOAD, PROF_PIPE, PROF_PROGRAM,
                  PROF_CMDS, PROF_DISPATCH, PROF_MEMSYNC, PROF_QSUBMIT, PROF_SLOTWAIT, PROF_COUNT };
 extern int64_t prof_ns[PROF_COUNT];
+/// Nanoseconds from a performance-counter reading. An integer number of nanoseconds per tick is a multiply, so a
+/// reading past 2^53 does not lose its low bits the way the double divide does.
+inline int64_t perf_ticks_to_ns(int64_t ticks, int64_t freq) {
+    if (freq > 0 && 1000000000LL % freq == 0)
+        return ticks * (1000000000LL / freq);
+    if (freq <= 0) return 0;
+    return (int64_t)((double)ticks * 1e9 / (double)freq);
+}
+// A cheap nanosecond clock for the per-phase replay timers. Ten QueryPerformanceCounter reads a draw were ~4% of
+// the GPU thread (gpu/render/rx_internal.h). The hot path reads the invariant TSC; the counter calibrates the scale once.
 inline int64_t prof_now() {
+#if defined(HOOKSHOT_RDTSC)
+    struct Scale { double ns_per; bool ok; };
+    static const Scale scale = [] {
+        LARGE_INTEGER f, a, b;
+        QueryPerformanceFrequency(&f);
+        const uint64_t c0 = HOOKSHOT_RDTSC();
+        QueryPerformanceCounter(&a);
+        volatile int sink = 0;
+        for (int i = 0; i < 400000; i++) { HOOKSHOT_PAUSE(); sink += 1; }
+        const uint64_t c1 = HOOKSHOT_RDTSC();
+        QueryPerformanceCounter(&b);
+        const int64_t dns = perf_ticks_to_ns(b.QuadPart - a.QuadPart, f.QuadPart);
+        Scale s;
+        s.ok = c1 > c0 && dns > 0 && sink > 0;
+        s.ns_per = s.ok ? (double)dns / (double)(c1 - c0) : 0.0;
+        return s;
+    }();
+    if (scale.ok) return (int64_t)((double)HOOKSHOT_RDTSC() * scale.ns_per);
+#endif
     LARGE_INTEGER t;
     QueryPerformanceCounter(&t);
     static const int64_t freq = [] { LARGE_INTEGER f; QueryPerformanceFrequency(&f); return f.QuadPart; }();
-    return (int64_t)((double)t.QuadPart * 1e9 / (double)freq);
+    return perf_ticks_to_ns(t.QuadPart, freq);
 }
 struct ProfScope {
     int phase;

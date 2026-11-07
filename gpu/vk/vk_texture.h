@@ -10,6 +10,7 @@
 // with the Switch 2 GOB swizzle); other formats are unswizzled on the CPU straight into the staging memory.
 #pragma once
 
+#include <string>
 #include <cstdint>
 #include <unordered_map>
 #include <vector>

@@ -105,7 +105,23 @@ typedef struct MkwVkRenderer {
 /* the DLL's one export: null when Vulkan is not usable (the executable then falls back to WebGPU) */
 typedef const MkwVkRenderer *(*mkwvk_init_fn)(const MkwVkHost *host);
 #ifdef MKWVK_BUILDING
+#ifdef _WIN32
 __declspec(dllexport) const MkwVkRenderer *mkwvk_init(const MkwVkHost *host);
+#else
+__attribute__((visibility("default"))) const MkwVkRenderer *mkwvk_init(const MkwVkHost *host);
+#endif
+#endif
+
+#ifndef _WIN32
+/* (linux) what start() is given in place of a window handle (host/posix/display_sdl.c): the window makes the
+   surface (SDL_Vulkan_CreateSurface: X11 or Wayland) and says its size in pixels */
+#define MKWVK_WINDOW_VERSION 1
+typedef struct MkwVkWindow {
+    uint32_t version;   /* MKWVK_WINDOW_VERSION */
+    int (*create_surface)(void *window, void *instance, void *surface_out);   /* (VkInstance, VkSurfaceKHR *): 1 if made */
+    void (*drawable_size)(void *window, int *width, int *height);
+    void *window;
+} MkwVkWindow;
 #endif
 
 #ifdef __cplusplus

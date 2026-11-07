@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2021 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include "shader_recompiler/frontend/ir/ir_emitter.h"
 #include "shader_recompiler/frontend/ir/value.h"
 #include "shader_recompiler/ir_opt/passes.h"
 
@@ -8,6 +9,8 @@ namespace Shader::Optimization {
 namespace {
 IR::Opcode Replace(IR::Opcode op) {
     switch (op) {
+    case IR::Opcode::SelectF16:   // (hookshot: left as F16, it selected between values now 32 bits wide)
+        return IR::Opcode::SelectF32;
     case IR::Opcode::FPAbs16:
         return IR::Opcode::FPAbs32;
     case IR::Opcode::FPAdd16:
@@ -132,6 +135,22 @@ void LowerFp16ToFp32(IR::Program& program) {
     for (IR::Block* const block : program.blocks) {
         for (IR::Inst& inst : block->Instructions()) {
             inst.ReplaceOpcode(Replace(inst.GetOpcode()));
+        }
+    }
+    // (hookshot) A half's bits and a half, now held in 32-bit floats: converted, not reinterpreted. Left as bitcasts they took a
+    // 32-bit float's bits for a half's, and Switch 2 shaders that move halves through integers drew noise on cards without f16
+    // shaders (GTX 10xx, Hookshot issue 98). After the loop above, so every float they meet is 32 bits already
+    for (IR::Block* const block : program.blocks) {
+        for (IR::Inst& inst : block->Instructions()) {
+            if (inst.GetOpcode() == IR::Opcode::BitCastU16F16) {
+                IR::IREmitter ir{*block, IR::Block::InstructionList::s_iterator_to(inst)};
+                const IR::U32 bits{ir.PackHalf2x16(ir.CompositeConstruct(inst.Arg(0), ir.Imm32(0.0f)))};
+                inst.ReplaceUsesWith(IR::Value{ir.UConvert(16, bits)});
+            } else if (inst.GetOpcode() == IR::Opcode::BitCastF16U16) {
+                IR::IREmitter ir{*block, IR::Block::InstructionList::s_iterator_to(inst)};
+                const IR::U32 wide{ir.UConvert(32, IR::U16{inst.Arg(0)})};
+                inst.ReplaceUsesWith(ir.CompositeExtract(ir.UnpackHalf2x16(wide), 0));
+            }
         }
     }
 }

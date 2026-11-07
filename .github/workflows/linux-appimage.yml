@@ -1,0 +1,86 @@
+# The Linux AppImage (x86_64): Hookshot Builder with the compiler, Python, libraries and the Vulkan back end it builds the
+# game with on the player's PC (scripts/linux/deps.sh, scripts/linux/appimage.sh). No game data is involved.
+# Built in Ubuntu 22.04, the oldest system it is for (glibc 2.35). A workflow artifact on every run; on a tag, also an
+# asset of that tag's release.
+name: Linux AppImage
+on:
+  push:
+    branches: [main]
+    tags: ['*']
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: linux-appimage-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  appimage:
+    runs-on: ubuntu-latest
+    container: ubuntu:22.04
+    timeout-minutes: 150
+    steps:
+      - name: System packages
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          apt-get update
+          # (libstdc++ 13, from the toolchain PPA: the Vulkan back end's C++20 needs <format>; linked in statically)
+          apt-get install -y --no-install-recommends software-properties-common gpg-agent
+          add-apt-repository -y ppa:ubuntu-toolchain-r/test
+          apt-get install -y --no-install-recommends g++-13 libstdc++-13-dev
+          apt-get install -y --no-install-recommends git ca-certificates curl xz-utils zstd file unzip python3 \
+            build-essential gcc-12 g++-12 libstdc++-12-dev nasm meson ninja-build cmake pkg-config \
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxss-dev libxfixes-dev libxinerama-dev \
+            libxkbcommon-dev libwayland-dev wayland-protocols libdecor-0-dev libegl-dev libgles-dev libdrm-dev libgbm-dev \
+            libpulse-dev libasound2-dev libpipewire-0.3-dev libudev-dev libdbus-1-dev
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Trust the checkout
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - uses: actions/cache@v4
+        with:
+          path: build-linux/deps
+          key: linux-deps-${{ hashFiles('scripts/linux/deps.sh') }}
+
+      - name: Dependencies (LLVM, Python, FFmpeg with dav1d, SDL2, Vulkan headers)
+        run: scripts/linux/deps.sh
+
+      # work/: the lists and the play profile made on the development PC (addresses and counts, no game code). When the
+      # repository does not carry them, the ones in the latest release's HookshotBuilder.zip are used; without either
+      # the game is built all the same, a little slower in play.
+      - name: Play profile
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -f work/hot_order.txt ]; then echo "work/ is in the repository"; exit 0; fi
+          url=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" "https://api.github.com/repos/${{ github.repository }}/releases/latest" |
+                python3 -c 'import json,sys; print(next((a["url"] for a in json.load(sys.stdin).get("assets", []) if a["name"] == "HookshotBuilder.zip"), ""))') || true
+          if [ -z "$url" ]; then echo "no HookshotBuilder.zip in the latest release: built without the profile"; exit 0; fi
+          curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/octet-stream" -o /tmp/builder.zip "$url"
+          unzip -q -o /tmp/builder.zip 'HookshotBuilder/tools/work/*' -d /tmp/builder || true
+          mkdir -p work/image
+          for f in hot_funcs.txt hot_order.txt hookshot_pieces.prof image/chunks.txt; do
+            [ -f "/tmp/builder/HookshotBuilder/tools/work/$f" ] && cp "/tmp/builder/HookshotBuilder/tools/work/$f" "work/$f"
+          done
+          ls -la work work/image
+
+      - name: AppImage
+        run: scripts/linux/appimage.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Hookshot-linux-x86_64
+          path: build-linux/*.AppImage
+          if-no-files-found: error
+
+      - name: Release asset
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build-linux/*.AppImage

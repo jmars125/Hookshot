@@ -806,10 +806,7 @@ void replay(VkCommandBuffer& cmd, NvnState& s, const uint8_t* p, const uint8_t* 
                 // (DrawMeshTasks(first, count): the count of task workgroups, as Eden draws NVN2's mesh draws; a
                 // first task other than 0 has no Vulkan counterpart)
                 da.groups[0] = d.y, da.groups[1] = 1, da.groups[2] = 1;
-                if (d.kind == 0 && d.x) {
-                    static int logged_first;
-                    if (logged_first++ < 4) logf("vk: mesh draw from task %d: drawn from 0", d.x);
-                }
+                if (d.kind == 0) da.first_task = d.x;   // (hookshot: the task programs add it, vk_draw.cpp's mesh_args)
                 da.indirect = d.indirect, da.count_addr = d.count_addr, da.max = d.max, da.stride = d.stride;
                 draw(cmd, s, da);
             }
@@ -1588,7 +1585,7 @@ std::unique_ptr<std::atomic<uint16_t>[]> tex_pages[(1ull << 39 >> 12) / kTexPage
 std::mutex tex_pages_mu;
 void tex_pages_add(const nvn_tex* t, int d) {
     if (!t || !t->gpu || t->gpu >= (1ull << 39) || !t->L.size) return;   // (the guest window: virtual pools are not read)
-    const uint64_t p0 = t->gpu >> 12, p1 = std::min((t->gpu + t->L.size - 1) >> 12, (1ull << 39 >> 12) - 1);
+    const uint64_t p0 = t->gpu >> 12, p1 = std::min((t->gpu + t->L.size - 1) >> 12, uint64_t((1ull << 39 >> 12) - 1));
     for (uint64_t p = p0; p <= p1; p++) {
         auto& c = tex_pages[p / kTexPageChunk];
         if (!c) {
@@ -1606,7 +1603,7 @@ void tex_pages_add(const nvn_tex* t, int d) {
 }
 bool tex_pages_any(uint64_t gpu, uint64_t size) {
     if (gpu >= (1ull << 39)) return true;   // (not tracked: as before)
-    const uint64_t p0 = gpu >> 12, p1 = std::min((gpu + size - 1) >> 12, (1ull << 39 >> 12) - 1);
+    const uint64_t p0 = gpu >> 12, p1 = std::min((gpu + size - 1) >> 12, uint64_t((1ull << 39 >> 12) - 1));
     for (uint64_t p = p0; p <= p1; p++) {
         const auto& c = tex_pages[p / kTexPageChunk];
         if (!c) { p = (p / kTexPageChunk + 1) * kTexPageChunk - 1; continue; }
@@ -2381,7 +2378,28 @@ void present_image(VkImage src, uint32_t sw, uint32_t sh, const int crop[4], VkI
     vkWaitForFences(dev.device, 1, &f.done, VK_TRUE, UINT64_MAX);
     framelog_collect(log_slot);
     uint32_t index = 0;
-    VkResult res = vkAcquireNextImageKHR(dev.device, dev.swapchain, UINT64_MAX, f.acquired, VK_NULL_HANDLE, &index);
+#ifdef _WIN32
+    const uint64_t acquire_timeout = UINT64_MAX;
+#else
+    // (linux: a Wayland compositor gives no image back while the window cannot be seen: its screen asleep, another workspace. A wait
+    // without end there held the presentation thread, and with it the game, until the screen came back. 100 ms, then the window is
+    // taken as not shown: frames are not waited for and not shown, and the game goes on at its speed, as on Windows, until an image
+    // comes back)
+    static bool unseen = false;
+    const uint64_t acquire_timeout = unseen ? 0 : 100000000ull;
+#endif
+    VkResult res = vkAcquireNextImageKHR(dev.device, dev.swapchain, acquire_timeout, f.acquired, VK_NULL_HANDLE, &index);
+#ifndef _WIN32
+    if (res == VK_TIMEOUT || res == VK_NOT_READY) {
+        if (!unseen) logf("vk: the window is not shown (no image back in 100 ms): frames are not shown until it is");
+        unseen = true;
+        return;
+    }
+    if (unseen && (res == VK_SUCCESS || res == VK_SUBOPTIMAL_KHR)) {
+        unseen = false;
+        logf("vk: the window is shown again");
+    }
+#endif
     if (res == VK_ERROR_OUT_OF_DATE_KHR) {
         std::lock_guard qk(dev.present_mu);
         create_swapchain(dev.swap_extent.width, dev.swap_extent.height);

@@ -99,7 +99,16 @@ static int64_t next_frame_at, window_start, frames_in_window;
 static volatile LONG64 presents;
 int hos_vi_native_interval(Ctx *c, int requested) {
     (void)c;
-    present_interval = requested < 1 ? 1 : requested > 4 ? 4 : requested;
+    /* (hookshot) OoT's frame-rate controller asks for 2, 3 or 4 vsyncs a frame whenever one runs long (480 changes a minute
+       in Kokiri): paced to them, frames snapped to 33, 50 and 67 ms, the stutter, and the frame rate sat far under what the
+       PC managed. With game time following the clock (the Insert menu's Real time, realtime_step), a frame is shown as soon
+       as it is ready, 60 at most; the game still reads back its own interval. HOS_GAME_INTERVAL=1, or Game speed Per frame:
+       paced to the game's interval, as before */
+    static int game_interval = -1;
+    if (game_interval < 0) game_interval = getenv("HOS_GAME_INTERVAL") && atoi(getenv("HOS_GAME_INTERVAL")) != 0;
+    int rx_option(int id, int otherwise);
+    const int clamped = requested < 1 ? 1 : requested > 4 ? 4 : requested;
+    present_interval = game_interval || !rx_option(0, 1) ? clamped : 1;
     return requested;
 }
 /* (hookshot) The window's textures as the console's display queue has them: each present is shown at its display
@@ -222,8 +231,14 @@ static void realtime_step(int64_t now) {
     const double dt = (now - last) / 1e9;
     last = now;
     if (dt <= 0 || dt > 0.25) { count = next = 0; carry = 0; return; }   /* (a load: the average starts again) */
-    samples[next++ % 5] = dt;
-    if (count < 5) count++;
+    /* (HOS_REALTIME_WINDOW=<1-5>: frames averaged for the step; 1: each step the last frame's own time) */
+    static int window = -1;
+    if (window < 0) {
+        window = getenv("HOS_REALTIME_WINDOW") ? atoi(getenv("HOS_REALTIME_WINDOW")) : 5;
+        window = window < 1 ? 1 : window > 5 ? 5 : window;
+    }
+    samples[next++ % window] = dt;
+    if (count < (unsigned)window) count++;
     double sum = 0;
     for (unsigned i = 0; i < count; i++) sum += samples[i];
     double ratio = sum / count * 60.0 + carry;

@@ -4,14 +4,15 @@
    A thread of its own (on Linux the window's, which runs SDL there too) opens every controller SDL knows (and ones
    plugged in later), polls them every 4 ms and keeps
    the merged state; nn_hid.c ORs it into the input with XInput, keyboard and mouse. Without SDL2.dll nothing
-   changes. HOS_NO_SDL=1 leaves SDL out. Buttons map by position, as for XInput: the bottom face button is the
-   Switch's B (cross on a DualSense, A on an Xbox pad), the right one A, left Y, top X. */
+   changes. HOS_NO_SDL=1 leaves SDL out. The inputs go by position (HOS_PAD_*, SDL's own order: the bottom face button
+   first, cross on a DualSense, A on an Xbox pad); nn_hid.c's controls make them the Switch's buttons. */
 #include "hos.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include "../gpu/vk/vk_api.h"   /* (HOS_PAD_*) */
 
 void hos_host_thread_register_self(const char *name);   /* hos_prof.c */
 
@@ -53,11 +54,10 @@ static struct {
 } sdl;
 
 enum { SDL_INIT_GAMECONTROLLER = 0x2000 };
+/* (BTN_A ... BTN_RIGHT are HOS_PAD_SOUTH ... HOS_PAD_RIGHT) */
 enum { BTN_A, BTN_B, BTN_X, BTN_Y, BTN_BACK, BTN_GUIDE, BTN_START, BTN_LSTICK, BTN_RSTICK, BTN_LSHOULDER, BTN_RSHOULDER,
        BTN_UP, BTN_DOWN, BTN_LEFT, BTN_RIGHT, BTN_MISC1, BTN_N = 21 };
 enum { AX_LX, AX_LY, AX_RX, AX_RY, AX_LT, AX_RT };
-/* nn_hid.c's button bits (B_A = 0 ...) */
-enum { H_A = 0, H_B, H_X, H_Y, H_LS, H_RS, H_L, H_R, H_ZL, H_ZR, H_PLUS, H_MINUS, H_LEFT, H_UP, H_RIGHT, H_DOWN };
 
 #define MAX_PADS 8
 static struct { void *gc; int32_t id; uint16_t rumble_lo, rumble_hi; int64_t rumble_ns; } pads[MAX_PADS];
@@ -164,19 +164,15 @@ static void pads_poll(void) {
         uint64_t b = 0;
         int32_t s[4] = {0};
         int count = 0;
-        static const struct { int sdl, hid; } map[] = {
-            {BTN_A, H_B}, {BTN_B, H_A}, {BTN_X, H_Y}, {BTN_Y, H_X}, {BTN_LSTICK, H_LS}, {BTN_RSTICK, H_RS},
-            {BTN_LSHOULDER, H_L}, {BTN_RSHOULDER, H_R}, {BTN_START, H_PLUS}, {BTN_BACK, H_MINUS},
-            {BTN_LEFT, H_LEFT}, {BTN_UP, H_UP}, {BTN_RIGHT, H_RIGHT}, {BTN_DOWN, H_DOWN}};
         const uint16_t lo = (uint16_t)rumble_low, hi = (uint16_t)rumble_high;
         for (int i = 0; i < MAX_PADS; i++) {
             void *gc = pads[i].gc;
             if (!gc) continue;
             count++;
-            for (unsigned k = 0; k < sizeof map / sizeof *map; k++)
-                if (sdl.GetButton(gc, map[k].sdl)) b |= 1ULL << map[k].hid;
-            if (sdl.GetAxis(gc, AX_LT) > 8000) b |= 1ULL << H_ZL;
-            if (sdl.GetAxis(gc, AX_RT) > 8000) b |= 1ULL << H_ZR;
+            for (int k = BTN_A; k <= BTN_RIGHT; k++)
+                if (sdl.GetButton(gc, k)) b |= 1ULL << k;
+            if (sdl.GetAxis(gc, AX_LT) > 8000) b |= 1ULL << HOS_PAD_LTRIGGER;
+            if (sdl.GetAxis(gc, AX_RT) > 8000) b |= 1ULL << HOS_PAD_RTRIGGER;
             const int32_t v[4] = {stick_value(sdl.GetAxis(gc, AX_LX), 0), stick_value(sdl.GetAxis(gc, AX_LY), 1),
                                   stick_value(sdl.GetAxis(gc, AX_RX), 0), stick_value(sdl.GetAxis(gc, AX_RY), 1)};
             for (int k = 0; k < 4; k++)
@@ -217,8 +213,8 @@ void hos_sdl_pads_pump(void) {
 }
 #endif
 
-/* The controllers' merged state (nn_hid.c): ORs the buttons in, keeps the larger stick deflections; returns how many
-   controllers SDL has open. Starts the SDL thread on the first call. */
+/* The controllers' merged state (nn_hid.c): ORs their inputs in (1 << HOS_PAD_*), keeps the larger stick
+   deflections; returns how many controllers SDL has open. Starts the SDL thread on the first call. */
 int hos_sdl_pads(uint64_t *buttons, int32_t stick[4]) {
     static volatile LONG started;
     if (!started && !InterlockedExchange(&started, 1)) {

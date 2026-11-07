@@ -50,6 +50,7 @@ namespace {
 // ---- submissions: a timeline semaphore; value n = the n-th submit done ----
 VkSemaphore timeline = VK_NULL_HANDLE;
 std::atomic<uint64_t> pushed{0};
+std::atomic<uint64_t> q_values{0};   // the fence values handed out (a submit or a present takes one each)
 std::mutex replay_mu;   // one replay at a time (the game submits from several threads)
 
 struct Recording {
@@ -269,6 +270,7 @@ struct UbUpdate {
     std::vector<uint8_t> bytes;
 };
 std::deque<UbUpdate> ub_updates;   // in stream order, oldest first
+std::atomic<uint64_t> ub_list_epoch{1};   // (bumped when that deque gains or loses an update)
 thread_local uint64_t ub_gen = 0;   // (each recording thread's: its draws' overlays change with what it passed)
 
 // ---- parallel replay (RX_VK_PARALLEL=<threads>): MKW hands over nearly a frame's draws in one command buffer with
@@ -467,6 +469,19 @@ void log_stage_bind(uint32_t op, int stage) {
 
 void maybe_split(VkCommandBuffer& cmd);
 
+/// The handles already stored, so a rebind of the same ones does not rebuild descriptors
+bool handles_unchanged(const uint64_t* have, const uint64_t* next, int n) {
+    if (n < 0) return false;
+    for (int i = 0; i < n; i++)
+        if (have[i] != next[i]) return false;
+    return true;
+}
+/// A uniform or storage binding already stored
+bool buf_unchanged(int32_t stage, int32_t index, uint64_t addr, uint64_t size, int32_t nstage, int32_t nindex,
+                   uint64_t naddr, uint64_t nsize) {
+    return stage == nstage && index == nindex && addr == naddr && size == nsize;
+}
+
 void replay(VkCommandBuffer& cmd, NvnState& s, const uint8_t* p, const uint8_t* end = nullptr) {
     const Mode mode = rmode;
     const bool dry = mode == Mode::Dry, worker = mode == Mode::Worker;
@@ -554,6 +569,7 @@ void replay(VkCommandBuffer& cmd, NvnState& s, const uint8_t* p, const uint8_t* 
             // and its late write could undo the game's next request. No pass ends for it either.)
             if (flag_written) host->gpu_write(c.addr + 8, rec + 1, 8);
             else host->gpu_write(c.addr, rec, sizeof rec);
+            memory_cpu_owned(host->gpu_guest(c.addr), sizeof rec);   // (vk_memory.cpp: kept out of the mirrors' write-backs)
             break;
         }
         case NOP_RESET_COUNTER: {
@@ -661,6 +677,7 @@ void replay(VkCommandBuffer& cmd, NvnState& s, const uint8_t* p, const uint8_t* 
             if (u.size && u.size <= avail - sizeof u) {
                 UbUpdate up{rec_value_now, u.dst, std::vector<uint8_t>(a + sizeof u, a + sizeof u + u.size)};
                 ub_updates.push_back(std::move(up));
+                ub_list_epoch.fetch_add(1, std::memory_order_relaxed);
                 ub_gen++;
                 st_ub_updates++;
             }
@@ -684,8 +701,10 @@ void replay(VkCommandBuffer& cmd, NvnState& s, const uint8_t* p, const uint8_t* 
             break;
         }
         case NOP_BIND_PROGRAM: {
-            s.bind_gen++;
             const auto b = payload<nvn_p_bind_program>(a, avail);
+            // (the same program bound again: its descriptors already stand)
+            const bool same = b.prog && s.has_prog ? std::memcmp(&s.prog, b.prog, sizeof s.prog) == 0 : !b.prog && !s.has_prog;
+            if (!same) s.bind_gen++;
             if (b.prog) s.prog = *b.prog;
             s.has_prog = b.prog != nullptr && b.prog->nstage > 0;
             break;
@@ -726,7 +745,6 @@ void replay(VkCommandBuffer& cmd, NvnState& s, const uint8_t* p, const uint8_t* 
             break;
         }
         case NOP_BIND_BUFS: {
-            s.bind_gen++;
             auto b = payload<nvn_p_bind_bufs>(a, avail);
             // (deferred binds: the ranges as the game's array held them at the submit, which the host copied into
             // the recording then (nvn_native.c resolve_deferred). Read again here, at the replay, the array was
@@ -763,12 +781,13 @@ void replay(VkCommandBuffer& cmd, NvnState& s, const uint8_t* p, const uint8_t* 
                              (unsigned long long)b.r[i].address, (unsigned long long)b.r[i].size);
                 }
                 nvn_p_bind_buf& u = (b.ssbo ? s.ssbo : s.ubo)[b.stage][index];
+                if (!buf_unchanged(u.stage, u.index, u.addr, u.size, b.stage, index, b.r[i].address, b.r[i].size))
+                    s.bind_gen++;
                 u.stage = b.stage, u.index = index, u.addr = b.r[i].address, u.size = b.r[i].size;
             }
             break;
         }
         case NOP_BIND_UBO: case NOP_BIND_SSBO: {
-            s.bind_gen++;
             const auto b = payload<nvn_p_bind_buf>(a, avail);
             if (b.stage >= kNvnStages) log_stage_bind(h.op, b.stage);
             {   // (hookshot) RX_VK_LOG_MESH_BINDS=1: what the game binds to the task and mesh stages, 80 lines
@@ -778,12 +797,14 @@ void replay(VkCommandBuffer& cmd, NvnState& s, const uint8_t* p, const uint8_t* 
                     logf("vk: bind %s stage %d index %d addr %#llx size %#llx", h.op == NOP_BIND_UBO ? "ubo" : "ssbo", b.stage, b.index,
                          (unsigned long long)b.addr, (unsigned long long)b.size);
             }
-            if (b.stage >= 0 && b.stage < kNvnStages && b.index >= 0 && b.index < 16)
-                (h.op == NOP_BIND_UBO ? s.ubo : s.ssbo)[b.stage][b.index] = b;
+            if (b.stage >= 0 && b.stage < kNvnStages && b.index >= 0 && b.index < 16) {
+                nvn_p_bind_buf& u = (h.op == NOP_BIND_UBO ? s.ubo : s.ssbo)[b.stage][b.index];
+                if (!buf_unchanged(u.stage, u.index, u.addr, u.size, b.stage, b.index, b.addr, b.size)) s.bind_gen++;
+                u = b;
+            }
             break;
         }
         case NOP_BIND_TEX: case NOP_BIND_SAMP: case NOP_BIND_IMG: {
-            s.bind_gen++;
             nvn_p_bind_handles b;
             std::memset(&b, 0, sizeof b);
             std::memcpy(&b, a, std::min<size_t>(sizeof b, h.size - 8));
@@ -796,7 +817,10 @@ void replay(VkCommandBuffer& cmd, NvnState& s, const uint8_t* p, const uint8_t* 
             if (b.stage < 0 || b.stage >= kNvnStages || b.first < 0) break;
             uint64_t* to = h.op == NOP_BIND_TEX ? s.tex[b.stage] : h.op == NOP_BIND_SAMP ? s.samp[b.stage] : s.img[b.stage];
             const int lim = h.op == NOP_BIND_IMG ? 32 : 128;
-            for (int k = 0; k < b.n && b.first + k < lim; k++) to[b.first + k] = b.h[k];
+            int n = 0;
+            while (n < b.n && b.first + n < lim) n++;
+            if (!handles_unchanged(to + b.first, b.h, n)) s.bind_gen++;   // (the same handles: the draw keeps its descriptors)
+            for (int k = 0; k < n; k++) to[b.first + k] = b.h[k];
             break;
         }
         case NOP_STENCIL: {
@@ -857,9 +881,11 @@ void replay(VkCommandBuffer& cmd, NvnState& s, const uint8_t* p, const uint8_t* 
         case NOP_PUSH_CONST: {   // (hookshot) compute push constants, kept in the state (vk_bank.cpp serves them from c0)
             const auto u = payload<nvn_p_push_const>(a, avail);
             if (u.size && u.size <= avail - sizeof u && (uint64_t)u.offset + u.size <= sizeof s.cs_push) {
-                std::memcpy(s.cs_push + u.offset, a + sizeof u, u.size);
+                const uint8_t* src = a + sizeof u;
+                const bool same = (uint64_t)u.offset + u.size <= s.cs_push_n && std::memcmp(s.cs_push + u.offset, src, u.size) == 0;
+                std::memcpy(s.cs_push + u.offset, src, u.size);
                 s.cs_push_n = std::max<uint32_t>(s.cs_push_n, u.offset + u.size);
-                s.bind_gen++;
+                if (!same) s.bind_gen++;
             }
             break;
         }
@@ -1540,7 +1566,7 @@ bool run_submit(const uint64_t* handles, int n, uint64_t value, uint64_t queue, 
     return true;
 }
 void do_submit(const uint64_t* handles, int n) {   // (RX_VK_ASYNC=0: on the submitting thread, in its order)
-    run_submit(handles, n, pushed.load() + 1, 0, true);
+    run_submit(handles, n, ++q_values, 0, true);
 }
 
 /// A stopped queue on (forced: past the wait it stopped at), then its later submits, as far as their waits allow
@@ -2123,7 +2149,7 @@ void do_present(const nvn_tex* t, const int crop[4]) {
         SlowWatch slow("present");
         frame_submits.clear();
         PROF(PROF_PRESENT);
-        const uint64_t value = present_value ? present_value : pushed.load() + 1;
+        const uint64_t value = present_value ? present_value : ++q_values;
         present_value = 0;
         rec_value_now = value;
         ub_first_of_recording = ub_updates.size();
@@ -2775,7 +2801,6 @@ struct Job {
 std::mutex q_mu;
 std::condition_variable q_cv, q_space, q_idle;
 std::deque<Job> q_jobs;
-std::atomic<uint64_t> q_values{0};   // the fence values handed out (a submit or a present takes one each)
 int q_presents = 0;
 bool q_busy = false;
 int presents_ahead() {   // (RX_VK_PRESENTS_AHEAD=<n>: how many presents the game may hand over ahead of the replay)
@@ -2931,6 +2956,7 @@ bool replay_behind() {
 std::mutex submit_order_mu;   // (captures and submits queued in the same order)
 void submit_q(const uint64_t* handles, int n, uint64_t queue) {
     if (!async_on()) {
+        std::lock_guard order(sync_order_mu);
         // (the replay here is on the submitting thread, but the game's other threads go on writing their next frames: a pool
         // synced from guest memory later in the frame read those. The capture is taken here too)
         // (EvilOOT) on by default: without it every mirror sync read guest memory as it was at the replay, the game's later
@@ -2949,7 +2975,6 @@ void submit_q(const uint64_t* handles, int n, uint64_t queue) {
         if (sync_waits_on()) {
             static std::once_flag watch;
             std::call_once(watch, [] { std::thread(sync_watch).detach(); });
-            std::lock_guard lk(sync_order_mu);
             std::vector<uint64_t> h(handles, handles + std::max(n, 0));
             submit_job(h, ++q_values, queue);
             update_blocked();
@@ -2969,8 +2994,8 @@ void submit(const uint64_t* handles, int n) {
 }
 void present(const nvn_tex* t, const int crop[4]) {
     if (!async_on()) {
+        std::lock_guard order(sync_order_mu);
         if (sync_waits_on()) {
-            std::lock_guard lk(sync_order_mu);
             drain(0);   // (the frame's work whole before it is shown)
             update_blocked();
             present_value = ++q_values;
@@ -3108,7 +3133,7 @@ void fill_replay_table(MkwVkRenderer& t) {
     t.nvn_present = present;
     t.nvn_register_texture = register_texture_queued;
     t.nvn_event_signal = event_signal_queued;
-    t.option = [](int id) -> int { return id == 0 ? opts.realtime : id == 1 ? menu_is_open() : id == 2 ? opts.resolution == 0 : id == 3 ? (opts.resolution == 1 ? 100 : opts.resolution == 2 ? 75 : opts.resolution == 3 ? 67 : opts.resolution == 4 ? 50 : 0) : 0; };
+    t.option = [](int id) -> int { return id == 0 ? opts.realtime : id == 1 ? menu_is_open() : id == 2 ? opts.resolution == 0 : id == 3 ? (opts.resolution == 1 ? 100 : opts.resolution == 2 ? 75 : opts.resolution == 3 ? 67 : opts.resolution == 4 ? 50 : 0) : id == 4 ? opts.pad_background : 0; };
     t.nvn_register_sampler = register_sampler_queued;
     t.nvn_set_texture_pool_size = set_texture_pool_size;
     t.nvn_texture_released = texture_released_of;

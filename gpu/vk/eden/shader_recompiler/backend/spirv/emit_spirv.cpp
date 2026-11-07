@@ -499,6 +499,10 @@ void SetupCapabilities(const Profile& profile, const Info& info, EmitContext& ct
     if (info.uses_cooperative_matrix && !mma_software) {
         ctx.AddExtension("SPV_KHR_cooperative_matrix");
         ctx.AddCapability(spv::Capability::CooperativeMatrixKHR);
+        ctx.AddExtension("SPV_KHR_vulkan_memory_model");
+        ctx.AddCapability(spv::Capability::VulkanMemoryModel);
+        ctx.AddCapability(spv::Capability::VulkanMemoryModelDeviceScope);
+        ctx.SetMemoryModel(spv::MemoryModel::VulkanKHR);
     }
     if (info.uses_cooperative_matrix && mma_software) {   // (hookshot: DefineSoftwareMatrixFunction's)
         ctx.AddCapability(spv::Capability::GroupNonUniform);

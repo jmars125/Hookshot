@@ -542,6 +542,13 @@ def main():
         if os.path.exists(sdl) and (not os.path.exists(sdl_dst) or os.path.getsize(sdl_dst) != os.path.getsize(sdl)):
             import shutil
             shutil.copyfile(sdl, sdl_dst)
+        # (SDL2.dll is sdl2-compat: the SDL2 calls on SDL3, whose controller support is current (a Steam Controller user's
+        # report). It loads SDL3.dll from beside it)
+        sdl3 = os.path.join(kit.HERE, "..", "third_party", "sdl2", "SDL3.dll")
+        sdl3_dst = os.path.join(out, "SDL3.dll")
+        if os.path.exists(sdl3) and (not os.path.exists(sdl3_dst) or os.path.getsize(sdl3_dst) != os.path.getsize(sdl3)):
+            import shutil
+            shutil.copyfile(sdl3, sdl3_dst)
     if vk_prebuilt and a.standalone and not a.only:
         import shutil
         shutil.copyfile(vk_prebuilt, os.path.join(out, VK_LIB))

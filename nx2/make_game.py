@@ -28,7 +28,7 @@ ROOT = os.path.dirname(HERE)
 PY = [sys.executable, "-I", "-u", "-X", "utf8"]   # (utf8: every step's output in UTF-8 whatever the console's code page: lift.py crashed on a letter, #180)   # (-u: the steps' output as it comes, not in 8 KB blocks minutes apart)
 BUILD_ID = "e0f3ccfa"   # (the version the patches, the hot list and the profile were made from)
 LINUX = os.name != "nt"
-BESIDE = ["hookshot", "hookshot_vk.so", "libSDL2-2.0.so.0"] if LINUX else ["hookshot.exe", "hookshot_vk.dll", "SDL2.dll", "wgpu_native.dll"]
+BESIDE = ["hookshot", "hookshot_vk.so", "libSDL2-2.0.so.0"] if LINUX else ["hookshot.exe", "hookshot_vk.dll", "SDL2.dll", "SDL3.dll", "wgpu_native.dll"]
 LANGUAGES = [("en-US", "English (US)"), ("en-GB", "English (UK)"), ("fr", "French (France)"), ("fr-CA", "French (Canada)"), ("de", "German"),
              ("it", "Italian"), ("es", "Spanish (Spain)"), ("es-419", "Spanish (Latin America)"), ("pt-BR", "Portuguese (Brazil)"), ("nl", "Dutch"),
              ("pl", "Polish"), ("ru", "Russian"), ("ja", "Japanese"), ("ko", "Korean"), ("zh-Hans", "Chinese (Simplified)"),
@@ -380,6 +380,28 @@ def drop_stale_objects(work):
         f.write(stamp + chr(10))
 
 
+def seed_pipelines(out):
+    """The pipelines recorded on the development PC (hookshot_pipelines_seed.bin in the tools: program keys and draw states, no game
+    code), as the game folder's list, so its first start builds them before the title, as TotK Recomp's shipped shader list does,
+    instead of compiling each when it is first drawn (the stutter of a first visit). Each release ships the list its own build
+    made: the file's first 8 bytes are that build's stamp, and a list the folder has from the same build is kept (it grows as
+    the player plays)"""
+    seed = os.path.join(ROOT, "hookshot_pipelines_seed.bin")
+    dst = os.path.join(out, "hookshot_pipelines.bin")
+    if not os.path.isfile(seed):
+        return
+    with open(seed, "rb") as f:
+        stamp = f.read(8)
+    try:
+        with open(dst, "rb") as f:
+            if f.read(8) == stamp:
+                return
+    except OSError:
+        pass
+    shutil.copyfile(seed, dst)
+    print("the shipped pipeline list: %d KB, built before the first title" % (os.path.getsize(seed) >> 10), flush=True)
+
+
 def folder_language(out):
     """the language a game folder was built in: the code line of its language.txt"""
     try:
@@ -570,6 +592,7 @@ def main():
     # as it meets them: not worth stopping a finished build for
     if subprocess.call(shader_census_cmd(romfs, os.path.join(out, "hookshot_shaders.bin")), stdout=sys.stderr):
         print("the shader list was not made: the game will compile its shaders as it plays", flush=True)
+    seed_pipelines(out)
     language = os.path.join(out, "language.txt")   # (the same text as host/nn_applet.c writes)
     with open(language, "w", encoding="utf-8", newline="\n") as f:
         f.write("# The game's language. Change the line below to one of the codes listed here, save, and start the game again.\n\n%s\n\n" % a.language)

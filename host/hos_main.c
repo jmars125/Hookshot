@@ -334,6 +334,20 @@ static int game_main(int argc, char **argv) {
         if (!strcmp(argv[i], "--romfs") && i + 1 < argc) hos_romfs_dir = argv[++i];
         else if (!strcmp(argv[i], "--user") && i + 1 < argc) hos_user_dir = argv[++i];
         else if (!strcmp(argv[i], "--trace")) hos_trace = 1;
+        else if (!strcmp(argv[i], "--prepare-shaders")) {   /* (hookshot) a build's last step: no game */
+#ifdef _WIN32
+            _putenv("HOOKSHOT_PREPARE_ONLY=1");
+#else
+            setenv("HOOKSHOT_PREPARE_ONLY", "1", 1);
+#endif
+            int rx_prepare_shaders(void);
+            if (rx_prepare_shaders()) {
+                printf("@@done shaders\n");
+                return 0;
+            }
+            printf("@@error no usable Vulkan here: the game prepares its shaders at its first start\n");
+            return 3;
+        }
         else if (!image) image = argv[i];
     }
     static char beside_image[MAX_PATH], beside_romfs[MAX_PATH], beside_user[MAX_PATH];
@@ -437,7 +451,7 @@ static int game_main(int argc, char **argv) {
     hos_log("boot: image %zu MB at %#llx, %llu MB of memory for the game", n >> 20, IMAGE_BASE,
             (unsigned long long)(hos_total_memory >> 20));
     void hos_mods_init(const char *image_path);
-    hos_mods_init(image);   /* mods.c: <exe folder>\mods (RomFS files, exefs data patches) */
+    hos_mods_init(image);   /* mods.c: <exe folder>\mods (RomFS files) */
 
     Ctx *c = hos_boot_main_thread(hos_main_stack_size);
     uint64_t sp = c->x[31];

@@ -100,6 +100,10 @@ void Module::SetMemoryModel(spv::AddressingModel addressing_model_,
     memory_model = memory_model_;
 }
 
+void Module::SetMemoryModel(spv::MemoryModel memory_model_) {
+    memory_model = memory_model_;
+}
+
 void Module::AddEntryPoint(spv::ExecutionModel execution_model, Id entry_point,
                            std::string_view name, std::span<const Id> interfaces) {
     entry_points->Reserve(4 + WordsInString(name) + interfaces.size());

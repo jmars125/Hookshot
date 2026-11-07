@@ -761,11 +761,67 @@ VkPipeline gpl_link(const Program& p, const NvnState& s, const Targets& at, VkPr
 }
 
 /// The pipeline entry of a draw (a new one is queued for a worker; RX_VK_SYNC_PIPELINES=1 builds it here)
+/// What a graphics pipeline was built from, so the next draw of the same material does not hash it again
+bool pipe_same(uint64_t prog, uint64_t variant, int topo, uint32_t samples, int n, uint32_t depth, const uint32_t* formats,
+               int nvattr, const uint32_t* vattr, const uint32_t* div, uint32_t blend_en, const uint64_t* blend,
+               uint32_t chmask, uint32_t poly, uint32_t clamp, uint32_t a2c, uint64_t cprog, uint64_t cvariant, int ctopo,
+               uint32_t csamples, int cn, uint32_t cdepth, const uint32_t* cformats, int cnvattr, const uint32_t* cvattr,
+               const uint32_t* cdiv, uint32_t cblend_en, const uint64_t* cblend, uint32_t cchmask, uint32_t cpoly,
+               uint32_t cclamp, uint32_t ca2c) {
+    if (prog != cprog || variant != cvariant || topo != ctopo || samples != csamples || n != cn || depth != cdepth ||
+        nvattr != cnvattr || blend_en != cblend_en || chmask != cchmask || poly != cpoly || clamp != cclamp || a2c != ca2c)
+        return false;
+    for (int i = 0; i < 8; i++)
+        if (formats[i] != cformats[i] || blend[i] != cblend[i]) return false;
+    for (int i = 0; i < 16; i++)
+        if (vattr[i] != cvattr[i] || div[i] != cdiv[i]) return false;
+    return true;
+}
+struct PipeFast {
+    bool on = false;
+    PipeEntry* pe = nullptr;
+    uint64_t prog = 0, variant = 0;
+    int topo = 0, n = 0, nvattr = 0;
+    uint32_t samples = 0, depth = 0, blend_en = 0, chmask = 0, poly = 0, clamp = 0, a2c = 0;
+    uint32_t formats[8]{}, vattr[16]{}, div[16]{};
+    uint64_t blend[8]{};
+};
+thread_local PipeFast pipe_fast[2];
+
 PipeEntry* graphics_pipeline(const Program& p, const NvnState& s, const Targets& at, VkPrimitiveTopology topo) {
     // the key: what is baked into it (the rest is dynamic state)
     // (hookshot: and which variant: p.key is the same for all the variants of a program by its textures' types, and a draw of
     // one ran another's shaders under its own descriptors)
-    uint64_t key = mix(mix(p.key, p.variant), (uint64_t)topology_class(topo) << 8 | (uint64_t)at.samples);
+    uint32_t formats[8]{};
+    uint32_t vattr[16]{}, divs[16]{};
+    uint64_t blend[8]{};
+    for (int i = 0; i < 8 && i < at.n; i++) formats[i] = (uint32_t)at.color_format[i];
+    for (int i = 0; i < 16; i++) vattr[i] = s.vattr[i], divs[i] = s.vstream[i].divisor;
+    for (int i = 0; i < 8; i++) std::memcpy(&blend[i], &s.blend[i], 8);
+    const int topo_c = topology_class(topo);
+    const uint32_t blend_en = (uint32_t)s.color.blend_en, chmask = s.chmask.mask, poly = (uint32_t)s.poly.mode;
+    const uint32_t clamp = s.depth_clamp ? 1u : 0u, a2c = s.ms.a2c ? 1u : 0u;
+    for (const PipeFast& f : pipe_fast)
+        if (f.on && f.pe &&
+            pipe_same((uint64_t)(uintptr_t)&p, p.variant, topo_c, (uint32_t)at.samples, at.n, (uint32_t)at.depth_format,
+                      formats, s.nvattr, vattr, divs, blend_en, blend, chmask, poly, clamp, a2c, f.prog, f.variant, f.topo,
+                      f.samples, f.n, f.depth, f.formats, f.nvattr, f.vattr, f.div, f.blend_en, f.blend, f.chmask, f.poly,
+                      f.clamp, f.a2c))
+            return f.pe;
+    auto remember = [&](PipeEntry* e) {
+        if (!e) return e;
+        if (!(pipe_fast[0].on && pipe_fast[0].pe == e)) pipe_fast[1] = pipe_fast[0];
+        PipeFast& f = pipe_fast[0];
+        f.on = true, f.pe = e, f.prog = (uint64_t)(uintptr_t)&p, f.variant = p.variant, f.topo = topo_c;
+        f.samples = (uint32_t)at.samples, f.n = at.n, f.depth = (uint32_t)at.depth_format, f.nvattr = s.nvattr;
+        f.blend_en = blend_en, f.chmask = chmask, f.poly = poly, f.clamp = clamp, f.a2c = a2c;
+        std::memcpy(f.formats, formats, sizeof formats);
+        std::memcpy(f.vattr, vattr, sizeof vattr);
+        std::memcpy(f.div, divs, sizeof divs);
+        std::memcpy(f.blend, blend, sizeof blend);
+        return e;
+    };
+    uint64_t key = mix(mix(p.key, p.variant), (uint64_t)topo_c << 8 | (uint64_t)at.samples);
     const Shader::Info& vs = p.stages[0].info;
     if (!p.mesh) {
         for (int i = 0; i < 16; i++)
@@ -790,10 +846,10 @@ PipeEntry* graphics_pipeline(const Program& p, const NvnState& s, const Targets&
     if (!dev.eds3_clamp) key = mix(key, (uint64_t)s.depth_clamp);
     if (!dev.eds3_a2c) key = mix(key, (uint64_t)s.ms.a2c);
     static thread_local std::unordered_map<uint64_t, PipeEntry*> mine;   // (entries live as long as the cache)
-    if (auto m = mine.find(key); m != mine.end()) return m->second;
+    if (auto m = mine.find(key); m != mine.end()) return remember(m->second);
     ParLock lk;
     auto it = pipelines.find(key);
-    if (it != pipelines.end()) return mine[key] = it->second.get();
+    if (it != pipelines.end()) return remember(mine[key] = it->second.get());
     pcache_init();
     PipeEntry* e = pipelines.emplace(key, std::make_unique<PipeEntry>()).first->second.get();
     pipeline_note(key, p, s, at, topo);
@@ -801,7 +857,7 @@ PipeEntry* graphics_pipeline(const Program& p, const NvnState& s, const Targets&
     if (sync) {
         e->pipeline = build_graphics(p, s, at, topo);
         e->ready = true;
-        return e;
+        return remember(e);
     }
     // (linked here, from the libraries: the draw goes ahead, and the worker's full build replaces it when it is done)
     if (gpl_wanted()) {
@@ -828,7 +884,7 @@ PipeEntry* graphics_pipeline(const Program& p, const NvnState& s, const Targets&
         if (const VkPipeline full = build_graphics(*job->p, job->s, job->at, job->topo)) job->e->pipeline = full;
         job->e->ready.store(true, std::memory_order_release);
     });
-    return e;
+    return remember(e);
 }
 
 /// part: -1 the whole pipeline, or the graphics pipeline library it stands for: 0 vertex input, 1 pre-rasterization, 2 fragment
@@ -1212,16 +1268,19 @@ VkImageView texture_view_of(uint32_t handle, VkImageViewType want, ViewUse use, 
     const uint32_t version = texture_slot_version((int)(handle & 0xFFFFF));
     const uint64_t dgen = texture_destroy_generation();
     const uint64_t key = (uint64_t)(handle & 0xFFFFF) | (uint64_t)want << 20 | (uint64_t)use << 28 | (uint64_t)storage_as << 32;
+    static const bool log_hits = getenv("RX_VK_LOG_HITS") != nullptr;
     static int64_t st_hit, st_new, st_ver, st_gen, st_n;
-    if (++st_n % 200000 == 0 && getenv("RX_VK_LOG_HITS"))
-        logf("vk: handle hits %lld, new %lld, slot re-registered %lld, a texture destroyed %lld", (long long)st_hit,
-             (long long)st_new, (long long)st_ver, (long long)st_gen);
-    if (auto it = handle_hits.find(key); it == handle_hits.end()) st_new++;
-    else if (it->second.version != version) st_ver++;
-    else if (it->second.destroy_gen != dgen) st_gen++;
-    else st_hit++;
-    if (auto it = handle_hits.find(key);
-        it != handle_hits.end() && it->second.version == version && it->second.destroy_gen == dgen) {
+    const auto it = handle_hits.find(key);
+    if (log_hits) {   // (the counters were a second search of this map on every binding, with the log off)
+        if (++st_n % 200000 == 0)
+            logf("vk: handle hits %lld, new %lld, slot re-registered %lld, a texture destroyed %lld", (long long)st_hit,
+                 (long long)st_new, (long long)st_ver, (long long)st_gen);
+        if (it == handle_hits.end()) st_new++;
+        else if (it->second.version != version) st_ver++;
+        else if (it->second.destroy_gen != dgen) st_gen++;
+        else st_hit++;
+    }
+    if (it != handle_hits.end() && it->second.version == version && it->second.destroy_gen == dgen) {
         if (it->second.tex && it->second.tex_epoch != texture_epoch()) {   // (once a submission: its age and contents)
             if (!texture_touch_quick(it->second.tex, it->second.sampling)) {
                 ParLock lk;
@@ -1280,7 +1339,11 @@ thread_local BankCache bank_cache[2][kNvnStages];   // [c0 or c2][NVN stage]: th
 VkDescriptorBufferInfo uniform_range(const NvnState& s, const Stage& st, uint32_t index) {
     VkDescriptorBufferInfo bi{VK_NULL_HANDLE, 0, VK_WHOLE_SIZE};
     const uint64_t align = std::max<uint64_t>(dev.props.limits.minUniformBufferOffsetAlignment, 16);
-    const uint32_t used = index < Shader::Info::MAX_CBUFS ? st.info.constant_buffer_used_sizes[index] : 0;
+    uint32_t used = index < Shader::Info::MAX_CBUFS ? st.info.constant_buffer_used_sizes[index] : 0;
+    // Global fallbacks read descriptor words added after the IR's constant-bank usage was collected.
+    if (st.info.uses_global_memory)
+        for (const auto& d : st.info.storage_buffers_descriptors)
+            if (d.cbuf_index == index) used = std::max(used, d.cbuf_offset + d.count * 16u);
     if (index == 0 || index == 2) {   // the driver's banks: only what the program reads of them
         const uint32_t n = std::clamp<uint32_t>((used + 15) & ~15u, 16, 0xA00);
         BankCache& c = bank_cache[index == 2][std::clamp(st.nvn_stage, 0, kNvnStages - 1)];
@@ -1988,6 +2051,7 @@ void checkpoints_report() {
     static bool done;
     if (done) return;
     done = true;
+    if (getenv("RX_VK_FAULT_INFO")) device_fault_report();   // (now, while the process is still alive: the faulting address)
     {   // (RX_VK_FLASH_RECORD=<program,...>: those programs' last draws, sizes and all)
         const uint64_t f = texture_frame_no();
         draw_records_log(f > 6 ? f - 6 : 0, f);
@@ -2215,7 +2279,66 @@ thread_local DynState last_dyn;
 thread_local bool last_dyn_valid = false;
 #define DYN_CHANGED(f) (!last_dyn_valid || std::memcmp(&d.f, &last_dyn.f, sizeof d.f))
 
+/// The inputs a draw's dynamic state is built from. Most draws repeat the draw before them.
+bool dyn_same(const float* fp, int nf, const uint32_t* up, int nu, const uint8_t* raw, int nb, const float* cfp,
+              const uint32_t* cup, const uint8_t* craw) {
+    if (nf <= 0 || nu <= 0 || nb <= 0) return false;
+    for (int i = 0; i < nf; i++)
+        if (fp[i] != cfp[i]) return false;
+    for (int i = 0; i < nu; i++)
+        if (up[i] != cup[i]) return false;
+    for (int i = 0; i < nb; i++)
+        if (raw[i] != craw[i]) return false;
+    return true;
+}
+constexpr int kDynF = 13, kDynU = 35;
+struct DynFast {
+    bool on = false;
+    float fp[kDynF]{};
+    uint32_t up[kDynU]{};
+    uint8_t raw[160]{};
+    int nb = 0;
+    uint32_t wm0 = 0, wm_n = 0;
+};
+thread_local DynFast dyn_fast;
+int dyn_pack(const NvnState& s, const Targets& at, VkPrimitiveTopology topo, bool mesh, float* fp, uint32_t* up,
+             uint8_t* raw) {
+    fp[0] = s.viewport[0][0], fp[1] = s.viewport[0][1], fp[2] = s.viewport[0][2], fp[3] = s.viewport[0][3];
+    fp[4] = s.depth_near, fp[5] = s.depth_far;
+    std::memcpy(fp + 6, s.blend_color, sizeof s.blend_color);
+    fp[10] = s.poly_offset[0], fp[11] = s.poly_offset[1], fp[12] = s.poly_offset[2];
+    up[0] = (uint32_t)s.scissor[0], up[1] = (uint32_t)s.scissor[1], up[2] = (uint32_t)s.scissor[2], up[3] = (uint32_t)s.scissor[3];
+    up[4] = s.stencil_ref[0], up[5] = s.stencil_ref[1];
+    up[6] = s.stencil_value_mask[0], up[7] = s.stencil_value_mask[1];
+    up[8] = s.stencil_mask[0], up[9] = s.stencil_mask[1];
+    up[10] = at.width, up[11] = at.height, up[12] = (uint32_t)at.n, up[13] = (uint32_t)at.depth_format;
+    up[14] = at.depth != nullptr;
+    up[15] = (uint32_t)s.color.blend_en, up[16] = s.chmask.mask;
+    up[17] = (uint32_t)topo, up[18] = mesh ? 1u : 0u;
+    up[19] = s.restart ? 1u : 0u, up[20] = s.raster_discard ? 1u : 0u, up[21] = s.depth_clamp ? 1u : 0u, up[22] = s.ms.a2c ? 1u : 0u;
+    up[23] = (uint32_t)s.poly.cull, up[24] = (uint32_t)s.poly.front, up[25] = (uint32_t)s.poly.mode, up[26] = (uint32_t)s.poly.offset_en;
+    for (int i = 0; i < 8; i++) up[27 + i] = (uint32_t)at.color_format[i];
+    static_assert(sizeof(s.ds) + sizeof(s.blend) + 8 <= 160);
+    int atb = 0;
+    std::memcpy(raw + atb, &s.ds, sizeof s.ds);
+    atb += (int)sizeof s.ds;
+    std::memcpy(raw + atb, s.blend, sizeof s.blend);
+    atb += (int)sizeof s.blend;
+    const uint64_t prog = (uint64_t)(uintptr_t)cur_program;
+    std::memcpy(raw + atb, &prog, 8);
+    return atb + 8;
+}
+
 void dynamic_state(VkCommandBuffer cmd, const NvnState& s, const Targets& at, VkPrimitiveTopology topo, bool mesh) {
+    float df[kDynF];
+    uint32_t du[kDynU];
+    uint8_t db[160];
+    const int nb = dyn_pack(s, at, topo, mesh, df, du, db);
+    if (!dump_on() && last_dyn_valid && dyn_fast.on && dyn_fast.nb == nb &&
+        dyn_same(df, kDynF, du, kDynU, db, nb, dyn_fast.fp, dyn_fast.up, dyn_fast.raw)) {
+        pass.wm_or |= dyn_fast.wm0, pass.wm_n = dyn_fast.wm_n;   // (the pass trace still sees the masks)
+        return;
+    }
     DynState d;
     std::memset(&d, 0, sizeof d);   // (padding compared too)
     // (RX_VK_FOOTPRINT=<key>,...: those programs' draws write depth wherever they rasterize, both faces, whatever is
@@ -2357,7 +2480,12 @@ void dynamic_state(VkCommandBuffer cmd, const NvnState& s, const Targets& at, Vk
     }
     last_dyn = d;
     last_dyn_valid = true;
-    pass.wm_or |= d.n ? (uint32_t)d.wm[0] : 0, pass.wm_n = (uint32_t)d.n;
+    dyn_fast.on = true, dyn_fast.nb = nb;
+    std::memcpy(dyn_fast.fp, df, sizeof df);
+    std::memcpy(dyn_fast.up, du, sizeof du);
+    std::memcpy(dyn_fast.raw, db, (size_t)nb);
+    dyn_fast.wm0 = d.n ? (uint32_t)d.wm[0] : 0, dyn_fast.wm_n = (uint32_t)d.n;
+    pass.wm_or |= dyn_fast.wm0, pass.wm_n = dyn_fast.wm_n;
 }
 #undef DYN_CHANGED
 
@@ -3746,6 +3874,18 @@ uint32_t mesh_args_take(uint32_t n) {   // (n entries of the ring, never entry 0
     return at + 1;
 }
 
+/// A vertex stream bound earlier this submission, still the same buffer (a mirror made since, or a new submission, is not)
+bool vertex_bind_reuse(uint64_t addr, uint64_t size, uint64_t stamp, uint64_t cached_addr, uint64_t cached_size,
+                       uint64_t cached_stamp, int cached) {
+    return cached && addr && size && addr == cached_addr && size == cached_size && stamp == cached_stamp;
+}
+struct KeptVertex {
+    uint64_t addr = 0, size = 0, stamp = 0;
+    BufferRef ref{};
+    int ok = 0;
+};
+thread_local KeptVertex kept_vb[16];
+
 void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
     PROF(PROF_DRAW);
     stats_tick();
@@ -4140,12 +4280,22 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
         return;
     }
     // vertex streams (from their pools, strides dynamic) and the zero stream
+    // (the same streams are bound for draw after draw: the pool lookup, which was ~8% of a race under the lock, is
+    // skipped until the submission or the mirror changes)
     VkBuffer vbufs[16];
     VkDeviceSize voffs[16], vsizes[16], vstrides[16];
     for (uint32_t b = 0; b < 16; b++) {
         vbufs[b] = zero_buffer, voffs[b] = 0, vsizes[b] = 65536, vstrides[b] = 0;
         if (b == 15 || !s.vbuf[b].address) continue;
-        BufferRef r = gpu_buffer_bind(s.vbuf[b].address, std::max<uint64_t>(s.vbuf[b].size, 1), false);
+        const uint64_t vb_addr = s.vbuf[b].address, vb_size = std::max<uint64_t>(s.vbuf[b].size, 1);
+        const uint64_t vb_stamp = gpu_bind_stamp();
+        BufferRef r;
+        if (vertex_bind_reuse(vb_addr, vb_size, vb_stamp, kept_vb[b].addr, kept_vb[b].size, kept_vb[b].stamp, kept_vb[b].ok))
+            r = kept_vb[b].ref;
+        else {
+            r = gpu_buffer_bind(vb_addr, vb_size, false);
+            kept_vb[b] = {vb_addr, vb_size, gpu_bind_stamp(), r, r ? 1 : 0};
+        }
         if (!r) continue;
         vbufs[b] = r.buffer, voffs[b] = r.offset, vsizes[b] = s.vbuf[b].size ? s.vbuf[b].size : VK_WHOLE_SIZE;
         vstrides[b] = s.vstream[b].stride;

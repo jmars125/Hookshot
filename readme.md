@@ -190,8 +190,9 @@ Never send game files.
 
 ## In-game menu
 
-Press <kbd>Insert</kbd> in game. Everything is off by default, and your choices are saved in `hookshot_options.ini`
-beside the game.
+Press <kbd>Insert</kbd> in game, or on a controller the Home button (or Select and Start together). Everything is off
+by default, and your choices are saved in `hookshot_options.ini` beside the game. On a controller the D-pad chooses
+and changes, the bottom face button changes too, and the right one closes the menu.
 
 | Option | Choices |
 |---|---|
@@ -211,6 +212,34 @@ With Game speed on Per frame, the game runs slower whenever it is below 60 fps. 
 
 Use a controller, or the keyboard and mouse. On the keyboard, <kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd> move
 and the arrow keys turn the camera.
+
+To change which gamepad button or key presses a Switch button, open the in-game menu's Controls page. Choose a
+button and a column, press <kbd>Enter</kbd> (or the bottom face button), then the new button or key; <kbd>Delete</kbd>
+clears it, and Reset to defaults puts them all back. A gamepad button taken from another Switch button swaps with it.
+The page saves them in `hookshot_options.ini`, where you can also write them yourself:
+
+```ini
+pad_a=0
+key_a=69,13
+```
+
+`pad_<button>` is a gamepad input by position: 0 bottom face button, 1 right, 2 left, 3 top, 4 Select or Back, 5 Home,
+6 Start, 7 and 8 the stick presses, 9 and 10 the shoulder buttons, 11 to 14 the D-pad (up, down, left, right), 15 and
+16 the triggers, -1 none. `key_<button>` is one or two
+[Windows key codes](https://learn.microsoft.com/windows/win32/inputdev/virtual-key-codes) in decimal (69 is
+<kbd>E</kbd>, 13 <kbd>Enter</kbd>), 0 none. The buttons are `a` `b` `x` `y` `l` `r` `zl` `zr` `plus` `minus` `ls`
+`rs` `left` `up` `right` `down`. A button the file leaves out keeps its default.
+
+## Mods
+
+Put mods in a `mods` folder beside `hookshot.exe` (or point `HOS_MODS` at another folder), in the layout emulators
+use: `mods/<name>/romfs/...` holds files that replace or add to the game's own. Deeper layouts such as
+`mods/contents/<title id>/<name>/romfs` work too. A folder whose name starts with `-` or `_` is off. When two mods
+have the same file, the one whose folder name sorts last wins, so name them `01-...`, `02-...` to set the order.
+
+Only RomFS mods are loaded. `exefs` patches (`.pchtxt`, `.ips`) are left out: Hookshot compiles the game's code ahead
+of time, so patching its instructions would need a rebuild. The log (`hookshot_log.txt` when started from its icon)
+names each mod and the files read from it.
 
 ## How it works
 

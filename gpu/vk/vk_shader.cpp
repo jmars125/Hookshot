@@ -43,6 +43,7 @@
 
 #include "vk_internal.h"
 #include "vk_jobs.h"
+#include "vk_draw.h"
 
 // (EvilOOT, RX_VK_PTR_DIAG) the pointer pass's counts for this thread's translations
 // (global_memory_to_storage_buffer_pass.cpp, declared by hand so no Eden header changes)
@@ -1453,25 +1454,71 @@ uint64_t compute_code_key(const NvnState& s) {
     return 0;
 }
 
+/// The last answer for this serial, these stages, these bindings and these vertex inputs
+bool prog_same(int kind, uint64_t serial, uint64_t stages, uint64_t bind, uint64_t reg, uint64_t ub, int nvattr,
+               const uint32_t* vattr, const uint8_t* ct, int ckind, uint64_t cserial, uint64_t cstages, uint64_t cbind,
+               uint64_t creg, uint64_t cub, int cnvattr, const uint32_t* cvattr, const uint8_t* cct) {
+    if (kind != ckind || serial != cserial || stages != cstages || bind != cbind || reg != creg || ub != cub ||
+        nvattr != cnvattr)
+        return false;
+    for (int i = 0; i < 16; i++)
+        if (vattr[i] != cvattr[i]) return false;
+    for (int i = 0; i < 8; i++)
+        if (ct[i] != cct[i]) return false;
+    return true;
+}
+uint64_t prog_stage_sig(const nvn_prog& p) {
+    uint64_t h = (uint64_t)p.nstage << 32 | p.magic;
+    for (int i = 0; i < 6; i++) h = h * 1099511628211ull ^ p.sd[i].data ^ (p.sd[i].control << 1);
+    return h ^ p.serial;
+}
+struct ProgFast {
+    bool on = false;
+    int kind = 0;
+    uint64_t serial = 0, stages = 0, bind = 0, reg = 0, ub = 0;
+    int nvattr = 0;
+    uint32_t vattr[16]{};
+    uint8_t ct[8]{};
+    const Program* p = nullptr;
+};
+thread_local ProgFast prog_fast[2];
+
 const Program* program_for(const NvnState& s, ProgramKind kind, const uint8_t color_types[8]) {
     if (!s.has_prog) return nullptr;
     if (kind == ProgramKind::Mesh) return mesh_program_for(s, color_types);
     const bool compute = kind == ProgramKind::Compute;
-    const uint64_t key = (compute ? 0x5EED : pick_inputs(s, color_types)) * 1099511628211ull ^ s.prog.serial;
-    Pick& pk = picks[key];
     static int64_t st_hit, st_none, st_differ, st_calls;   // (logged now and then: how the cache does)
     if (++st_calls % 200000 == 0)
         logf("vk: program picks: %lld kept, %lld new, %lld with other textures (of %lld)", (long long)st_hit,
              (long long)st_none, (long long)st_differ, (long long)st_calls);
+    const uint64_t stages = prog_stage_sig(s.prog);
+    const uint64_t bind = s.bind_gen, reg = registrations_generation(), ub = ub_generation();
+    for (const ProgFast& f : prog_fast)   // (the draw before this one, and the one that took turns with it)
+        if (f.on && f.p && f.p->ready.load(std::memory_order_acquire) && !f.p->failed &&
+            prog_same((int)kind, s.prog.serial, stages, bind, reg, ub, s.nvattr, s.vattr, color_types, f.kind, f.serial,
+                      f.stages, f.bind, f.reg, f.ub, f.nvattr, f.vattr, f.ct))
+            return st_hit++, f.p;
+    const uint64_t key = (compute ? 0x5EED : pick_inputs(s, color_types)) * 1099511628211ull ^ s.prog.serial;
+    Pick& pk = picks[key];
+    auto keep = [&](const Program* p) {
+        if (!p || !p->ready.load(std::memory_order_acquire) || p->failed) return p;
+        if (!(prog_fast[0].on && prog_fast[0].p == p)) prog_fast[1] = prog_fast[0];
+        ProgFast& f = prog_fast[0];
+        f.on = true, f.kind = (int)kind, f.serial = s.prog.serial, f.stages = stages, f.bind = bind, f.reg = reg, f.ub = ub;
+        f.nvattr = s.nvattr, f.p = p;
+        std::memcpy(f.vattr, s.vattr, sizeof f.vattr);
+        std::memcpy(f.ct, color_types, sizeof f.ct);
+        return p;
+    };
     if (pk.p && pk.p->ready.load(std::memory_order_acquire) && !pk.p->failed) {
-        if (pk.p->answers.empty()) return st_hit++, pk.p;
+        if (pk.p->answers.empty()) return st_hit++, keep(pk.p);
         static thread_local std::vector<uint32_t> now;
         answer_handles(s, *pk.p, now);
-        if (now == pk.handles) return st_hit++, pk.p;
+        if (now == pk.handles) return st_hit++, keep(pk.p);
         st_differ++;
         if (still_valid(s, *pk.p)) {   // (other textures of the same types: the same variant)
             pk.handles.swap(now);
-            return pk.p;
+            return keep(pk.p);
         }
     } else {
         st_none++;
@@ -1484,7 +1531,7 @@ const Program* program_for(const NvnState& s, ProgramKind kind, const uint8_t co
         pk.p = nullptr;
     }
     if (picks.size() > 65536) picks.clear();
-    return picked;
+    return keep(picked);
 }
 
 const Program* program_pick(const NvnState& s, ProgramKind kind, const uint8_t color_types[8]) {

@@ -22,12 +22,22 @@ HLE(_ZN2nn6syncpt3sdk20CreateSyncPointEventEPNS1_18SyncPointEventTypeE) {
     RET(0);
 }
 HLE(_ZN2nn6syncpt3sdk21DestroySyncPointEventEPNS1_18SyncPointEventTypeE) {}
+/* (hookshot) except for the handle nn_video.c gives a buffer an idle video decoder will not fill: its event is
+   signalled at the next submission (hos_video_sync_defer). A cancelled event is cleared, as a new request starts over:
+   left signalled, the request after it was signalled already, whatever its handle. */
+int hos_video_sync_defer(uint64_t event, uint64_t handle);
+void hos_video_sync_cancel(uint64_t event);
+int hos_video_sync_waiting(uint64_t event);
+void imp__ZN2nn2os16ClearSystemEventEPNS0_15SystemEventTypeE(Ctx *c);
 HLE(_ZN2nn6syncpt3sdk21RequestSyncPointEventEPNS1_18SyncPointEventTypeERKNS1_15SyncPointHandleE) {
-    hos_system_event_signal(ARG(0));
+    if (!hos_video_sync_defer(ARG(0), ARG(1) ? G64(ARG(1)) : 0)) hos_system_event_signal(ARG(0));
     RET(0);
 }
-HLE(_ZN2nn6syncpt3sdk20CancelSyncPointEventEPNS1_18SyncPointEventTypeE) {}
-HLE(_ZN2nn6syncpt3sdk21TryWaitSyncPointEventEPKNS1_18SyncPointEventTypeE) { RET(1); }
+HLE(_ZN2nn6syncpt3sdk20CancelSyncPointEventEPNS1_18SyncPointEventTypeE) {
+    hos_video_sync_cancel(ARG(0));
+    imp__ZN2nn2os16ClearSystemEventEPNS0_15SystemEventTypeE(c);   /* (ARG(0): the same event) */
+}
+HLE(_ZN2nn6syncpt3sdk21TryWaitSyncPointEventEPKNS1_18SyncPointEventTypeE) { RET(!hos_video_sync_waiting(ARG(0))); }
 /* InitializeMultiWaitHolder(holder, SyncPointEventType*): as for a system event */
 HLE(_ZN2nn6syncpt3sdk25InitializeMultiWaitHolderEPNS_2os19MultiWaitHolderTypeEPNS1_18SyncPointEventTypeE) {
     imp__ZN2nn2os25InitializeMultiWaitHolderEPNS0_19MultiWaitHolderTypeEPNS0_15SystemEventTypeE(c);

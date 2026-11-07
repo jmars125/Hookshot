@@ -7,6 +7,7 @@
 //
 // Pipelines persist in a VkPipelineCache next to the executable (mkw_vk_pipelines.bin).
 #include <algorithm>
+#include <filesystem>
 #include <atomic>
 #include <chrono>
 #include <memory>
@@ -217,10 +218,13 @@ bool skip_live(uint64_t key) {
     std::lock_guard lk(mu);
     if (now >= next_check.load(std::memory_order_relaxed)) {
         next_check.store(now + 300, std::memory_order_relaxed);
-        WIN32_FILE_ATTRIBUTE_DATA fa{};
-        if (GetFileAttributesExA(path, GetFileExInfoStandard, &fa)) {
-            const int64_t size = ((int64_t)fa.nFileSizeHigh << 32) | fa.nFileSizeLow;
-            const int64_t time = ((int64_t)fa.ftLastWriteTime.dwHighDateTime << 32) | fa.ftLastWriteTime.dwLowDateTime;
+        // (size and write time, portably: the Linux build has no GetFileAttributesExA)
+        std::error_code ec;
+        const auto fsize = std::filesystem::file_size(path, ec);
+        const auto ftime = ec ? std::filesystem::file_time_type{} : std::filesystem::last_write_time(path, ec);
+        if (!ec) {
+            const int64_t size = (int64_t)fsize;
+            const int64_t time = (int64_t)ftime.time_since_epoch().count();
             if (size != last_size || time != last_time) {
                 last_size = size, last_time = time;
                 keys.clear();

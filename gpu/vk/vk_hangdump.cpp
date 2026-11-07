@@ -4,6 +4,7 @@
 // all threads run again. hookshot.map / hookshot_vk.map turn the offsets into functions.
 // (11-07: a freeze right after Load, every thread waiting, none spinning: which wait is it.)
 // Nothing is allocated, locked or logged while a thread is suspended: it may hold the heap's or the log's lock.
+#ifdef _WIN32   // (hookshot: thread stacks through the Win32 debug API; the Linux build has none, see the end)
 #define WIN32_LEAN_AND_MEAN
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -139,3 +140,8 @@ void hang_watch_start() {
 }
 
 }  // namespace mkwvk
+#else
+namespace mkwvk {
+void hang_watch_start() {}   // (linux: no hang dump)
+}  // namespace mkwvk
+#endif

@@ -86,19 +86,41 @@ std::optional<IndirectBranchTableInfo> TrackIndirectBranchTable(Environment& env
     const Encoding shl{*shl_insn};
     const IR::Reg shl_reg{shl.src_reg};
 
+    const Location after_shl{pos};
     const std::optional<u64> imnmx_insn{TrackIMNMX(env, block_begin, pos, shl_reg)};
-    if (!imnmx_insn) {
-        return std::nullopt;
+    u32 max_index{};
+    if (imnmx_insn) {
+        const Encoding imnmx{*imnmx_insn};
+        if (imnmx.is_negative != 0) {
+            return std::nullopt;
+        }
+        max_index = static_cast<u32>(imnmx.immediate.Value());
+    } else {
+        // (amd-fix) NVN2 programs lowered to Maxwell clamp the index with ISETP + SEL against a register a MOV32I set
+        // (SEL R, idx, Rbound, P), not with an IMNMX: OoT's 30 foliage mesh programs were rejected here
+        Location at{after_shl};
+        const std::optional<u64> sel_insn{Track(env, block_begin, at, [shl_reg](u64 insn, Opcode opcode) {
+            return opcode == Opcode::SEL_reg && Encoding{insn}.dest_reg == shl_reg;
+        })};
+        if (!sel_insn) {
+            return std::nullopt;
+        }
+        const IR::Reg bound_reg{static_cast<IR::Reg>((*sel_insn >> 20) & 0xff)};
+        const std::optional<u64> mov_insn{Track(env, block_begin, at, [bound_reg](u64 insn, Opcode opcode) {
+            return opcode == Opcode::MOV32I && Encoding{insn}.dest_reg == bound_reg;
+        })};
+        if (!mov_insn) {
+            return std::nullopt;
+        }
+        max_index = static_cast<u32>((*mov_insn >> 20) & 0xffffffffULL);
+        if (max_index > 255) {   // (a table that large is not a clamp of this kind)
+            return std::nullopt;
+        }
     }
-    const Encoding imnmx{*imnmx_insn};
-    if (imnmx.is_negative != 0) {
-        return std::nullopt;
-    }
-    const u32 imnmx_immediate{static_cast<u32>(imnmx.immediate.Value())};
     return IndirectBranchTableInfo{
         .cbuf_index = cbuf_index,
         .cbuf_offset = cbuf_offset,
-        .num_entries = imnmx_immediate + 1,
+        .num_entries = max_index + 1,
         .branch_offset = brx_offset,
         .branch_reg = brx_reg,
     };

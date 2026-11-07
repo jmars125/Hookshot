@@ -283,7 +283,11 @@ HLE(_ZN2nn2os15FreeMemoryPagesEmm) {
            still maps them, and decommitted pages under an import faulted the device. Read as zero, as freed pages) */
         extern int rx_guest_imported(uint64_t lo, uint64_t hi);
         if (hi > lo && rx_guest_imported(lo, hi)) memset(GP(lo), 0, (size_t)(hi - lo));
+#if defined(_WIN32)
         else if (hi > lo) VirtualFree(GP(lo), (SIZE_T)(hi - lo), MEM_DECOMMIT);
+#else
+        else if (hi > lo) madvise(GP(lo), (size_t)(hi - lo), MADV_DONTNEED);   /* (linux: kept mapped, the pages read as zero) */
+#endif
         RET(0);
         return;
     }

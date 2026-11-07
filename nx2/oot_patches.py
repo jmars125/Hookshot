@@ -10,9 +10,9 @@ import glob
 import os
 import sys
 
-DECL = "extern volatile int hos_fixed_resolution;\nextern volatile uint32_t hos_fixed_scale_bits;\n"
+DECL = "extern volatile int hos_fixed_resolution;\nextern volatile int hos_dynres_runs;\nextern volatile uint32_t hos_fixed_scale_bits;\n"
 OLD = "if (!((c->x[8] >> 0) & 1)) { goto L_8082640c; }"
-NEW = "if (hos_fixed_resolution || !((c->x[8] >> 0) & 1)) { goto L_8082640c; }"
+NEW = "if (hos_fixed_resolution || !((c->x[8] >> 0) & 1)) { goto L_8082640c; }\n    hos_dynres_runs++;"
 LABEL = "L_8082640c:;"
 SCALE_OLD = "c->x[9] = 0x3f800000ULL;"
 SCALE_NEW = "c->x[9] = hos_fixed_scale_bits;"   # (the fixed path's scale, 1.0 as shipped)

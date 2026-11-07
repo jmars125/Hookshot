@@ -32,6 +32,12 @@ struct RenderAreaLayout {
 constexpr u32 RESCALING_LAYOUT_WORDS_OFFSET = offsetof(RescalingLayout, rescaling_textures);
 constexpr u32 RESCALING_LAYOUT_DOWN_FACTOR_OFFSET = offsetof(RescalingLayout, down_factor);
 constexpr u32 RENDERAREA_LAYOUT_OFFSET = offsetof(RenderAreaLayout, render_area);
+// (hookshot) guest memory's page table, a u64 device address pushed to every compute program that reads global memory, after the blocks
+// above. It was a constant in the SPIR-V, and the address changes from run to run: the drivers' pipeline caches never hit
+constexpr u32 GUEST_PAGES_PUSH_OFFSET = sizeof(RescalingLayout) + sizeof(RenderAreaLayout);
+// (hookshot) a task program's first workgroup: NVN draws tasks [first, first + count), Vulkan from 0. The address of the draw's first
+// (a u32, 16 bytes per draw of an indirect draw, read at + DrawIndex * 16) is pushed here
+constexpr u32 MESH_FIRST_PUSH_OFFSET = GUEST_PAGES_PUSH_OFFSET + 8;
 
 [[nodiscard]] std::vector<u32> EmitSPIRV(const Profile& profile, const RuntimeInfo& runtime_info, IR::Program& program, Bindings& bindings);
 [[nodiscard]] inline std::vector<u32> EmitSPIRV(const Profile& profile, IR::Program& program) {

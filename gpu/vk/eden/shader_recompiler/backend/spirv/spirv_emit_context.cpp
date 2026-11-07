@@ -378,10 +378,10 @@ Id CasFunction(EmitContext& ctx, Operation operation, Id value_type) {
         result = ctx.OpFAdd(value_type, op_a, op_b);
         break;
     case Operation::FPMin:
-        result = ctx.OpFMin(value_type, op_a, op_b);
+        result = ctx.OpNMin(value_type, op_a, op_b);   // (amd-fix, Lichii #432)
         break;
     case Operation::FPMax:
-        result = ctx.OpFMax(value_type, op_a, op_b);
+        result = ctx.OpNMax(value_type, op_a, op_b);   // (amd-fix, Lichii #432)
         break;
     default:
         break;
@@ -498,6 +498,26 @@ EmitContext::EmitContext(const Profile& profile_, const RuntimeInfo& runtime_inf
     DefineCommonTypes(program.info);
     DefineCommonConstants();
     DefineInterfaces(program);
+    // (RX_VK_MESH_FIRST=1, with RX_VK_MESH_ARGS=1: off, one task program with it hung or ended the game at its first draw)
+    if (stage == Stage::Task && getenv("RX_VK_MESH_FIRST") && profile.unified_descriptor_binding) {
+        // (hookshot) the draw's first task workgroup, read through a pushed address (EmitIsbeRead)
+        wants_mesh_first = true;
+        if (getenv("RX_VK_FOLLOW_MESH") && !getenv("RX_VK_NO_FOLLOW") && program.info.uses_global_memory) {
+            wants_guest_pages = true;   // (the block is made once: with the page table's member if the stage will want it)
+        }
+        AddCapability(spv::Capability::PhysicalStorageBufferAddresses);
+        AddExtension("SPV_KHR_physical_storage_buffer");
+        SetMemoryModel(spv::AddressingModel::PhysicalStorageBuffer64, spv::MemoryModel::GLSL450);
+        if (!Sirit::ValidId(draw_index)) {
+            draw_index = DefineInput(*this, U32[1], true, spv::BuiltIn::DrawIndex);
+        }
+        const Id block{TypeStruct(U32[1])};
+        Decorate(block, spv::Decoration::Block);
+        MemberDecorate(block, 0, spv::Decoration::Offset, 0U);
+        mesh_first_block_pointer = TypePointer(spv::StorageClass::PhysicalStorageBuffer, block);
+        mesh_first_member_pointer = TypePointer(spv::StorageClass::PhysicalStorageBuffer, U32[1]);
+        DefineRescalingInputPushConstant();
+    }
     DefineMesh(program);
     DefineLocalMemory(program);
     DefineSharedMemory(program);
@@ -964,9 +984,12 @@ void EmitContext::DefineWriteStorageCasLoopFunction(const Info& info) {
 }
 
 // (hookshot) The page table of guest memory for pointers no bound buffer holds: 4 KB pages from this base, a device address each
-constexpr unsigned long long kGuestPagesMagic = 0x7A3D19C4F1B25E60ull;   // (in the SPIR-V until vk_shader.cpp's make_module writes the table's address)
 constexpr unsigned long long kGuestPagesBase = 0x1000000000ull;
 constexpr unsigned long long kGuestPagesBytes = 8ull << 30;
+// (a second window, its entries after the first's: the pools the game's GPU allocator puts at 0x7fxxxxxxxx, where its storage
+// buffers are. Pointers there read 0 with the first alone)
+constexpr unsigned long long kGuestPagesBase2 = 0x7f00000000ull;
+constexpr unsigned long long kGuestPagesBytes2 = 4ull << 30;
 
 void EmitContext::DefineGlobalMemoryFunctions(const Info& info) {
     if (!info.uses_global_memory || !profile.support_int64) {
@@ -977,9 +1000,15 @@ void EmitContext::DefineGlobalMemoryFunctions(const Info& info) {
     // memory: here a page table (vk_memory.cpp) takes the guest address to its pool's device address.
     const char* const gp_test{getenv("RX_VK_GP_TEST")};   // (1: the addressing model alone, 2: and the table's load, 3 or unset: all of it)
     const int gp_level{gp_test ? atoi(gp_test) : 3};
-    const bool follow_pointers{stage == Stage::Compute};   // (the culling; a graphics stage with it hung the renderer at a load)
+    // (the culling; a graphics stage with it hung the renderer at a load. RX_VK_NO_FOLLOW: none of it, as before)
+    static const bool no_follow{getenv("RX_VK_NO_FOLLOW") != nullptr};
+    // (RX_VK_FOLLOW_MESH=1: the task and mesh stages too. Tried for the foliage, which it did not bring back: off)
+    static const bool no_mesh{getenv("RX_VK_FOLLOW_MESH") == nullptr};
+    const bool follow_pointers{(stage == Stage::Compute || (!no_mesh && (stage == Stage::Task || stage == Stage::Mesh))) && !no_follow};
     Id ptr_u64{};
     if (follow_pointers) {
+        wants_guest_pages = true;
+        if (profile.unified_descriptor_binding && rescaling_push_constants.value == 0) DefineRescalingInputPushConstant();   // (the table's address is in it)
         AddCapability(spv::Capability::PhysicalStorageBufferAddresses);
         AddExtension("SPV_KHR_physical_storage_buffer");
         SetMemoryModel(spv::AddressingModel::PhysicalStorageBuffer64, spv::MemoryModel::GLSL450);
@@ -999,6 +1028,50 @@ void EmitContext::DefineGlobalMemoryFunctions(const Info& info) {
         }
         const Id member{OpAccessChain(it->second.second, OpConvertUToPtr(it->second.first, address), Const(0U))};
         return OpLoad(type, member, spv::MemoryAccessMask::Aligned, align);
+    };
+    const auto psb_member = [&](Id type, Id address) {   // (a pointer to a value at an address, for stores and atomics)
+        auto it = psb_types.find(type.value);
+        if (it == psb_types.end()) {
+            const Id block{TypeStruct(type)};
+            Decorate(block, spv::Decoration::Block);
+            MemberDecorate(block, 0, spv::Decoration::Offset, 0U);
+            it = psb_types.emplace(type.value, std::make_pair(TypePointer(spv::StorageClass::PhysicalStorageBuffer, block),
+                                                        TypePointer(spv::StorageClass::PhysicalStorageBuffer, type))).first;
+        }
+        return OpAccessChain(it->second.second, OpConvertUToPtr(it->second.first, address), Const(0U));
+    };
+    // (the page table's lookup of addr: hit(target) is called in the block where the page is mapped, its device address in target,
+    // and must end that block (a return). Falls through after it)
+    const auto guest_lookup = [&](Id addr, auto&& hit) {
+        if (!follow_pointers || gp_level < 2) return;
+        const Id table{wants_guest_pages && rescaling_push_constants.value != 0
+                           ? OpLoad(U64, OpAccessChain(TypePointer(spv::StorageClass::PushConstant, U64), rescaling_push_constants,
+                                                       Const(guest_pages_member_index)))
+                           : Constant(U64, u64{0})};   // (pushed: the table's device address, 0 for none)
+        const Id offset_a{OpISub(U64, addr, Constant(U64, u64{kGuestPagesBase}))};
+        const Id offset_b{OpISub(U64, addr, Constant(U64, u64{kGuestPagesBase2}))};
+        const Id in_a{OpULessThan(U1, offset_a, Constant(U64, u64{kGuestPagesBytes}))};
+        const Id in_b{OpULessThan(U1, offset_b, Constant(U64, u64{kGuestPagesBytes2}))};
+        const Id page_index{OpSelect(U64, in_a, OpShiftRightLogical(U64, offset_a, Const(12U)),
+                                     OpIAdd(U64, OpShiftRightLogical(U64, offset_b, Const(12U)), Constant(U64, u64{kGuestPagesBytes >> 12})))};
+        const Id inside{OpLogicalAnd(U1, OpLogicalOr(U1, in_a, in_b), OpINotEqual(U1, table, Constant(U64, u64{0})))};
+        const Id then_label{OpLabel()};
+        const Id else_label{OpLabel()};
+        OpSelectionMerge(else_label, spv::SelectionControlMask::MaskNone);
+        OpBranchConditional(inside, then_label, else_label);
+        AddLabel(then_label);
+        const Id slot{OpIAdd(U64, table, OpShiftLeftLogical(U64, page_index, Const(3U)))};
+        const Id page{psb_load(U64, slot, 8U)};
+        const Id mapped{OpINotEqual(U1, page, Constant(U64, u64{0}))};   // (before the merge: it must stand right before its branch)
+        const Id hit_label{OpLabel()};
+        const Id miss_label{OpLabel()};
+        OpSelectionMerge(miss_label, spv::SelectionControlMask::MaskNone);
+        OpBranchConditional(mapped, hit_label, miss_label);
+        AddLabel(hit_label);
+        hit(OpIAdd(U64, page, OpBitwiseAnd(U64, addr, Constant(U64, u64{0xfff}))));
+        AddLabel(miss_label);
+        OpBranch(else_label);
+        AddLabel(else_label);
     };
     using DefPtr = Id StorageDefinitions::*;
     const Id zero{u32_zero_value};
@@ -1073,34 +1146,10 @@ void EmitContext::DefineGlobalMemoryFunctions(const Info& info) {
         const Id addr{OpFunctionParameter(U64)};
         define_body(ssbo_member, addr, element_pointer, shift,
                     [&](Id ssbo_pointer) { OpReturnValue(OpLoad(type, ssbo_pointer)); });
-        if (follow_pointers && gp_level >= 2) {
-            const Id table{Constant(U64, u64{kGuestPagesMagic})};   // (make_module: the table's device address, 0 for none)
-            const Id offset{OpISub(U64, addr, Constant(U64, u64{kGuestPagesBase}))};
-            const Id inside{OpLogicalAnd(U1, OpULessThan(U1, offset, Constant(U64, u64{kGuestPagesBytes})),
-                                         OpINotEqual(U1, table, Constant(U64, u64{0})))};
-            const Id then_label{OpLabel()};
-            const Id else_label{OpLabel()};
-            OpSelectionMerge(else_label, spv::SelectionControlMask::MaskNone);
-            OpBranchConditional(inside, then_label, else_label);
-            AddLabel(then_label);
-            const Id slot{OpIAdd(U64, table, OpShiftLeftLogical(U64, OpShiftRightLogical(U64, offset, Const(12U)), Const(3U)))};
-            const Id page{psb_load(U64, slot, 8U)};
-            const Id mapped{OpINotEqual(U1, page, Constant(U64, u64{0}))};   // (before the merge: it must stand right before its branch)
-            const Id hit_label{OpLabel()};
-            const Id miss_label{OpLabel()};
-            OpSelectionMerge(miss_label, spv::SelectionControlMask::MaskNone);
-            OpBranchConditional(mapped, hit_label, miss_label);
-            AddLabel(hit_label);
-            if (gp_level >= 3) {
-                const Id target{OpIAdd(U64, page, OpBitwiseAnd(U64, addr, Constant(U64, u64{0xfff})))};
-                OpReturnValue(psb_load(type, target, 4U));
-            } else {
-                OpReturnValue(ConstantNull(type));
-            }
-            AddLabel(miss_label);
-            OpBranch(else_label);
-            AddLabel(else_label);
-        }
+        guest_lookup(addr, [&](Id target) {
+            if (gp_level >= 3) OpReturnValue(psb_load(type, target, 4U));
+            else OpReturnValue(ConstantNull(type));
+        });
         OpReturnValue(ConstantNull(type));
         OpFunctionEnd();
         return func_id;
@@ -1112,6 +1161,10 @@ void EmitContext::DefineGlobalMemoryFunctions(const Info& info) {
         const Id data{OpFunctionParameter(type)};
         define_body(ssbo_member, addr, element_pointer, shift, [&](Id ssbo_pointer) {
             OpStore(ssbo_pointer, data);
+            OpReturn();
+        });
+        guest_lookup(addr, [&](Id target) {   // (hookshot: through the page table, as the loads: the culling's outputs)
+            if (gp_level >= 3) OpStore(psb_member(type, target), data, spv::MemoryAccessMask::Aligned, 4U);
             OpReturn();
         });
         OpReturn();
@@ -1148,6 +1201,11 @@ void EmitContext::DefineGlobalMemoryFunctions(const Info& info) {
                 const Id scope{Const(static_cast<u32>(spv::Scope::Device))};
                 OpReturnValue((this->*atomics[i])(U32[1], ssbo_pointer, scope, u32_zero_value, value));
             });
+            guest_lookup(addr, [&](Id target) {   // (hookshot: the culling's counters, through the page table)
+                const Id scope{Const(static_cast<u32>(spv::Scope::Device))};
+                if (gp_level >= 3) OpReturnValue((this->*atomics[i])(U32[1], psb_member(U32[1], target), scope, u32_zero_value, value));
+                else OpReturnValue(u32_zero_value);
+            });
             OpReturnValue(u32_zero_value);
             OpFunctionEnd();
             atomic_global_func_u32[i] = func_id;
@@ -1156,7 +1214,7 @@ void EmitContext::DefineGlobalMemoryFunctions(const Info& info) {
 }
 
 void EmitContext::DefineRescalingInput(const Info& info) {
-    if (!info.uses_rescaling_uniform) {
+    if (!info.uses_rescaling_uniform || rescaling_push_constants.value != 0) {   // (hookshot: or made already, for the page table)
         return;
     }
     if (profile.unified_descriptor_binding) {
@@ -1167,7 +1225,7 @@ void EmitContext::DefineRescalingInput(const Info& info) {
 }
 
 void EmitContext::DefineRescalingInputPushConstant() {
-    boost::container::static_vector<Id, 3> members{};
+    boost::container::static_vector<Id, 5> members{};
     u32 member_index{0};
 
     rescaling_textures_type = TypeArray(U32[1], Const(4u));
@@ -1183,6 +1241,14 @@ void EmitContext::DefineRescalingInputPushConstant() {
     if (stage != Stage::Compute) {
         members.push_back(F32[1]);
         rescaling_downfactor_member_index = member_index++;
+    }
+    if (wants_guest_pages) {
+        members.push_back(U64);
+        guest_pages_member_index = member_index++;
+    }
+    if (wants_mesh_first) {
+        members.push_back(U64);
+        mesh_first_member_index = member_index++;
     }
     const Id push_constant_struct{TypeStruct(std::span(members.data(), members.size()))};
     Decorate(push_constant_struct, spv::Decoration::Block);
@@ -1201,6 +1267,14 @@ void EmitContext::DefineRescalingInputPushConstant() {
                        spv::Decoration::Offset,
                        static_cast<u32>(offsetof(RescalingLayout, down_factor)));
         MemberName(push_constant_struct, rescaling_downfactor_member_index, "down_factor");
+    }
+    if (wants_guest_pages) {
+        MemberDecorate(push_constant_struct, guest_pages_member_index, spv::Decoration::Offset, GUEST_PAGES_PUSH_OFFSET);
+        MemberName(push_constant_struct, guest_pages_member_index, "guest_pages");
+    }
+    if (wants_mesh_first) {
+        MemberDecorate(push_constant_struct, mesh_first_member_index, spv::Decoration::Offset, MESH_FIRST_PUSH_OFFSET);
+        MemberName(push_constant_struct, mesh_first_member_index, "mesh_first");
     }
     const Id pointer_type{TypePointer(spv::StorageClass::PushConstant, push_constant_struct)};
     rescaling_push_constants = AddGlobalVariable(pointer_type, spv::StorageClass::PushConstant);

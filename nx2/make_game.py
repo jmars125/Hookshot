@@ -266,10 +266,42 @@ def check_linux_compiler():
              "libc6-dev on Debian and Ubuntu, glibc-devel on Fedora)" % (errors[0] if errors else "no message"))
 
 
+def bundled_mingw():
+    """(as TotK Recomp's installer) llvm-mingw in the tools folder: its clang, headers and libraries build the game, and nothing of
+    Visual Studio or the Windows SDK is needed. HOOKSHOT_MINGW set already wins; HOOKSHOT_MSVC=1: the Visual Studio route"""
+    if LINUX or os.environ.get("HOOKSHOT_MSVC") == "1":
+        return os.environ.get("HOOKSHOT_MINGW", "")
+    if not os.environ.get("HOOKSHOT_MINGW"):
+        here = os.path.join(ROOT, "llvm-mingw")
+        if os.path.isfile(os.path.join(here, "bin", "clang.exe")):
+            os.environ["HOOKSHOT_MINGW"] = here
+    return os.environ.get("HOOKSHOT_MINGW", "")
+
+
+def check_mingw():
+    """The bundled compiler builds and links a Windows program: found now, not 40 minutes in"""
+    sys.path.insert(0, os.path.join(ROOT, "third_party", "a64-kit", "tools"))
+    import toolchain
+    with tempfile.TemporaryDirectory() as d:
+        src = os.path.join(d, "t.c")
+        with open(src, "w") as f:
+            f.write(chr(10).join(("#include <stdio.h>", "#include <windows.h>", "int main(void) { return 0; }", "")))
+        r = subprocess.run([toolchain.need(toolchain.find("clang"))] + toolchain.native_target() + toolchain.native_link() +
+                           [src, "-o", os.path.join(d, "t.exe")], capture_output=True, text=True, encoding="utf-8", errors="replace")
+    if r.returncode:
+        print(r.stdout + r.stderr, flush=True)
+        errors = [l for l in r.stderr.splitlines() if "error" in l]
+        fail("The builder's own compiler (tools/llvm-mingw) could not build a test program: %s. Unpack the zip again into a folder "
+             "your antivirus allows." % (errors[0] if errors else "no message"))
+    print("the compiler: %s (no Visual Studio needed)" % os.environ["HOOKSHOT_MINGW"], flush=True)
+
+
 def check_windows_sdk():
     """The compiler is bundled; Microsoft's C library and Windows SDK may not be, by their licences. Found now, not 40 minutes in."""
     if LINUX:
         return check_linux_compiler()
+    if bundled_mingw():
+        return check_mingw()
     sys.path.insert(0, os.path.join(ROOT, "third_party", "a64-kit", "tools"))
     import toolchain
     # (an INCLUDE set for the whole machine, by an old Visual Studio or another tool, is all clang reads: without the Windows SDK's C
@@ -393,6 +425,12 @@ def link_or_copy(src, dst):
                 shutil.copy2(s, t)
         if i % 500 == 0:
             say("progress", "%.3f" % (i / max(1, len(files))))
+
+
+def shader_census_cmd(romfs, out):
+    """The shader list, under the same UTF-8 mode as the other steps. -I alone follows the console's code page, and an
+    archive name that page cannot print stopped this step: the game then compiled its shaders as it played."""
+    return PY + [os.path.join(HERE, "shader_census.py"), romfs, "--out", out]
 
 
 def main():
@@ -530,8 +568,7 @@ def main():
     shutil.copy2(os.path.join(work, "sa", "image", "image.bin"), os.path.join(out, "image.bin"))
     # every shader of the game, for its first start to translate (gpu/vk/vk_shader.cpp seed_open). Without it the game still runs, compiling them
     # as it meets them: not worth stopping a finished build for
-    if subprocess.call([sys.executable, "-I", os.path.join(HERE, "shader_census.py"), romfs, "--out", os.path.join(out, "hookshot_shaders.bin")],
-                       stdout=sys.stderr):
+    if subprocess.call(shader_census_cmd(romfs, os.path.join(out, "hookshot_shaders.bin")), stdout=sys.stderr):
         print("the shader list was not made: the game will compile its shaders as it plays", flush=True)
     language = os.path.join(out, "language.txt")   # (the same text as host/nn_applet.c writes)
     with open(language, "w", encoding="utf-8", newline="\n") as f:

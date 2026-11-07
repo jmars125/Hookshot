@@ -38,7 +38,9 @@
 #include "vk_internal.h"
 
 namespace mkwvk {
+extern std::atomic<bool> movie_networks_slow;   // (vk_draw.cpp: the movie networks left out, issue 109)
 int64_t presents_now;   // (the presents so far, for SlowWatch)
+std::atomic<uint64_t> ub_prune_gen{1};   // (an update dropped from the front: remembered words indexed the old list)
 void hang_watch_start();   // (EvilOOT, vk_hangdump.cpp: RX_VK_HANG_DUMP)
 struct CondNote { int64_t present; uint64_t addr, x, y; int mode; bool on; };   // (the last render conditions, for a dark frame)
 CondNote cond_ring[1 << 15];
@@ -297,10 +299,13 @@ bool deferred_late() {   // (RX_VK_DEFERRED_LATE=1: deferred binds read from the
 }
 
 void ub_prune(uint64_t done) {
+    bool dropped = false;
     while (!ub_updates.empty() && ub_updates.front().value <= done) {
         ub_updates.pop_front();
         if (ub_first_of_recording) ub_first_of_recording--;
+        dropped = true;
     }
+    if (dropped) ub_prune_gen.fetch_add(1, std::memory_order_relaxed);
 }
 
 } // namespace
@@ -308,11 +313,82 @@ void ub_prune(uint64_t done) {
 uint64_t ub_generation() {
     return ub_gen;
 }
+/// No update in [have, lim) overlaps [addr, addr + n). have == lim: nothing new.
+bool ub_tail_clear(size_t have, size_t lim, uint64_t addr, uint64_t n, const uint64_t* dst, const uint64_t* len,
+                   size_t count) {
+    if (!n || have > lim || lim > count) return false;
+    for (size_t i = have; i < lim; i++)
+        if (dst[i] < addr + n && addr < dst[i] + len[i]) return false;
+    return true;
+}
+// (a draw reads the same uniform words as the draw before it, and scans every inline update to do it. The word is
+// kept until an update lands on it, its page is stamped, the capture changes, or an old update is dropped)
+struct UbWord {
+    uint64_t addr = 0, rec = 0;
+    size_t lim = 0;
+    uint64_t prune = 0;
+    uint32_t page = 0, v = 0;
+    bool on = false;
+};
+thread_local UbWord ub_words[128];
+bool ub_word_hit(uint64_t addr, size_t lim, uint32_t* out) {
+    UbWord& w = ub_words[(addr >> 2) & 127];
+    if (!w.on || w.addr != addr || w.lim > lim || w.rec != rec_value_now ||
+        w.prune != ub_prune_gen.load(std::memory_order_relaxed) || w.page != memory_page_stamp(addr))
+        return false;
+    const size_t tail = lim - w.lim;
+    if (tail > 8) return false;
+    uint64_t dst[8], len[8];
+    for (size_t i = 0; i < tail; i++) {
+        const UbUpdate& u = ub_updates[w.lim + i];
+        dst[i] = u.dst, len[i] = u.bytes.size();
+    }
+    if (!ub_tail_clear(0, tail, addr, 4, dst, len, tail)) return false;
+    w.lim = lim;
+    *out = w.v;
+    return true;
+}
+struct UbCopy {
+    const uint8_t* base = nullptr;
+    uint64_t addr = 0, n = 0, at = 0, rec = 0, view = 0, prune = 0;
+    size_t lim = 0, first = 0;
+    bool on = false, none = false;
+};
+thread_local UbCopy ub_copies[8];
+bool ub_copy_hit(uint64_t addr, uint64_t n, const uint8_t* base, size_t first, size_t lim, uint64_t* at) {
+    UbCopy& c = ub_copies[((addr >> 4) ^ n) & 7];
+    if (!c.on || c.base != base || c.addr != addr || c.n != n || c.first != first || c.lim > lim || c.rec != rec_value_now ||
+        c.prune != ub_prune_gen.load(std::memory_order_relaxed) || c.view != memory_capture_view())
+        return false;
+    const size_t tail = lim - c.lim;
+    if (tail > 8) return false;
+    uint64_t dst[8], len[8];
+    for (size_t i = 0; i < tail; i++) {
+        const UbUpdate& u = ub_updates[c.lim + i];
+        dst[i] = u.dst, len[i] = u.bytes.size();
+    }
+    if (!ub_tail_clear(0, tail, addr, n, dst, len, tail)) return false;
+    if (!c.none && !stream_holds(base, c.at, n)) return false;
+    c.lim = lim;
+    *at = c.none ? UINT64_MAX : c.at;
+    return true;
+}
+void ub_copy_keep(uint64_t addr, uint64_t n, const uint8_t* base, size_t first, size_t lim, uint64_t at, bool none,
+                  uint64_t view) {
+    if (view != memory_capture_view()) return;
+    UbCopy& c = ub_copies[((addr >> 4) ^ n) & 7];
+    c = {};
+    c.on = true, c.none = none, c.base = base, c.addr = addr, c.n = n, c.at = at, c.first = first, c.lim = lim;
+    c.rec = rec_value_now, c.prune = ub_prune_gen.load(std::memory_order_relaxed), c.view = view;
+}
 uint64_t ub_overlay(uint64_t addr, uint64_t n, uint8_t* base, const std::function<uint64_t(uint64_t)>& alloc) {
-    bool any = false;
     const size_t lim = std::min(ub_limit, ub_updates.size());   // (a worker: those before its place in the stream)
     static const bool cur_only = getenv("RX_VK_UB_CUR_ONLY") != nullptr;   // (A/B: this submission's updates only)
     const size_t first = cur_only ? std::min(ub_first_of_recording, lim) : 0;
+    const uint64_t view = memory_capture_view();
+    uint64_t kept = 0;
+    if (ub_copy_hit(addr, n, base, first, lim, &kept)) return kept;
+    bool any = false;
     for (size_t i = first; i < lim; i++) {
         const UbUpdate& u = ub_updates[i];
         if (u.dst < addr + n && addr < u.dst + u.bytes.size()) {
@@ -320,7 +396,10 @@ uint64_t ub_overlay(uint64_t addr, uint64_t n, uint8_t* base, const std::functio
             break;
         }
     }
-    if (!any) return UINT64_MAX;
+    if (!any) {
+        ub_copy_keep(addr, n, base, first, lim, 0, true, view);
+        return UINT64_MAX;
+    }
     const uint64_t at = alloc(n);
     if (at == UINT64_MAX) return UINT64_MAX;
     uint8_t* p = base + at;
@@ -331,6 +410,7 @@ uint64_t ub_overlay(uint64_t addr, uint64_t n, uint8_t* base, const std::functio
         if (lo < hi) std::memcpy(p + (lo - addr), u.bytes.data() + (lo - u.dst), hi - lo);
     }
     st_ub_overlays++;
+    ub_copy_keep(addr, n, base, first, lim, at, false, view);
     return at;
 }
 
@@ -338,12 +418,31 @@ uint64_t ub_overlay(uint64_t addr, uint64_t n, uint8_t* base, const std::functio
 /// the stream made before this place (a worker: before its segment) over it. For what the replay reads on the CPU for
 /// the GPU's sake (handles in uniform and storage buffers): the game's memory now may be its next frames'.
 bool ub_read(uint64_t addr, void* dst, uint64_t n) {
-    if (!memory_read_as_submitted(addr, dst, n)) return false;
     const size_t lim = std::min(ub_limit, ub_updates.size());
+    if (n == 4) {
+        uint32_t v = 0;
+        if (ub_word_hit(addr, lim, &v)) {
+            std::memcpy(dst, &v, 4);
+            return true;
+        }
+    }
+    const uint32_t page = n == 4 ? memory_page_stamp(addr) : 0;
+    const uint64_t prune = ub_prune_gen.load(std::memory_order_relaxed);
+    if (!memory_read_as_submitted(addr, dst, n)) return false;
     for (size_t i = 0; i < lim; i++) {
         const UbUpdate& u = ub_updates[i];
         const uint64_t lo = std::max(addr, u.dst), hi = std::min(addr + n, u.dst + u.bytes.size());
         if (lo < hi) std::memcpy((uint8_t*)dst + (lo - addr), u.bytes.data() + (lo - u.dst), hi - lo);
+    }
+    if (n == 4) {
+        UbWord& w = ub_words[(addr >> 2) & 127];
+        uint32_t v = 0;
+        std::memcpy(&v, dst, 4);
+        w = {};
+        if (page == memory_page_stamp(addr) && prune == ub_prune_gen.load(std::memory_order_relaxed)) {
+            w.on = true, w.addr = addr, w.v = v, w.lim = lim, w.rec = rec_value_now;
+            w.prune = prune, w.page = page;
+        }
     }
     return true;
 }
@@ -1636,6 +1735,7 @@ bool tex_pages_any(uint64_t gpu, uint64_t size) {
     return false;
 }
 void texture_created_of(const nvn_tex* t) { tex_pages_add(t, +1); }
+uint64_t fence();
 void invalidate(uint64_t gpu, uint64_t size) {
     static const bool log_inv = getenv("RX_VK_LOG_INVALIDATE") != nullptr;
     static std::atomic<int> logged{0};
@@ -1647,6 +1747,58 @@ void invalidate(uint64_t gpu, uint64_t size) {
         }
         logf("vk: invalidate %#llx +%#llx:%s", (unsigned long long)gpu, (unsigned long long)size,
              hits.empty() ? " no texture the GPU wrote" : hits.c_str());
+    }
+    {   // (EvilBoyce, diagnostics) RX_VK_LOG_READBACK=<present>: from that present on, 300 invalidates with the fence handed
+        // out, the GPU's completed value, whether the replay is behind, and the first words the CPU is about to read
+        static const int64_t from = getenv("RX_VK_LOG_READBACK") ? atoll(getenv("RX_VK_LOG_READBACK")) : -1;
+        static std::atomic<int> n{0};
+        if (from >= 0 && presents_now >= from && n++ < 300) {
+            uint32_t w[8]{};
+            host->gpu_read(gpu, w, sizeof w);
+            logf("vk: readback %lld %#llx +%#llx: fence %llu done %llu behind %d | %08x %08x %08x %08x %08x %08x %08x %08x",
+                 (long long)presents_now, (unsigned long long)gpu, (unsigned long long)size, (unsigned long long)fence(),
+                 (unsigned long long)completed(), (int)replay_behind(), w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7]);
+        }
+    }
+    // (EvilBoyce) GPU results in buffers: the CPU reads them once the submission that writes them back is done. The game
+    // reads them when its own pacing says the GPU has finished that frame, which on the console's coherent memory means the
+    // values are there; here they reach guest memory only with the write-back at the end of the submission that the replay
+    // may not have recorded or the GPU not finished yet. OoT reads its exposure meter (a sum the GPU adds to each frame and
+    // the CPU reads and sets to 0) this way: it read 0 one frame, then the old sum came back over the CPU's 0 and the next
+    // frame added to it (2x): the exposure stepped 0.2 EV up and down several times a second (the white flashes).
+    // RX_VK_NO_READBACK_WAIT=1: as before
+    if (size) {
+        static const bool off = getenv("RX_VK_NO_READBACK_WAIT") != nullptr;
+        bool ever = false;
+        if (!off && (memory_writeback_value(host->gpu_guest(gpu), size, &ever), ever)) {
+            static std::atomic<int64_t> calls{0}, waited{0}, ns{0};
+            const auto w0 = std::chrono::steady_clock::now();
+            bool w = false;
+            const uint64_t f0 = fence(), c0 = completed();
+            const bool behind0 = replay_behind();
+            static const bool no_catchup = getenv("RX_VK_READBACK_NO_CATCHUP") != nullptr;   // (A/B: recorded work only)
+            if (behind0 && !no_catchup) wait_queue_empty(), w = true;   // (work handed over may write it back too)
+            const auto w1 = std::chrono::steady_clock::now();
+            const uint64_t v = memory_writeback_value(host->gpu_guest(gpu), size, nullptr);
+            if (v > completed()) wait_value(v), w = true;
+            if (w) {
+                waited++;
+                const int64_t d = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - w0).count();
+                ns += d;
+                static const bool log_each = getenv("RX_VK_LOG_READBACK_WAITS") != nullptr;
+                static std::atomic<int> logged{0};
+                if (log_each && presents_now > 4000 && logged++ < 300)
+                    logf("vk: readback wait %lld %#llx +%#llx: %.2f ms (catch-up %.2f) value %llu, fence %llu, done %llu, behind %d",
+                         (long long)presents_now, (unsigned long long)gpu, (unsigned long long)size, d / 1e6,
+                         std::chrono::duration_cast<std::chrono::nanoseconds>(w1 - w0).count() / 1e6, (unsigned long long)v,
+                         (unsigned long long)f0, (unsigned long long)c0, (int)behind0);
+            }
+            if (++calls % 3000 == 0) {
+                const int64_t n = waited.exchange(0);
+                logf("vk: readbacks of GPU results: %lld of 3000 waited for their write-back, %.2f ms each", (long long)n,
+                     n ? ns.exchange(0) / (double)n / 1e6 : 0.0);
+            }
+        }
     }
     // (textures the GPU wrote there: their texels into memory before the CPU reads it, as vmap_changing does. The game
     // waited for the work that wrote them; the replay is caught up first)
@@ -1928,6 +2080,13 @@ void log_frame_stats() {
         static uint64_t l_made;
         logf("vk: GPU time %.1f ms a frame (the longest submission %.1f ms); %.1f textures made a frame",
              (st_gpu_ns - l_gpu) / 120.0 / 1e6, st_gpu_max_ns / 1e6, (texture_made() - l_made) / 120.0);
+        {   // (issue 109: the movie networks too slow on this card: left out from now on, vk_draw.cpp movie_networks_slow)
+            static const bool keep_all = getenv("RX_VK_NETWORK_KEEP") && !strcmp(getenv("RX_VK_NETWORK_KEEP"), "all");
+            const double gpu_ms = (st_gpu_ns - l_gpu) / 120.0 / 1e6, draws = (d - l_d) / 120.0;
+            if (!keep_all && gpu_ms > 40.0 && draws < 40.0 && !movie_networks_slow.exchange(true))
+                logf("vk: %.0f ms of GPU time a frame for %.0f draws (a movie): its upscaler networks are left out from now on "
+                     "(a linear upscale; RX_VK_NETWORK_KEEP=all keeps them)", gpu_ms, draws);
+        }
         l_made = texture_made();
         {
             static int64_t l_ub, l_un;
@@ -1991,6 +2150,21 @@ void do_present(const nvn_tex* t, const int crop[4]) {
         presents++;
         presents_now = presents;
         if (presents == 1) hang_watch_start();
+        {   // (EvilBoyce, diagnostics) RX_VK_WATCH_CPU=<present>:<gpu address>[,...] (hex addresses): from that present on, the
+            // CPU's writes to those 4 KB pages logged with the writer's stack (host page watch: 12 reports)
+            static bool armed = false;
+            static const char* e = getenv("RX_VK_WATCH_CPU");
+            if (e && !armed && host->watch_guest_writes && presents >= atoll(e)) {
+                armed = true;
+                for (const char* q = strchr(e, ':'); q && *q;) {
+                    char* end;
+                    const uint64_t a = strtoull(q + 1, &end, 16);
+                    if (end == q + 1) break;
+                    if (const uint64_t g = host->gpu_guest(a)) host->watch_guest_writes(g & ~4095ull, 4096);
+                    q = *end ? end : nullptr;
+                }
+            }
+        }
         ts_anchor_ns = host->ticks() * 32;
         dump_present(presents);
         if (src && (dev.offscreen || shots) && offscreen_init()) {

@@ -307,12 +307,16 @@ void display_main() {
 
 } // namespace
 
+// The Insert menu's Frame generation is off at 0. While it was ignored, every present still copied the frame and
+// reduced it to luma (framegen_record), then a second thread showed it. Open areas paid for that on a full GPU and
+// gained no made frames. 2x and up is the interpolation; RX_VK_FRAMEGEN=0 keeps it off entirely.
+bool framegen_wanted(int menu_value, int allow) {
+    return allow && menu_value >= 2;
+}
+
 bool framegen_on() {
-    // (RX_VK_FRAMEGEN=1: the game's ~50 fps shown at ~100. Off by default: block-matched frames flashed on fast
-    // motion, the HUD and camera cuts)
-    // (hookshot: available unless RX_VK_FRAMEGEN=0; the Insert menu turns it on, off by default)
-    static const bool on = !getenv("RX_VK_FRAMEGEN") || atoi(getenv("RX_VK_FRAMEGEN")) != 0;
-    return on && !dev.offscreen && !fg.failed;
+    static const int allow = !getenv("RX_VK_FRAMEGEN") || atoi(getenv("RX_VK_FRAMEGEN")) != 0;
+    return framegen_wanted(opts.framegen, allow) && !dev.offscreen && !fg.failed;
 }
 
 VkImage framegen_scale(VkCommandBuffer cmd, VkImageView src, VkImage image, uint32_t sw, uint32_t sh, const int crop[4], uint32_t dw, uint32_t dh) {

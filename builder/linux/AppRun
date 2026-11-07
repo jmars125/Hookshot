@@ -1,8 +1,10 @@
 #!/bin/sh
 # The Hookshot AppImage: the builder window (builder/linux/hookshot_builder.py) with everything it builds the game with -
 # Python and the tools, clang and lld, a glibc 2.35 sysroot, FFmpeg, SDL2 and the Vulkan back end, built already.
-#   Hookshot.AppImage                  the window (and Play, once a game is built)
-#   Hookshot.AppImage --play           the game built last time
+#   Hookshot.AppImage                  the builder window (Play is in the window, once a game is built)
+#   Hookshot.AppImage --play           start the game the builder saved, without opening the window
+#   Hookshot.AppImage --play <folder>  start the game in that folder
+#   Hookshot.AppImage <folder>         the same
 #   Hookshot.AppImage --cli <args>     nx2/make_game.py itself, e.g. --cli --nup game.nup --out ~/Games/Hookshot
 HERE="$(dirname "$(readlink -f "$0")")"
 LIB="$HERE/usr/lib/hookshot"
@@ -13,8 +15,16 @@ export HOOKSHOT_FFMPEG="$LIB/ffmpeg"
 export HOOKSHOT_VK_PREBUILT="$LIB/hookshot_vk.so"
 export HOOKSHOT_SDL2="$LIB/libSDL2-2.0.so.0"
 PY="$HERE/usr/python/bin/python3"
-if [ "$1" = "--cli" ]; then
+if [ "${1:-}" = "--cli" ]; then
     shift
     exec "$PY" -I "$HOOKSHOT_TOOLS/nx2/make_game.py" "$@"
+fi
+# Play is the same AppImage: the start script drops this image's libraries, then runs the built game.
+if [ "${1:-}" = "--play" ]; then
+    shift
+    exec "$HOOKSHOT_TOOLS/builder/linux/hookshot-launch" "$@"
+fi
+if [ -n "${1:-}" ] && [ -d "$1" ]; then
+    exec "$HOOKSHOT_TOOLS/builder/linux/hookshot-launch" "$1"
 fi
 exec "$PY" -I "$HOOKSHOT_TOOLS/builder/linux/hookshot_builder.py" "$@"

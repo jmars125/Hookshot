@@ -18,6 +18,38 @@ on:
       - gpu/vk/import_hold.h
       - gpu/vk/vk_menu.cpp
       - tests/test_fps_rate.py
+      - tests/test_fps_overlay_order.py
+      - tests/test_dispatch_clock.py
+      - gpu/vk/vk_framegen.cpp
+      - tests/test_framegen_gate.py
+      - gpu/vk/vk_draw.cpp
+      - tests/test_table_track.py
+      - tests/test_desc_clock.py
+      - gpu/vk/vk_internal.h
+      - tests/test_prof_clock.py
+      - gpu/vk/vk_memory.cpp
+      - tests/test_pool_span.py
+      - tests/test_submitted_page.py
+      - gpu/vk/vk_replay.cpp
+      - gpu/vk/vk_draw.h
+      - tests/test_ub_memo.py
+      - tests/test_shader_census_cmd.py
+      - nx2/version.py
+      - nx2/test_version.py
+      - host/nn_audio.c
+      - tests/test_audio_deadline.py
+      - host/pad_sdl.c
+      - tests/test_rumble_refresh.py
+      - tests/test_upscale_label.py
+      - gpu/vk/movie_upscale_policy.h
+      - tests/test_movie_upscale_policy.cpp
+      - tests/test_movie_upscale_policy.py
+      - nx2/test_import_windows.py
+      - builder/linux/hookshot-launch
+      - builder/linux/AppRun
+      - builder/linux/hookshot-builder.desktop
+      - scripts/linux/appimage.sh
+      - tests/test_hookshot_launch.py
       - .github/workflows/source-regressions.yml
   pull_request:
     branches: [main]
@@ -36,6 +68,38 @@ on:
       - gpu/vk/import_hold.h
       - gpu/vk/vk_menu.cpp
       - tests/test_fps_rate.py
+      - tests/test_fps_overlay_order.py
+      - tests/test_dispatch_clock.py
+      - gpu/vk/vk_framegen.cpp
+      - tests/test_framegen_gate.py
+      - gpu/vk/vk_draw.cpp
+      - tests/test_table_track.py
+      - tests/test_desc_clock.py
+      - gpu/vk/vk_internal.h
+      - tests/test_prof_clock.py
+      - gpu/vk/vk_memory.cpp
+      - tests/test_pool_span.py
+      - tests/test_submitted_page.py
+      - gpu/vk/vk_replay.cpp
+      - gpu/vk/vk_draw.h
+      - tests/test_ub_memo.py
+      - tests/test_shader_census_cmd.py
+      - nx2/version.py
+      - nx2/test_version.py
+      - host/nn_audio.c
+      - tests/test_audio_deadline.py
+      - host/pad_sdl.c
+      - tests/test_rumble_refresh.py
+      - tests/test_upscale_label.py
+      - gpu/vk/movie_upscale_policy.h
+      - tests/test_movie_upscale_policy.cpp
+      - tests/test_movie_upscale_policy.py
+      - nx2/test_import_windows.py
+      - builder/linux/hookshot-launch
+      - builder/linux/AppRun
+      - builder/linux/hookshot-builder.desktop
+      - scripts/linux/appimage.sh
+      - tests/test_hookshot_launch.py
       - .github/workflows/source-regressions.yml
   workflow_dispatch:
 
@@ -107,3 +171,50 @@ jobs:
       - name: Check the FPS counter's first sample
         if: runner.os == 'Linux'
         run: python -I -B tests/test_fps_rate.py
+      - name: Check FPS overlay transfer ordering
+        if: runner.os == 'Linux'
+        run: python -I -B tests/test_fps_overlay_order.py
+      - name: Check dispatch timing stays off
+        run: python -I -B tests/test_dispatch_clock.py
+      - name: Check frame generation stays off until asked
+        if: runner.os == 'Linux'
+        run: python -I -B tests/test_framegen_gate.py
+      - name: Check the table-entry tracker stops looking
+        if: runner.os == 'Linux'
+        run: python -I -B tests/test_table_track.py
+      - name: Check descriptor timing stays off
+        run: python -I -B tests/test_desc_clock.py
+      - name: Check the replay clock skips the performance counter
+        if: runner.os == 'Linux'
+        run: python -I -B tests/test_prof_clock.py
+      - name: Check a pool span is reused without the lock
+        if: runner.os == 'Linux'
+        run: python -I -B tests/test_pool_span.py
+      - name: Check a captured page is read once
+        if: runner.os == 'Linux'
+        run: python -I -B tests/test_submitted_page.py
+      - name: Check a repeated uniform word is not read again
+        if: runner.os == 'Linux'
+        run: python -I -B tests/test_ub_memo.py
+      - name: Check the shader list's text encoding
+        run: python -I -B tests/test_shader_census_cmd.py
+      - name: Check the build's version stamp
+        run: python -I -B nx2/test_version.py
+      - name: Check the audio mixer's catch-up
+        if: runner.os == 'Linux'
+        run: python -I -B tests/test_audio_deadline.py
+      - name: Check controller rumble keeps going
+        if: runner.os == 'Linux'
+        run: python -I -B tests/test_rumble_refresh.py
+      - name: Check upscale menu labels
+        if: runner.os == 'Linux'
+        run: python -I -B tests/test_upscale_label.py
+      - name: Check movie upscale fallback policy
+        if: runner.os == 'Linux'
+        run: python -I -B tests/test_movie_upscale_policy.py
+      - name: Check import windows
+        if: runner.os == 'Linux'
+        run: python -I -B nx2/test_import_windows.py --cxx g++
+      - name: Check the game launcher
+        if: runner.os == 'Linux'
+        run: python -I -B tests/test_hookshot_launch.py

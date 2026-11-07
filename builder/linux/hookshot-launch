@@ -1,0 +1,63 @@
+#!/bin/sh
+# Start the game Hookshot Builder wrote, from that folder, without the AppImage's libraries.
+# The builder AppImage calls this for --play. The window's Play button does the same thing.
+#
+#   hookshot-launch                      the out= folder in ~/.config/hookshot/builder.ini
+#   hookshot-launch /path/to/the/game    that folder
+#   HOOKSHOT_LAUNCH_CONFIG=<file>        read that ini instead (a test)
+set -eu
+
+ini_path() {
+    if [ -n "${HOOKSHOT_LAUNCH_CONFIG:-}" ]; then
+        printf '%s\n' "$HOOKSHOT_LAUNCH_CONFIG"
+    else
+        printf '%s\n' "${XDG_CONFIG_HOME:-$HOME/.config}/hookshot/builder.ini"
+    fi
+}
+
+# the last out= line, as the builder keeps the last value it wrote
+out_of() {
+    out=
+    while IFS= read -r line || [ -n "$line" ]; do
+        case $line in
+            out=*) out=${line#out=} ;;
+        esac
+    done < "$1"
+    [ -n "$out" ] || return 1
+    printf '%s\n' "$out"
+}
+
+ready() {
+    [ -n "${1:-}" ] && [ -f "$1/hookshot" ] && [ -f "$1/image.bin" ]
+}
+
+folder=${1:-}
+if [ -z "$folder" ]; then
+    ini=$(ini_path)
+    if [ -f "$ini" ]; then
+        folder=$(out_of "$ini") || folder=
+    fi
+fi
+
+if ! ready "$folder"; then
+    echo "Hookshot: no built game to start. Build one with Hookshot Builder, or pass its folder." >&2
+    # (HOOKSHOT_LAUNCH_CONFIG is a test: it must not open a dialog)
+    if [ -z "${HOOKSHOT_LAUNCH_CONFIG:-}" ]; then
+        if command -v zenity >/dev/null 2>&1; then
+            zenity --error --title=Hookshot --text="No built game to start. Build one with Hookshot Builder first." || true
+        elif command -v kdialog >/dev/null 2>&1; then
+            kdialog --error "No built game to start. Build one with Hookshot Builder first." || true
+        fi
+    fi
+    exit 1
+fi
+
+# The AppImage runtime and the builder put their own libraries on the search path. The game loads
+# SDL from beside itself, so those names go before it starts. Same set as the builder's Play button.
+names=$(env | awk -F= '$1 ~ /^(HOOKSHOT_|PYTHON|APPDIR|APPIMAGE|ARGV0|OWD)/ || $1 == "LD_LIBRARY_PATH" { print $1 }')
+for name in $names; do
+    unset "$name"
+done
+
+cd "$folder"
+exec "$folder/hookshot"

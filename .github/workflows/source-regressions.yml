@@ -30,6 +30,7 @@ on:
       - gpu/vk/vk_replay.cpp
       - gpu/vk/vk_draw.h
       - tests/test_ub_memo.py
+      - tests/test_bind_memo.py
       - tests/test_shader_census_cmd.py
       - nx2/version.py
       - nx2/test_version.py
@@ -77,6 +78,7 @@ on:
       - gpu/vk/vk_replay.cpp
       - gpu/vk/vk_draw.h
       - tests/test_ub_memo.py
+      - tests/test_bind_memo.py
       - tests/test_shader_census_cmd.py
       - nx2/version.py
       - nx2/test_version.py
@@ -162,6 +164,9 @@ jobs:
       - name: Check a repeated uniform word is not read again
         if: runner.os == 'Linux'
         run: python -I -B tests/test_ub_memo.py
+      - name: Check a repeated read bind is not looked up again
+        if: runner.os == 'Linux'
+        run: python -I -B tests/test_bind_memo.py
       - name: Check the shader list's text encoding
         run: python -I -B tests/test_shader_census_cmd.py
       - name: Check the build's version stamp

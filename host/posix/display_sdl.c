@@ -122,6 +122,7 @@ static void keys_update(void) {
 /* ---- the window ---- */
 static void *window;
 static volatile int renderer;   /* the renderer presents into the window */
+static HANDLE renderer_up;   /* (set once rx_start has returned, ready or not: hos_renderer_wait) */
 static int fullscreen;
 
 static int create_surface(void *w, void *instance, void *surface) { return sdl.Vulkan_CreateSurface(w, instance, surface); }
@@ -153,7 +154,15 @@ static DWORD WINAPI renderer_main(void *p) {
         sdl.Vulkan_GetDrawableSize(window, &w, &h);
         if (w > 0 && h > 0) rx_resize(w, h);
     }
+    SetEvent(renderer_up);
     return 0;
+}
+
+/* (hookshot) host/display.c's: the game's first work for the GPU waits for the renderer (nvn_native.c), so nothing it submits while
+   the shaders are prepared is lost. Without a window the renderer starts on the game's own thread, before this is asked */
+void hos_renderer_wait(void) {
+    { const char *e = getenv("HOS_NO_RENDERER_WAIT"); if (e && atoi(e) != 0) return; }
+    if (renderer_up) WaitForSingleObject(renderer_up, INFINITE);
 }
 
 static volatile int start_asked;
@@ -189,6 +198,7 @@ void hos_display_start(void) {
         rx_start(NULL);
         return;
     }
+    renderer_up = CreateEventA(NULL, TRUE, FALSE, NULL);
     __atomic_store_n(&start_asked, 1, __ATOMIC_RELEASE);
 }
 
@@ -210,6 +220,7 @@ void hos_display_loop(void) {
     if (!window) {
         hos_log("display: SDL_CreateWindow: %s: no window", sdl.GetError());
         rx_start(NULL);
+        SetEvent(renderer_up);
         for (;;) Sleep(1000);
     }
     vk_window.window = window;

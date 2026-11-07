@@ -1,8 +1,8 @@
 /* nn::hid: one Pro Controller (FullKey style) on Npad No.1, from every XInput gamepad and the keyboard and mouse at
    once. Buttons map by position (the Xbox bottom face button is the Switch's bottom one, B).
 
-   (hookshot) What presses each button, on a gamepad and on the keyboard, can be changed in hookshot_options.ini
-   beside the game (binds_load). The defaults:
+   (hookshot) What presses each button, on a gamepad and on the keyboard, is the player's: the Insert menu's Controls
+   page (gpu/vk/vk_menu.cpp) changes it, kept in hookshot_options.ini (binds_load). The defaults:
    Keyboard (totk-pc-recomp's layout): WASD left stick, arrows or IJKL right stick (camera), Space X (jump), E A
    (action), Shift B (run/cancel), Q L (abilities), R R, Z ZL, X or F ZR (bow), Ctrl left-stick click (crouch), C
    right-stick click (first person), Tab or Enter Plus, M Minus (map), 1 2 3 4 d-pad left, up, right, down. Only
@@ -331,7 +331,14 @@ static const signed char pad_default[HOS_SW_N] = {
 static const unsigned char key_default[HOS_SW_N][2] = {
     {'E'}, {VK_SHIFT}, {VK_SPACE}, {0}, {VK_CONTROL}, {'C'}, {'Q'}, {'R'}, {'Z'}, {'X', 'F'}, {VK_TAB, VK_RETURN},
     {'M'}, {'1'}, {'2'}, {'3'}, {'4'}};
-static int pad_bind[HOS_SW_N], key_bind[HOS_SW_N][2];
+static volatile LONG pad_bind[HOS_SW_N], key_bind[HOS_SW_N][2];   /* (the menu changes them as the game reads them) */
+
+static void binds_default(void) {
+    for (int i = 0; i < HOS_SW_N; i++) {
+        InterlockedExchange(&pad_bind[i], pad_default[i]);
+        for (int k = 0; k < 2; k++) InterlockedExchange(&key_bind[i][k], key_default[i][k]);
+    }
+}
 
 static void binds_load(void) {
     static volatile LONG state;   /* 0 not read, 1 being read, 2 read */
@@ -340,10 +347,7 @@ static void binds_load(void) {
         while (state != 2) Sleep(0);
         return;
     }
-    for (int i = 0; i < HOS_SW_N; i++) {
-        pad_bind[i] = pad_default[i];
-        for (int k = 0; k < 2; k++) key_bind[i][k] = key_default[i][k];
-    }
+    binds_default();
     char path[MAX_PATH];
     const DWORD len = GetModuleFileNameA(NULL, path, MAX_PATH);
     char *slash = len ? (strrchr(path, 92) ? strrchr(path, 92) : strrchr(path, 47)) : NULL;   /* (linux: '/') */
@@ -378,6 +382,34 @@ static void binds_load(void) {
     }
     if (changed) hos_log("hid: %d controls from hookshot_options.ini", changed);
     InterlockedExchange(&state, 2);
+}
+int hos_binding(int set, int button, int slot) {
+    binds_load();
+    if (button < 0 || button >= HOS_SW_N || slot < 0 || slot > 1) return set == HOS_BIND_PAD ? -1 : 0;
+    return set == HOS_BIND_PAD ? (slot ? -1 : (int)pad_bind[button]) : (int)key_bind[button][slot];
+}
+/* A gamepad input moved to another button gives that one this button's old input (one button an input, none left
+   without); a key moved to it is taken from the others */
+void hos_bind(int set, int button, int slot, int code) {
+    binds_load();
+    if (button < 0) {
+        binds_default();
+        return;
+    }
+    if (button >= HOS_SW_N || slot < 0 || slot > 1) return;
+    if (set == HOS_BIND_PAD) {
+        if (slot || code < -1 || code >= HOS_PAD_N) return;
+        const LONG old = pad_bind[button];
+        for (int i = 0; i < HOS_SW_N; i++)
+            if (i != button && code >= 0 && pad_bind[i] == code) InterlockedExchange(&pad_bind[i], old);
+        InterlockedExchange(&pad_bind[button], code);
+    } else {
+        if (code < 0 || code > 255) return;
+        for (int i = 0; i < HOS_SW_N; i++)
+            for (int k = 0; k < 2; k++)
+                if (code && key_bind[i][k] == code) InterlockedExchange(&key_bind[i][k], 0);
+        InterlockedExchange(&key_bind[button][slot], code);
+    }
 }
 
 static volatile LONG pad_raw_now;   /* the gamepads' inputs at the last read, 1 << HOS_PAD_* */

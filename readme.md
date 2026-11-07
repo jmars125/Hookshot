@@ -202,7 +202,10 @@ With Game speed on Per frame, the game runs slower whenever it is below 60 fps. 
 Use a controller, or the keyboard and mouse. On the keyboard, <kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd> move
 and the arrow keys turn the camera.
 
-To change which gamepad button or key presses a Switch button, add lines to `hookshot_options.ini`:
+To change which gamepad button or key presses a Switch button, open the in-game menu's Controls page. Choose a
+button and a column, press <kbd>Enter</kbd> (or the bottom face button), then the new button or key; <kbd>Delete</kbd>
+clears it, and Reset to defaults puts them all back. A gamepad button taken from another Switch button swaps with it.
+The page saves them in `hookshot_options.ini`, where you can also write them yourself:
 
 ```ini
 pad_a=0

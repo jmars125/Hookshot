@@ -6,6 +6,7 @@
 // title and importing each is a buffer, a memory object and a device address (tens of seconds taken at one submit,
 // on the render thread, in the first frame). The table of pools is cheap to keep current (host->gpu_pools: two
 // numbers each) and is refreshed when its generation changes, at a submit.
+#include <cstring>
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -24,6 +25,7 @@
 
 #include "vk_internal.h"
 #include "vk_texture.h"   // (upload_command_buffer)
+#include "import_hold.h"
 
 namespace mkwvk {
 namespace {
@@ -68,6 +70,23 @@ uint32_t generation = ~0u;
 uint64_t align = 4096;
 uint64_t max_import_size = UINT64_MAX;
 int failures = 0;
+ImportHolds import_holds;          // (issue 218: a failed import is not tried again for ImportHolds::kGapMs)
+std::mutex import_holds_mu;
+thread_local bool import_cooling = false;
+thread_local VkResult import_result = VK_SUCCESS;
+
+int64_t import_now_ms() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+bool import_on_hold(uint64_t lo, uint64_t hi) {
+    std::lock_guard lk(import_holds_mu);
+    import_cooling = !import_holds.allow(lo, hi, import_now_ms());
+    return import_cooling;
+}
+void import_remember_failure(uint64_t lo, uint64_t hi) {
+    std::lock_guard lk(import_holds_mu);
+    import_holds.deny_for(lo, hi, import_now_ms());
+}
 
 constexpr VkBufferUsageFlags kUsage =
     VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT |
@@ -76,9 +95,13 @@ constexpr VkBufferUsageFlags kUsage =
     VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT;
 
 bool import_pool(uint64_t lo, uint64_t hi, Pool& p) {
+    import_cooling = false;
+    import_result = VK_SUCCESS;
+    if (import_on_hold(lo, hi)) return false;   // (tried recently and failed: not again until the hold ends)
     if (hi <= lo || hi - lo > max_import_size) {
         logf("vk: import %#llx..%#llx exceeds the device's allocation/buffer limit", (unsigned long long)lo,
              (unsigned long long)hi);
+        import_remember_failure(lo, hi);
         return false;
     }
     p.lo = lo;
@@ -116,14 +139,19 @@ bool import_pool(uint64_t lo, uint64_t hi, Pool& p) {
     if (type == UINT32_MAX) {
         VkMemoryHostPointerPropertiesEXT hp{VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT};
         if (vkGetMemoryHostPointerPropertiesEXT(dev.device, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT, ptr,
-                                                &hp) != VK_SUCCESS)
+                                                &hp) != VK_SUCCESS) {
+            import_remember_failure(lo, hi);
             return false;
+        }
         for (uint32_t i = 0; i < dev.memory.memoryTypeCount && type == UINT32_MAX; i++)   // (host visible, coherent)
             if ((hp.memoryTypeBits >> i & 1) &&
                 (dev.memory.memoryTypes[i].propertyFlags & (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) ==
                     (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT))
                 type = i;
-        if (type == UINT32_MAX) return false;
+        if (type == UINT32_MAX) {
+            import_remember_failure(lo, hi);
+            return false;
+        }
     }
     t1 = clk::now();
     VkExternalMemoryBufferCreateInfo eb{VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO};
@@ -132,7 +160,10 @@ bool import_pool(uint64_t lo, uint64_t hi, Pool& p) {
     bi.pNext = &eb;
     bi.size = bytes;
     bi.usage = kUsage;
-    if (vkCreateBuffer(dev.device, &bi, nullptr, &p.buffer) != VK_SUCCESS) return false;
+    if (vkCreateBuffer(dev.device, &bi, nullptr, &p.buffer) != VK_SUCCESS) {
+        import_remember_failure(lo, hi);
+        return false;
+    }
     t2 = clk::now();
     VkImportMemoryHostPointerInfoEXT im{VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT};
     im.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
@@ -144,9 +175,12 @@ bool import_pool(uint64_t lo, uint64_t hi, Pool& p) {
     ai.pNext = &im;
     ai.allocationSize = bytes;
     ai.memoryTypeIndex = type;
-    if (vkAllocateMemory(dev.device, &ai, nullptr, &p.memory) != VK_SUCCESS) {
+    const VkResult allocated = vkAllocateMemory(dev.device, &ai, nullptr, &p.memory);
+    if (allocated != VK_SUCCESS) {
+        import_result = allocated;
         vkDestroyBuffer(dev.device, p.buffer, nullptr);
         p.buffer = VK_NULL_HANDLE;
+        import_remember_failure(lo, hi);
         return false;
     }
     t3 = clk::now();
@@ -575,7 +609,7 @@ bool tex_spans_changed = false;
 uint64_t tex_merged_bytes = 0;
 
 bool in_tex_merged(uint64_t guest) {   // (shadow_mu held)
-    auto it = std::upper_bound(tex_merged.begin(), tex_merged.end(), std::make_pair(guest, ~0ull));
+    auto it = std::upper_bound(tex_merged.begin(), tex_merged.end(), std::make_pair(guest, ~uint64_t(0)));
     return it != tex_merged.begin() && guest < std::prev(it)->second;
 }
 void shadow_erase(uint32_t page) {   // (shadow_mu held)
@@ -739,6 +773,7 @@ void memory_drop_shadow(uint64_t guest, uint64_t size) {
 /// -fasync-exceptions clang catches a fault in a __try block only across a call, and a 4 KB memcpy inlined into the
 /// block (the per-page retry) faulted past the handler: the crash that kept the texture storage out of the capture.
 void* (*volatile guarded_memcpy)(void*, const void*, size_t) = std::memcpy;
+#ifdef _WIN32
 __declspec(noinline) bool guarded_copy(void* dst, const void* src, size_t n) {
     __try {
         guarded_memcpy(dst, src, n);
@@ -747,6 +782,13 @@ __declspec(noinline) bool guarded_copy(void* dst, const void* src, size_t n) {
     }
     return true;
 }
+#else
+// (linux: the guest window is one mapping that stays readable, decommitted pages read as zero: nothing to fault on)
+bool guarded_copy(void* dst, const void* src, size_t n) {
+    guarded_memcpy(dst, src, n);
+    return true;
+}
+#endif
 // ---- a capture's copies: on the submitting thread and two helpers (RX_VK_CAPTURE_THREADS=<n>, 0-4): ~9 MB of the
 // game's dynamic data a submit, four submits a frame, ~1.4 ms on the game's thread each with one ----
 // (a page written and then unmapped before the submit faulted a plain copy: ReadProcessMemory fails on it instead.
@@ -897,7 +939,7 @@ bool capture_owns(uint64_t guest) {
     std::lock_guard lk(cap_ranges_mu);
     refresh_pool_ranges_locked();   // (a pool made since the last capture: the next one takes its pages, not this)
     auto in = [guest](const std::vector<std::pair<uint64_t, uint64_t>>& v) {
-        auto it = std::upper_bound(v.begin(), v.end(), std::make_pair(guest, ~0ull));
+        auto it = std::upper_bound(v.begin(), v.end(), std::make_pair(guest, ~uint64_t(0)));
         return it != v.begin() && guest < std::prev(it)->second;
     };
     return in(cap_ranges) || in(tex_cap_ranges) || in(pool_cap_ranges);
@@ -1154,9 +1196,14 @@ Pool* pool_lookup(uint64_t guest, uint64_t size) {
                      (unsigned long long)(range.hi - range.lo), ms, n, total_ms);
         }
         if (!ok) {
-            if (failures++ < 16)
-                logf("vk: pool %#llx+%#llx not imported", (unsigned long long)range.lo,
-                     (unsigned long long)(range.hi - range.lo));
+            if (!import_cooling && failures++ < 16) {
+                if (import_result != VK_SUCCESS)
+                    logf("vk: pool %#llx+%#llx not imported (VkResult %d)", (unsigned long long)range.lo,
+                         (unsigned long long)(range.hi - range.lo), (int)import_result);
+                else
+                    logf("vk: pool %#llx+%#llx not imported", (unsigned long long)range.lo,
+                         (unsigned long long)(range.hi - range.lo));
+            }
             return nullptr;
         }
         for (uint64_t k : overlapped) {   // (the pools it took in)
@@ -1205,12 +1252,10 @@ uint64_t mirror_budget() {
         uint64_t vram = 0;
         for (uint32_t h = 0; h < dev.memory.memoryHeapCount; h++)
             if (dev.memory.memoryHeaps[h].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) vram = std::max(vram, (uint64_t)dev.memory.memoryHeaps[h].size);
-        // (hookshot: an eighth on cards of 8 GB or less. A 6 GB laptop's 1.5 GB of mirrors and its textures went past what the
-        // driver allows, it paged, and the GPU timed out: device lost, issues 96 and 132)
         // (cards of 6 GB or less only: on 8 GB ones, a 3070 or a 4060, the game's memory read over PCIe instead left the GPU at a few
         // percent and the frame stuttering)
         if (vram && vram <= (6ull << 30) + (512ull << 20)) return vram / 8;
-        return vram ? std::min<uint64_t>(vram / 4, 3072ull << 20) : 3072ull << 20;
+        return vram ? std::min<uint64_t>(vram / 4, 3072ull << 20) : (uint64_t)(3072ull << 20);
     }();
     return b;
 }

@@ -221,7 +221,7 @@ Staging staging(uint64_t n, uint64_t align = 256) {
         }
     }
     Arena a;
-    a.size = std::max(kArena, (n + 0xFFFFF) & ~0xFFFFFull);
+    a.size = std::max(kArena, uint64_t((n + 0xFFFFF) & ~0xFFFFFull));
     void* m = nullptr;
     if (!create_buffer(a.size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true, a.buffer,
                        a.allocation, &m) || !m)
@@ -1447,6 +1447,19 @@ Texture* create(const Key& key, const nvn_tex* t, VkFormat vf, bool astc, int bw
     } else if (!is_bc(x.format) && !is_astc(x.format)) {
         const VkClearColorValue z{};
         vkCmdClearColorImage(cmd, x.image, VK_IMAGE_LAYOUT_GENERAL, &z, 1, &b.subresourceRange);
+    }
+    if (!is_bc(x.format) && !is_astc(x.format)) {
+        // (the clear finished before anything after it in this command buffer writes the image: the upload of its contents
+        // comes right after, a copy into the same image. Two transfer writes with no barrier between them may run in either
+        // order; NVIDIA's ran in order, AMD's (a fast clear) landed last, so a texture uploaded in the recording that made it
+        // read zeros there. The menus' text is that case: the CPU writes each string's letters into a new R8 texture, which is
+        // drawn once into the string's label, so every menu and title text was blank on AMD cards)
+        b.srcStageMask = VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT;
+        b.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        b.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+        b.dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
+        b.oldLayout = b.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+        vkCmdPipelineBarrier2(cmd, &di);
     }
     Texture* p = tex.get();
     static uint32_t ids;

@@ -10,6 +10,9 @@ on:
       - nx2/test_nup_paths.py
       - tests/test_make_game_cache.py
       - tests/test_child_unicode.py
+      - tests/test_import_hold.py
+      - tests/import_hold_test.cpp
+      - gpu/vk/import_hold.h
       - .github/workflows/source-regressions.yml
   pull_request:
     branches: [main]
@@ -20,6 +23,9 @@ on:
       - nx2/test_nup_paths.py
       - tests/test_make_game_cache.py
       - tests/test_child_unicode.py
+      - tests/test_import_hold.py
+      - tests/import_hold_test.cpp
+      - gpu/vk/import_hold.h
       - .github/workflows/source-regressions.yml
   workflow_dispatch:
 
@@ -54,3 +60,9 @@ jobs:
         run: python -I -B tests/test_make_game_cache.py
       - name: Check isolated child Unicode output
         run: python -I -B tests/test_child_unicode.py
+      - name: C++ compiler for the import-hold check
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y g++
+      - name: Check failed-import backoff
+        if: runner.os == 'Linux'
+        run: python -I -B tests/test_import_hold.py

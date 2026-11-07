@@ -39,6 +39,7 @@
 namespace mkwvk {
 extern std::atomic<bool> movie_networks_slow;   // (vk_draw.cpp: the movie networks left out, issue 109)
 int64_t presents_now;   // (the presents so far, for SlowWatch)
+std::atomic<uint64_t> ub_prune_gen{1};   // (an update dropped from the front: remembered words indexed the old list)
 void hang_watch_start();   // (EvilOOT, vk_hangdump.cpp: RX_VK_HANG_DUMP)
 struct CondNote { int64_t present; uint64_t addr, x, y; int mode; bool on; };   // (the last render conditions, for a dark frame)
 CondNote cond_ring[1 << 15];
@@ -299,12 +300,13 @@ bool deferred_late() {   // (RX_VK_DEFERRED_LATE=1: deferred binds read from the
 }
 
 void ub_prune(uint64_t done) {
-    if (ub_updates.empty() || ub_updates.front().value > done) return;
+    bool dropped = false;
     while (!ub_updates.empty() && ub_updates.front().value <= done) {
         ub_updates.pop_front();
         if (ub_first_of_recording) ub_first_of_recording--;
+        dropped = true;
     }
-    ub_list_epoch.fetch_add(1, std::memory_order_relaxed);
+    if (dropped) ub_prune_gen.fetch_add(1, std::memory_order_relaxed);
 }
 
 } // namespace
@@ -312,55 +314,82 @@ void ub_prune(uint64_t done) {
 uint64_t ub_generation() {
     return ub_gen;
 }
-/// The open gap around [addr, addr+bytes) that no update covers. False when one does. [lo, hi) is that gap.
-bool ub_gap(const uint64_t* dst, const uint64_t* end, int n, uint64_t addr, uint64_t bytes, uint64_t* lo, uint64_t* hi) {
-    if (!bytes || addr + bytes < addr) return false;
-    uint64_t left = 0, right = ~uint64_t{0};
-    const uint64_t stop = addr + bytes;
-    for (int i = 0; i < n; i++) {
-        if (dst[i] < stop && addr < end[i]) return false;
-        if (end[i] <= addr && end[i] > left) left = end[i];
-        if (dst[i] >= stop && dst[i] < right) right = dst[i];
-    }
-    *lo = left;
-    *hi = right;
+/// No update in [have, lim) overlaps [addr, addr + n). have == lim: nothing new.
+bool ub_tail_clear(size_t have, size_t lim, uint64_t addr, uint64_t n, const uint64_t* dst, const uint64_t* len,
+                   size_t count) {
+    if (!n || have > lim || lim > count) return false;
+    for (size_t i = have; i < lim; i++)
+        if (dst[i] < addr + n && addr < dst[i] + len[i]) return false;
     return true;
 }
-struct UbGapCache {
-    uint64_t epoch = 0, lo = 0, hi = 0;
-    size_t first = 0, lim = 0;
+// (a draw reads the same uniform words as the draw before it, and scans every inline update to do it. The word is
+// kept until an update lands on it, its page is stamped, the capture changes, or an old update is dropped)
+struct UbWord {
+    uint64_t addr = 0, rec = 0;
+    size_t lim = 0;
+    uint64_t prune = 0;
+    uint32_t page = 0, v = 0;
     bool on = false;
 };
-thread_local UbGapCache ub_gap_cache;
-bool ub_gap_holds(uint64_t addr, uint64_t n, size_t first, size_t lim) {
-    return n && ub_gap_cache.on && ub_gap_cache.epoch == ub_list_epoch.load(std::memory_order_relaxed) &&
-           ub_gap_cache.first == first && ub_gap_cache.lim == lim && addr >= ub_gap_cache.lo &&
-           addr + n >= addr && addr + n <= ub_gap_cache.hi;
-}
-bool ub_try_gap(size_t first, size_t lim, uint64_t addr, uint64_t n) {
-    if (first > lim) return false;
-    const uint64_t epoch = ub_list_epoch.load(std::memory_order_relaxed);
-    static thread_local std::vector<uint64_t> dst, end;
-    dst.clear();
-    end.clear();
-    dst.reserve(lim - first);
-    end.reserve(lim - first);
-    for (size_t i = first; i < lim; i++) {
-        dst.push_back(ub_updates[i].dst);
-        end.push_back(ub_updates[i].dst + ub_updates[i].bytes.size());
+thread_local UbWord ub_words[128];
+bool ub_word_hit(uint64_t addr, size_t lim, uint32_t* out) {
+    UbWord& w = ub_words[(addr >> 2) & 127];
+    if (!w.on || w.addr != addr || w.lim > lim || w.rec != rec_value_now ||
+        w.prune != ub_prune_gen.load(std::memory_order_relaxed) || w.page != memory_page_stamp(addr))
+        return false;
+    const size_t tail = lim - w.lim;
+    if (tail > 8) return false;
+    uint64_t dst[8], len[8];
+    for (size_t i = 0; i < tail; i++) {
+        const UbUpdate& u = ub_updates[w.lim + i];
+        dst[i] = u.dst, len[i] = u.bytes.size();
     }
-    uint64_t lo = 0, hi = 0;
-    if (!ub_gap(dst.data(), end.data(), (int)dst.size(), addr, n, &lo, &hi)) return false;
-    if (ub_list_epoch.load(std::memory_order_relaxed) != epoch) return false;   // (the list changed: do not keep the gap)
-    ub_gap_cache = {epoch, lo, hi, first, lim, true};
+    if (!ub_tail_clear(0, tail, addr, 4, dst, len, tail)) return false;
+    w.lim = lim;
+    *out = w.v;
     return true;
 }
+struct UbCopy {
+    const uint8_t* base = nullptr;
+    uint64_t addr = 0, n = 0, at = 0, rec = 0, view = 0, prune = 0;
+    size_t lim = 0, first = 0;
+    bool on = false, none = false;
+};
+thread_local UbCopy ub_copies[8];
+bool ub_copy_hit(uint64_t addr, uint64_t n, const uint8_t* base, size_t first, size_t lim, uint64_t* at) {
+    UbCopy& c = ub_copies[((addr >> 4) ^ n) & 7];
+    if (!c.on || c.base != base || c.addr != addr || c.n != n || c.first != first || c.lim > lim || c.rec != rec_value_now ||
+        c.prune != ub_prune_gen.load(std::memory_order_relaxed) || c.view != memory_capture_view())
+        return false;
+    const size_t tail = lim - c.lim;
+    if (tail > 8) return false;
+    uint64_t dst[8], len[8];
+    for (size_t i = 0; i < tail; i++) {
+        const UbUpdate& u = ub_updates[c.lim + i];
+        dst[i] = u.dst, len[i] = u.bytes.size();
+    }
+    if (!ub_tail_clear(0, tail, addr, n, dst, len, tail)) return false;
+    if (!c.none && !stream_holds(base, c.at, n)) return false;
+    c.lim = lim;
+    *at = c.none ? UINT64_MAX : c.at;
+    return true;
+}
+void ub_copy_keep(uint64_t addr, uint64_t n, const uint8_t* base, size_t first, size_t lim, uint64_t at, bool none,
+                  uint64_t view) {
+    if (view != memory_capture_view()) return;
+    UbCopy& c = ub_copies[((addr >> 4) ^ n) & 7];
+    c = {};
+    c.on = true, c.none = none, c.base = base, c.addr = addr, c.n = n, c.at = at, c.first = first, c.lim = lim;
+    c.rec = rec_value_now, c.prune = ub_prune_gen.load(std::memory_order_relaxed), c.view = view;
+}
 uint64_t ub_overlay(uint64_t addr, uint64_t n, uint8_t* base, const std::function<uint64_t(uint64_t)>& alloc) {
-    bool any = false;
     const size_t lim = std::min(ub_limit, ub_updates.size());   // (a worker: those before its place in the stream)
     static const bool cur_only = getenv("RX_VK_UB_CUR_ONLY") != nullptr;   // (A/B: this submission's updates only)
     const size_t first = cur_only ? std::min(ub_first_of_recording, lim) : 0;
-    if (ub_gap_holds(addr, n, first, lim) || ub_try_gap(first, lim, addr, n)) return UINT64_MAX;
+    const uint64_t view = memory_capture_view();
+    uint64_t kept = 0;
+    if (ub_copy_hit(addr, n, base, first, lim, &kept)) return kept;
+    bool any = false;
     for (size_t i = first; i < lim; i++) {
         const UbUpdate& u = ub_updates[i];
         if (u.dst < addr + n && addr < u.dst + u.bytes.size()) {
@@ -368,7 +397,10 @@ uint64_t ub_overlay(uint64_t addr, uint64_t n, uint8_t* base, const std::functio
             break;
         }
     }
-    if (!any) return UINT64_MAX;
+    if (!any) {
+        ub_copy_keep(addr, n, base, first, lim, 0, true, view);
+        return UINT64_MAX;
+    }
     const uint64_t at = alloc(n);
     if (at == UINT64_MAX) return UINT64_MAX;
     uint8_t* p = base + at;
@@ -379,6 +411,7 @@ uint64_t ub_overlay(uint64_t addr, uint64_t n, uint8_t* base, const std::functio
         if (lo < hi) std::memcpy(p + (lo - addr), u.bytes.data() + (lo - u.dst), hi - lo);
     }
     st_ub_overlays++;
+    ub_copy_keep(addr, n, base, first, lim, at, false, view);
     return at;
 }
 
@@ -386,15 +419,31 @@ uint64_t ub_overlay(uint64_t addr, uint64_t n, uint8_t* base, const std::functio
 /// the stream made before this place (a worker: before its segment) over it. For what the replay reads on the CPU for
 /// the GPU's sake (handles in uniform and storage buffers): the game's memory now may be its next frames'.
 bool ub_read(uint64_t addr, void* dst, uint64_t n) {
-    if (!memory_read_as_submitted(addr, dst, n)) return false;
     const size_t lim = std::min(ub_limit, ub_updates.size());
-    // (most words are not inside an inline update: the scan that finds that is kept for the gap, and the next words
-    // in the gap do not walk the list)
-    if (ub_gap_holds(addr, n, 0, lim) || ub_try_gap(0, lim, addr, n)) return true;
+    if (n == 4) {
+        uint32_t v = 0;
+        if (ub_word_hit(addr, lim, &v)) {
+            std::memcpy(dst, &v, 4);
+            return true;
+        }
+    }
+    const uint32_t page = n == 4 ? memory_page_stamp(addr) : 0;
+    const uint64_t prune = ub_prune_gen.load(std::memory_order_relaxed);
+    if (!memory_read_as_submitted(addr, dst, n)) return false;
     for (size_t i = 0; i < lim; i++) {
         const UbUpdate& u = ub_updates[i];
         const uint64_t lo = std::max(addr, u.dst), hi = std::min(addr + n, u.dst + u.bytes.size());
         if (lo < hi) std::memcpy((uint8_t*)dst + (lo - addr), u.bytes.data() + (lo - u.dst), hi - lo);
+    }
+    if (n == 4) {
+        UbWord& w = ub_words[(addr >> 2) & 127];
+        uint32_t v = 0;
+        std::memcpy(&v, dst, 4);
+        w = {};
+        if (page == memory_page_stamp(addr) && prune == ub_prune_gen.load(std::memory_order_relaxed)) {
+            w.on = true, w.addr = addr, w.v = v, w.lim = lim, w.rec = rec_value_now;
+            w.prune = prune, w.page = page;
+        }
     }
     return true;
 }

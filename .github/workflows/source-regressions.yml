@@ -16,7 +16,6 @@ on:
       - tests/test_failure_reason.py
       - tests/test_import_hold.py
       - gpu/vk/vk_replay.cpp
-      - tests/test_ub_gap.py
       - tests/import_hold_test.cpp
       - gpu/vk/import_hold.h
       - gpu/vk/vk_menu.cpp
@@ -35,6 +34,9 @@ on:
       - gpu/vk/vk_memory.cpp
       - tests/test_pool_span.py
       - tests/test_submitted_page.py
+      - gpu/vk/vk_replay.cpp
+      - gpu/vk/vk_draw.h
+      - tests/test_ub_memo.py
       - tests/test_shader_census_cmd.py
       - gpu/vk/vk_shader.cpp
       - tests/test_same_draw.py
@@ -51,6 +53,11 @@ on:
       - tests/test_movie_upscale_policy.py
       - nx2/test_import_windows.py
       - tests/test_handle_lookup.py
+      - builder/linux/hookshot-launch
+      - builder/linux/AppRun
+      - builder/linux/hookshot-builder.desktop
+      - scripts/linux/appimage.sh
+      - tests/test_hookshot_launch.py
       - .github/workflows/source-regressions.yml
   pull_request:
     branches: [main]
@@ -67,7 +74,6 @@ on:
       - tests/test_failure_reason.py
       - tests/test_import_hold.py
       - gpu/vk/vk_replay.cpp
-      - tests/test_ub_gap.py
       - tests/import_hold_test.cpp
       - gpu/vk/import_hold.h
       - gpu/vk/vk_menu.cpp
@@ -86,6 +92,9 @@ on:
       - gpu/vk/vk_memory.cpp
       - tests/test_pool_span.py
       - tests/test_submitted_page.py
+      - gpu/vk/vk_replay.cpp
+      - gpu/vk/vk_draw.h
+      - tests/test_ub_memo.py
       - tests/test_shader_census_cmd.py
       - gpu/vk/vk_shader.cpp
       - tests/test_same_draw.py
@@ -102,6 +111,11 @@ on:
       - tests/test_movie_upscale_policy.py
       - nx2/test_import_windows.py
       - tests/test_handle_lookup.py
+      - builder/linux/hookshot-launch
+      - builder/linux/AppRun
+      - builder/linux/hookshot-builder.desktop
+      - scripts/linux/appimage.sh
+      - tests/test_hookshot_launch.py
       - .github/workflows/source-regressions.yml
   workflow_dispatch:
 
@@ -144,9 +158,6 @@ jobs:
       - name: Check failed-import backoff
         if: runner.os == 'Linux'
         run: python -I -B tests/test_import_hold.py
-      - name: Check uniform words skip a known gap
-        if: runner.os == 'Linux'
-        run: python -I -B tests/test_ub_gap.py
       - name: Check the FPS counter's first sample
         if: runner.os == 'Linux'
         run: python -I -B tests/test_fps_rate.py
@@ -175,6 +186,9 @@ jobs:
       - name: Check a captured page is read once
         if: runner.os == 'Linux'
         run: python -I -B tests/test_submitted_page.py
+      - name: Check a repeated uniform word is not read again
+        if: runner.os == 'Linux'
+        run: python -I -B tests/test_ub_memo.py
       - name: Check the shader list's text encoding
         run: python -I -B tests/test_shader_census_cmd.py
       - name: Check the build's version stamp
@@ -205,3 +219,6 @@ jobs:
       - name: Check a repeated bind keeps its descriptors
         if: runner.os == 'Linux'
         run: python -I -B tests/test_same_bind.py
+      - name: Check the game launcher
+        if: runner.os == 'Linux'
+        run: python -I -B tests/test_hookshot_launch.py

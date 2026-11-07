@@ -1905,6 +1905,9 @@ void draw_skip_report(double frames) { skip_report_impl(frames); }
 void descriptors_disturbed() {
     pushed[0].cmd = pushed[1].cmd = VK_NULL_HANDLE;
 }
+bool stream_holds(const uint8_t* base, uint64_t at, uint64_t n) {
+    return cur && cur->mapped == base && n && at + n >= at && at + n <= cur->used;
+}
 bool mesh_args_ready();             // (below: the task programs' firsts)
 extern uint64_t mesh_args_address;
 namespace {

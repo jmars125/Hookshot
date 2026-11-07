@@ -6,3 +6,9 @@ Exec=AppRun
 Icon=hookshot
 Categories=Game;
 Terminal=false
+Actions=Play;
+
+[Desktop Action Play]
+Name=Play
+Exec=AppRun --play
+Icon=hookshot

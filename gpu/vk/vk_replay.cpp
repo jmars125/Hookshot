@@ -55,6 +55,10 @@ VkSemaphore batch_tl = VK_NULL_HANDLE;
 uint64_t batch_next = 0, batch_flushed = 0;
 struct { std::vector<VkCommandBufferSubmitInfo> cbs; uint64_t signal = 0; bool any_signal = false; } pend;
 int64_t st_flushes, st_batched_cbs;
+enum { FR_OTHER, FR_POLL, FR_WAIT, FR_SLOT, FR_PRESENT, FR_CAP, FR_VALUE, FR_COUNT };
+int64_t st_reason[FR_COUNT];
+int flush_reason = FR_OTHER;
+std::chrono::steady_clock::time_point pend_since;
 
 struct Recording {
     VkCommandPool pool = VK_NULL_HANDLE;
@@ -81,7 +85,7 @@ void recording_wait(Recording& r) {
     if (r.batch) {
         {
             std::lock_guard lk(dev.present_mu);
-            if (batch_flushed < r.batch) queue_flush_locked();
+            if (batch_flushed < r.batch) flush_reason = FR_SLOT, queue_flush_locked();
         }
         VkSemaphoreWaitInfo wi{VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO};
         wi.semaphoreCount = 1;
@@ -137,6 +141,8 @@ void queue_flush_locked() {   // (dev.present_mu held)
     if (res == VK_ERROR_DEVICE_LOST) checkpoints_report();
     batch_flushed = batch_next;
     st_flushes++, st_batched_cbs += (int64_t)pend.cbs.size();
+    st_reason[flush_reason]++;
+    flush_reason = FR_OTHER;
     pend.cbs.clear(), pend.any_signal = false, pend.signal = 0;
 }
 void queue_flush() {
@@ -144,8 +150,25 @@ void queue_flush() {
     queue_flush_locked();
 }
 namespace {
+void queue_flush_for(int why) {
+    std::lock_guard lk(dev.present_mu);
+    if (pend.cbs.empty()) return;
+    flush_reason = why;
+    queue_flush_locked();
+}
+// (RX_VK_BATCH_POLL_US=<us>: a progress poll sends held submits only once the oldest has waited that long; 0: always)
+void queue_flush_poll() {
+    static const int64_t us = getenv("RX_VK_BATCH_POLL_US") ? atoll(getenv("RX_VK_BATCH_POLL_US")) : 0;
+    std::lock_guard lk(dev.present_mu);
+    if (pend.cbs.empty()) return;
+    if (us > 0 && std::chrono::steady_clock::now() - pend_since < std::chrono::microseconds(us)) return;
+    flush_reason = FR_POLL;
+    queue_flush_locked();
+}
+} // namespace
+namespace {
 void wait_value(uint64_t v) {
-    queue_flush();
+    queue_flush_for(FR_VALUE);
     VkSemaphoreWaitInfo wi{VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO};
     wi.semaphoreCount = 1;
     wi.pSemaphores = &timeline;
@@ -234,12 +257,14 @@ void submit_recording(Recording& r, bool signal_value = true, uint64_t signal_at
     si.pSignalSemaphoreInfos = signal_value ? &signal : nullptr;
     std::lock_guard lk(dev.present_mu);   // (one queue: submits and presents take turns)
     if (batch_on()) {
-        if (pend.cbs.empty()) batch_next++;
+        if (pend.cbs.empty()) batch_next++, pend_since = std::chrono::steady_clock::now();
         for (uint32_t i = 0; i < n; i++) pend.cbs.push_back(cb[i]);
         if (signal_value) pend.signal = std::max(pend.signal, signal.value), pend.any_signal = true;
         r.batch = batch_next;
         r.submitted = true;
-        if (pend.cbs.size() >= 32) queue_flush_locked();
+        // (RX_VK_BATCH_MAX=<command buffers>: held at most this many, default 32)
+        static const size_t cap = getenv("RX_VK_BATCH_MAX") ? (size_t)std::max(1, atoi(getenv("RX_VK_BATCH_MAX"))) : 32;
+        if (pend.cbs.size() >= cap) flush_reason = FR_CAP, queue_flush_locked();
         return;
     }
     PROF(PROF_QSUBMIT);
@@ -1766,13 +1791,13 @@ void submit_job(std::vector<uint64_t>& handles, uint64_t value, uint64_t queue) 
     burst_end();
 }
 uint64_t get_replayed() {
-    queue_flush();
+    queue_flush_poll();
     const uint64_t hold = replayed_hold.load();
     return hold ? std::min(hold, completed()) : completed();
 }
 int wait(uint64_t f, uint64_t timeout_ns) {
     if (completed() >= f) return 1;
-    queue_flush();
+    queue_flush_for(FR_WAIT);
     // (a wait that needs stopped work: another queue's submit usually lets that on in a moment. Forced at once, as the main thread
     // waits ~15 times a second, 69000 waits went past in five minutes, and each one that mattered was a black frame.
     // RX_VK_WAIT_HOLD_US: how long the waiter gives it. A wait for older work than the stopped ones needs nothing of them)
@@ -1780,7 +1805,7 @@ int wait(uint64_t f, uint64_t timeout_ns) {
         static const int64_t hold_ns = (getenv("RX_VK_WAIT_HOLD_US") ? atoll(getenv("RX_VK_WAIT_HOLD_US")) : 3000) * 1000;
         const auto t0 = std::chrono::steady_clock::now();
         for (;;) {
-            queue_flush();
+            queue_flush_for(FR_WAIT);
             if (completed() >= f) return 1;
             bool needs;
             {
@@ -1801,7 +1826,7 @@ int wait(uint64_t f, uint64_t timeout_ns) {
     wi.semaphoreCount = 1;
     wi.pSemaphores = &timeline;
     wi.pValues = &f;
-    queue_flush();
+    queue_flush_for(FR_WAIT);
     const VkResult res = vkWaitSemaphores(dev.device, &wi, timeout_ns);
     static int logged;
     if (res != VK_SUCCESS && timeout_ns > 1000000000ull && logged++ < 8)
@@ -2769,12 +2794,19 @@ void present_image(VkImage src, uint32_t sw, uint32_t sh, const int crop[4], VkI
     si.signalSemaphoreInfoCount = 1;
     si.pSignalSemaphoreInfos = &signal;
     std::lock_guard qk(dev.present_mu);
+    if (!pend.cbs.empty()) flush_reason = FR_PRESENT;
     queue_flush_locked();
-    static int64_t presents_counted, st_flushes0, st_cbs0;
+    static int64_t presents_counted, st_flushes0, st_cbs0, r0[FR_COUNT];
     if (st_flushes && ++presents_counted % 120 == 0) {
-        logf("vk: batched submits: %lld flushes, %.1f command buffers each, over 120 presents", (long long)(st_flushes - st_flushes0),
-             (double)(st_batched_cbs - st_cbs0) / std::max<int64_t>(1, st_flushes - st_flushes0));
+        logf("vk: batched submits: %lld flushes, %.1f command buffers each, over 120 presents; by reason: poll %lld, wait %lld, "
+             "slot %lld, present %lld, cap %lld, value %lld, other %lld", (long long)(st_flushes - st_flushes0),
+             (double)(st_batched_cbs - st_cbs0) / std::max<int64_t>(1, st_flushes - st_flushes0),
+             (long long)(st_reason[FR_POLL] - r0[FR_POLL]), (long long)(st_reason[FR_WAIT] - r0[FR_WAIT]),
+             (long long)(st_reason[FR_SLOT] - r0[FR_SLOT]), (long long)(st_reason[FR_PRESENT] - r0[FR_PRESENT]),
+             (long long)(st_reason[FR_CAP] - r0[FR_CAP]), (long long)(st_reason[FR_VALUE] - r0[FR_VALUE]),
+             (long long)(st_reason[FR_OTHER] - r0[FR_OTHER]));
         st_flushes0 = st_flushes, st_cbs0 = st_batched_cbs;
+        std::memcpy(r0, st_reason, sizeof r0);
     }
     vkQueueSubmit2(dev.queue, 1, &si, f.done);
     VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};

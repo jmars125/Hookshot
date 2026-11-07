@@ -145,10 +145,11 @@ def vk_sources():
 
 
 def cpm_dirs():
-    """Eden's CPM package caches, read only: RX_CPM, this project's work/eg clone, mkw-recomp's, the shared
-    Eglantine checkout's (Vulkan and SPIR-V headers, VMA, FFmpeg)"""
+    """CPM packages: RX_CPM, packaged tools/cpm, then legacy project caches.
+    The packages provide Vulkan and SPIR-V headers, VMA and FFmpeg."""
     eden_ns2 = os.path.dirname(kit.ROOT)
-    return [d for d in (os.environ.get("RX_CPM"), os.path.join(kit.WORK, "eg", ".cache", "cpm"),
+    return [d for d in (os.environ.get("RX_CPM"), os.path.join(kit.ROOT, "cpm"),
+                        os.path.join(kit.WORK, "eg", ".cache", "cpm"),
                         os.path.join(eden_ns2, "mkw-recomp", "work", "eg", ".cache", "cpm"),
                         os.path.join(eden_ns2, "Eglantine", ".cache", "cpm")) if d and os.path.isdir(d)]
 

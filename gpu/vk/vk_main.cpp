@@ -433,7 +433,6 @@ bool started_up() {
                 if (AllocConsole()) {
 #ifdef _WIN32
                     // This console is ours. Selection must not block preparation's progress writes.
-#ifdef _WIN32
                     const HANDLE input = CreateFileA("CONIN$", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
                                                      nullptr, OPEN_EXISTING, 0, nullptr);
                     if (input != INVALID_HANDLE_VALUE) {

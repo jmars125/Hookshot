@@ -519,6 +519,10 @@ static inline void *RtlVirtualUnwind(DWORD type, DWORD64 base, DWORD64 pc, PRUNT
 #define VK_OEM_PERIOD 0xBE
 #define VK_OEM_2 0xBF
 #define VK_OEM_3 0xC0
+#define VK_OEM_4 0xDB
+#define VK_OEM_5 0xDC
+#define VK_OEM_6 0xDD
+#define VK_OEM_7 0xDE
 /* the window's key state: 0x8000 while down (display_sdl.c fills it; the Vulkan back end reads the executable's) */
 SHORT GetAsyncKeyState(int vk);
 SHORT GetKeyState(int vk);

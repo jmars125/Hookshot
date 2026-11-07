@@ -3,6 +3,7 @@
 // opens and closes it, Up and Down choose, Left and Right change, Esc closes; the game gets no keyboard input while it is open.
 // (hookshot) A gamepad's Home button, or Select and Start together, opens it too; the D-pad chooses and changes, the bottom
 // face button changes too, the right one closes. The game gets no gamepad input while it is open either.
+// Its Controls page binds the Switch's buttons to gamepad inputs and keys.
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -77,6 +78,8 @@ Row rows[] = {
      "Monitor's shape widens the camera to fill a screen wider than 16:9. The HUD is still stretched. Applies after a restart."},
     {"FPS counter", &opts.show_fps, 0, 1, 1, tx_onoff,
      "Shows frames per second in the top right corner. With frame generation on, it also shows the game's own rate."},
+    {"Controls", nullptr, 0, 0, 0, nullptr,   // (hookshot: opens its page)
+     "Which gamepad button and which keys press each of the Switch's buttons."},
 };
 constexpr int kRows = sizeof rows / sizeof rows[0];
 constexpr int kMenuWidth = 360;   // (at a scale of 1: 720 lines)
@@ -97,6 +100,10 @@ const char* ini_key(const Row& r) {
     k[n] = 0;
     return k;
 }
+// (hookshot) the controls, kept by the host (host/nn_hid.c reads them back from here): pad_<button>, key_<button>
+const char* const bind_names[HOS_SW_N] = {"a", "b", "x", "y", "ls", "rs", "l", "r", "zl", "zr", "plus", "minus",
+                                          "left", "up", "right", "down"};
+bool can_bind() { return host && host->binding && host->bind && host->pad_raw; }
 void save() {
     // (hookshot) the lines that are not the menu's are kept: the controls, pad_ and key_ (host/nn_hid.c)
     std::string kept;
@@ -107,11 +114,101 @@ void save() {
         fclose(f);
     }
     if (FILE* f = fopen(ini_path().c_str(), "w")) {
-        for (const Row& r : rows) fprintf(f, "%s=%d\n", ini_key(r), *r.value);
+        for (const Row& r : rows)
+            if (r.value) fprintf(f, "%s=%d\n", ini_key(r), *r.value);
         fprintf(f, "options_version=2\n");   // (game_speed below 2 was only ever the old default, see menu_init)
-        fputs(kept.c_str(), f);
+        if (!can_bind()) fputs(kept.c_str(), f);
+        for (int i = 0; i < HOS_SW_N && can_bind(); i++)
+            fprintf(f, "pad_%s=%d\nkey_%s=%d,%d\n", bind_names[i], host->binding(HOS_BIND_PAD, i, 0), bind_names[i],
+                    host->binding(HOS_BIND_KEY, i, 0), host->binding(HOS_BIND_KEY, i, 1));
         fclose(f);
     }
+}
+
+// ---- (hookshot) the Controls page: what presses each of the Switch's buttons, a gamepad input and up to two keys ----
+struct Control {
+    int button;   // HOS_SW_*
+    const char* name;
+};
+const Control controls[] = {{HOS_SW_A, "A"}, {HOS_SW_B, "B"}, {HOS_SW_X, "X"}, {HOS_SW_Y, "Y"}, {HOS_SW_L, "L"},
+                            {HOS_SW_R, "R"}, {HOS_SW_ZL, "ZL"}, {HOS_SW_ZR, "ZR"}, {HOS_SW_PLUS, "Plus"},
+                            {HOS_SW_MINUS, "Minus"}, {HOS_SW_LS, "Left stick press"}, {HOS_SW_RS, "Right stick press"},
+                            {HOS_SW_UP, "D-pad up"}, {HOS_SW_DOWN, "D-pad down"}, {HOS_SW_LEFT, "D-pad left"},
+                            {HOS_SW_RIGHT, "D-pad right"}};
+constexpr int kControls = sizeof controls / sizeof controls[0];   // (then "Reset to defaults")
+const char* pad_name(int p) {
+    static const char* t[HOS_PAD_N] = {"Bottom button", "Right button", "Left button", "Top button", "Select / Back",
+                                       "Home", "Start", "Left stick press", "Right stick press", "L1 / LB", "R1 / RB",
+                                       "D-pad up", "D-pad down", "D-pad left", "D-pad right", "L2 / LT", "R2 / RT"};
+    return p >= 0 && p < HOS_PAD_N ? t[p] : "None";
+}
+const char* key_name(int vk) {
+    static char b[16];
+    if ((vk >= 'A' && vk <= 'Z') || (vk >= '0' && vk <= '9')) return b[0] = (char)vk, b[1] = 0, b;
+    if (vk >= VK_F1 && vk <= VK_F12) return snprintf(b, sizeof b, "F%d", vk - VK_F1 + 1), b;
+    if (vk >= VK_NUMPAD0 && vk <= VK_NUMPAD0 + 9) return snprintf(b, sizeof b, "Num %d", vk - VK_NUMPAD0), b;
+    switch (vk) {
+    case VK_SPACE: return "Space";
+    case VK_SHIFT: return "Shift";
+    case VK_CONTROL: return "Ctrl";
+    case VK_MENU: return "Alt";
+    case VK_TAB: return "Tab";
+    case VK_RETURN: return "Enter";
+    case VK_BACK: return "Backspace";
+    case VK_CAPITAL: return "Caps Lock";
+    case VK_UP: return "Up";
+    case VK_DOWN: return "Down";
+    case VK_LEFT: return "Left";
+    case VK_RIGHT: return "Right";
+    case VK_HOME: return "Home";
+    case VK_END: return "End";
+    case VK_PRIOR: return "Page Up";
+    case VK_NEXT: return "Page Down";
+    case VK_ADD: return "Num +";
+    case VK_SUBTRACT: return "Num -";
+    case VK_MULTIPLY: return "Num *";
+    case VK_DIVIDE: return "Num /";
+    case VK_DECIMAL: return "Num .";
+    case VK_OEM_1: return ";";
+    case VK_OEM_PLUS: return "=";
+    case VK_OEM_COMMA: return ",";
+    case VK_OEM_MINUS: return "-";
+    case VK_OEM_PERIOD: return ".";
+    case VK_OEM_2: return "/";
+    case VK_OEM_3: return "`";
+    case VK_OEM_4: return "[";
+    case VK_OEM_5: return "\\";
+    case VK_OEM_6: return "]";
+    case VK_OEM_7: return "'";
+    }
+    return snprintf(b, sizeof b, "Key %d", vk), b;
+}
+// the keys a binding can take (Esc cancels, Insert and F1 are the menu's, Delete clears)
+const std::vector<int>& bindable_keys() {
+    static std::vector<int> k;
+    if (k.empty()) {
+        for (int c = 'A'; c <= 'Z'; c++) k.push_back(c);
+        for (int c = '0'; c <= '9'; c++) k.push_back(c);
+        for (int c = VK_F2; c <= VK_F12; c++) k.push_back(c);
+        for (int c = VK_NUMPAD0; c <= VK_NUMPAD0 + 9; c++) k.push_back(c);
+        for (int c : {VK_SPACE, VK_SHIFT, VK_CONTROL, VK_MENU, VK_TAB, VK_RETURN, VK_BACK, VK_CAPITAL, VK_UP, VK_DOWN,
+                      VK_LEFT, VK_RIGHT, VK_HOME, VK_END, VK_PRIOR, VK_NEXT, VK_ADD, VK_SUBTRACT, VK_MULTIPLY,
+                      VK_DIVIDE, VK_DECIMAL, VK_OEM_1, VK_OEM_PLUS, VK_OEM_COMMA, VK_OEM_MINUS, VK_OEM_PERIOD,
+                      VK_OEM_2, VK_OEM_3, VK_OEM_4, VK_OEM_5, VK_OEM_6, VK_OEM_7})
+            k.push_back(c);
+    }
+    return k;
+}
+int page = 0;          // 0 the options, 1 the controls
+int csel = 0, ccol = 0;   // the controls' row (kControls: reset) and column (0 the gamepad, 1 the keyboard)
+int listening = 0;     // waiting for the new input: 1 a gamepad's, 2 a key
+bool listen_armed = false;   // (once what started it was let go)
+int64_t listen_end = 0;
+std::string keys_text(int button) {
+    const int a = host->binding(HOS_BIND_KEY, button, 0), b = host->binding(HOS_BIND_KEY, button, 1);
+    std::string t = a ? key_name(a) : "";
+    if (b) t += std::string(a ? ", " : "") + key_name(b);
+    return t.empty() ? "None" : t;
 }
 
 // ---- what is drawn: bitmaps of the menu and the counter, in the window's byte order ----
@@ -238,6 +335,48 @@ void paint_menu(HDC dc, uint32_t w, uint32_t h, int s) {
         DeleteObject(small);
     }
     SelectObject(dc, body);
+    if (page == 1) {   // (hookshot) the Controls page
+        TextOutA(dc, 16 * s + 110 * s, 12 * s + 4 * s, "Controls", 8);
+        const int rh = 24 * s, top = 64 * s, xpad = 200 * s, xkey = 390 * s;
+        SetTextColor(dc, RGB(140, 150, 144));
+        TextOutA(dc, 16 * s, 44 * s, "Button", 6);
+        TextOutA(dc, xpad, 44 * s, "Gamepad", 7);
+        TextOutA(dc, xkey, 44 * s, "Keyboard", 8);
+        for (int i = 0; i <= kControls; i++) {
+            const int y = top + i * rh;
+            const bool sel = i == csel;
+            if (sel) fill(dc, 8 * s, y, (int)w - 16 * s, rh, RGB(44, 72, 54));
+            SetTextColor(dc, sel ? RGB(255, 255, 255) : RGB(196, 204, 198));
+            if (i == kControls) {
+                const char* t = "Reset to defaults";
+                TextOutA(dc, 16 * s, y + 3 * s, t, (int)strlen(t));
+                continue;
+            }
+            const Control& c = controls[i];
+            TextOutA(dc, 16 * s, y + 3 * s, c.name, (int)strlen(c.name));
+            for (int col = 0; col < 2; col++) {
+                std::string v = col == 0 ? pad_name(host->binding(HOS_BIND_PAD, c.button, 0)) : keys_text(c.button);
+                if (sel && col == ccol && listening) v = col == 0 ? "Press a button..." : "Press a key...";
+                if (sel && col == ccol) {
+                    SIZE sz{};
+                    GetTextExtentPoint32A(dc, v.c_str(), (int)v.size(), &sz);
+                    fill(dc, (col ? xkey : xpad) - 6 * s, y + 2 * s, (int)sz.cx + 12 * s, rh - 4 * s,
+                         listening ? RGB(150, 120, 40) : RGB(70, 120, 84));
+                }
+                TextOutA(dc, col ? xkey : xpad, y + 3 * s, v.c_str(), (int)v.size());
+            }
+        }
+        SetTextColor(dc, RGB(140, 150, 144));
+        const char* hint = listening ? "Press the new one   Esc cancels"
+                                     : "Enter binds   Delete clears   Esc goes back";
+        const char* hint2 = "Gamepad: D-pad moves, bottom button binds, right one goes back";
+        TextOutA(dc, 16 * s, top + (kControls + 1) * rh + 6 * s, hint, (int)strlen(hint));
+        TextOutA(dc, 16 * s, top + (kControls + 1) * rh + 26 * s, hint2, (int)strlen(hint2));
+        SelectObject(dc, old);
+        DeleteObject(title);
+        DeleteObject(body);
+        return;
+    }
     const int rh = 28 * s, top = 44 * s;
     for (int i = 0; i < kRows; i++) {
         const int y = top + i * rh;
@@ -245,7 +384,8 @@ void paint_menu(HDC dc, uint32_t w, uint32_t h, int s) {
         SetTextColor(dc, i == selected ? RGB(255, 255, 255) : RGB(196, 204, 198));
         TextOutA(dc, 16 * s, y + 4 * s, rows[i].name, (int)strlen(rows[i].name));
         char v[40];
-        snprintf(v, sizeof v, i == selected ? "<  %s  >" : "%s", rows[i].text(*rows[i].value));
+        if (!rows[i].value) snprintf(v, sizeof v, ">");   // (a page)
+        else snprintf(v, sizeof v, i == selected ? "<  %s  >" : "%s", rows[i].text(*rows[i].value));
         SIZE sz{};
         GetTextExtentPoint32A(dc, v, (int)strlen(v), &sz);
         TextOutA(dc, (int)w - 16 * s - sz.cx, y + 4 * s, v, (int)strlen(v));
@@ -313,6 +453,10 @@ int measure_help(int s) {
     return most;
 }
 void redraw_menu(int s) {
+    if (page == 1) {
+        gdi_draw(menu_bmp, 600u * s, (uint32_t)((64 + (kControls + 1) * 24 + 52) * s), paint_menu, s);
+        return;
+    }
     static int measured_at = 0;
     if (measured_at != s) help_px = measure_help(s), measured_at = s;
     // (title and rows, the rule and the help text, the hint line)
@@ -369,7 +513,7 @@ void menu_init() {
             if (!eq) continue;
             *eq = 0;
             for (Row& r : rows)
-                if (!strcmp(line, ini_key(r))) *r.value = std::min(std::max(atoi(eq + 1), r.lo), r.hi);
+                if (r.value && !strcmp(line, ini_key(r))) *r.value = std::min(std::max(atoi(eq + 1), r.lo), r.hi);
             has_resolution |= !strcmp(line, "resolution");
             v2 |= !strcmp(line, "options_version");
             if (!strcmp(line, "dynamic_resolution")) old_dynres = atoi(eq + 1);
@@ -438,10 +582,10 @@ bool fps_take(int64_t now, int64_t shown, int64_t game, int64_t* next, int64_t* 
 
 void menu_tick() {
     fullscreen_tick();
-    enum { K_N = 8 };
+    enum { K_N = 10 };
     static bool held[K_N];
     static const int keys[K_N] = {VK_INSERT, VK_UP, VK_DOWN, VK_LEFT, VK_RIGHT, VK_ESCAPE, VK_F1,   // (F1: for keyboards without Insert)
-                                  VK_RETURN};
+                                  VK_RETURN, VK_DELETE, VK_BACK};
     HWND fg = GetForegroundWindow();
     DWORD pid = 0;
     if (fg) GetWindowThreadProcessId(fg, &pid);
@@ -453,15 +597,15 @@ void menu_tick() {
         held[i] = down;
     }
     // (hookshot) the gamepads, by position: Home, or Select and Start together, as Insert; the D-pad as the arrows,
-    // the bottom face button as Enter, the right one as Esc
+    // the bottom face button as Enter, the right one as Esc (not while a binding waits for its button)
     static uint32_t pad_held = 0;
-    const uint32_t raw = mine && host && host->pad_raw ? host->pad_raw() : 0;
-    const uint32_t pad_press = raw & ~pad_held, chord = 1u << HOS_PAD_BACK | 1u << HOS_PAD_START;
+    const uint32_t raw = mine && host && host->pad_raw ? host->pad_raw() : 0, pad_press = raw & ~pad_held;
+    const uint32_t chord = 1u << HOS_PAD_BACK | 1u << HOS_PAD_START;
     const bool chord_now = (raw & chord) == chord && (pad_held & chord) != chord;
     pad_held = raw;
-    auto pad = [&](int p) { return (pad_press >> p & 1) != 0; };
+    auto pad = [&](int p) { return listening != 1 && (pad_press >> p & 1) != 0; };
     if (pad(HOS_PAD_GUIDE) || chord_now) press[0] = true;
-    if (open_now.load()) {
+    if (open_now.load() && listening != 1) {
         press[1] |= pad(HOS_PAD_UP), press[2] |= pad(HOS_PAD_DOWN), press[3] |= pad(HOS_PAD_LEFT);
         press[4] |= pad(HOS_PAD_RIGHT), press[5] |= pad(HOS_PAD_EAST), press[7] |= pad(HOS_PAD_SOUTH);
     }
@@ -469,12 +613,62 @@ void menu_tick() {
     bool changed = scale != cur_scale || menu_refresh;
     menu_refresh = false;
     cur_scale = scale;
-    if (press[0] || press[6]) open_now = !open_now.load(), changed = true;
-    if (open_now.load()) {
+    if (press[0] || press[6]) {
+        open_now = !open_now.load(), changed = true;
+        page = 0, listening = 0;
+    }
+    if (open_now.load() && page == 1) {   // (hookshot) the Controls page
+        if (!can_bind()) page = 0;
+        else if (listening) {
+            if (press[5] || prof_now() > listen_end) listening = 0, changed = true;   // (Esc, or nothing for a while)
+            else if (listening == 1) {
+                if (!listen_armed) listen_armed = (raw & ~(1u << HOS_PAD_GUIDE)) == 0;
+                else if (const uint32_t p = pad_press & ~(1u << HOS_PAD_GUIDE)) {
+                    int bit = 0;
+                    while (!(p >> bit & 1)) bit++;
+                    host->bind(HOS_BIND_PAD, controls[csel].button, 0, bit);
+                    listening = 0, changed = true;
+                    save();
+                }
+            } else {
+                int down = 0;
+                for (int k : bindable_keys())
+                    if (mine && (GetAsyncKeyState(k) & 0x8000)) {
+                        down = k;
+                        break;
+                    }
+                if (!listen_armed) listen_armed = !down;
+                else if (down) {
+                    host->bind(HOS_BIND_KEY, controls[csel].button, 0, down);
+                    host->bind(HOS_BIND_KEY, controls[csel].button, 1, 0);
+                    listening = 0, changed = true;
+                    save();
+                }
+            }
+        } else {
+            if (press[5]) page = 0, changed = true;
+            if (press[1]) csel = (csel + kControls) % (kControls + 1), changed = true;
+            if (press[2]) csel = (csel + 1) % (kControls + 1), changed = true;
+            if ((press[3] || press[4]) && csel < kControls) ccol ^= 1, changed = true;
+            if (press[7]) {
+                if (csel == kControls) host->bind(HOS_BIND_PAD, -1, 0, 0), save();
+                else listening = ccol ? 2 : 1, listen_armed = false, listen_end = prof_now() + 6000000000LL;
+                changed = true;
+            }
+            if ((press[8] || press[9]) && csel < kControls) {
+                if (ccol == 0) host->bind(HOS_BIND_PAD, controls[csel].button, 0, -1);
+                else for (int k = 0; k < 2; k++) host->bind(HOS_BIND_KEY, controls[csel].button, k, 0);
+                changed = true;
+                save();
+            }
+        }
+        if (changed) redraw_menu(scale);
+    } else if (open_now.load()) {
         if (press[5]) open_now = false;
+        if (press[7] && !rows[selected].value && can_bind()) page = 1, csel = 0, ccol = 0, changed = true;
         if (press[1]) selected = (selected + kRows - 1) % kRows, changed = true;
         if (press[2]) selected = (selected + 1) % kRows, changed = true;
-        if (press[3] || press[4] || press[7]) {   // (Enter, or the bottom face button, as Right)
+        if ((press[3] || press[4] || press[7]) && rows[selected].value) {   // (Enter, or the bottom face button, as Right)
             Row& r = rows[selected];
             if (press[7]) press[4] = true;
             int v = *r.value + (press[4] ? r.step : -r.step);

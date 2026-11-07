@@ -378,10 +378,10 @@ Id CasFunction(EmitContext& ctx, Operation operation, Id value_type) {
         result = ctx.OpFAdd(value_type, op_a, op_b);
         break;
     case Operation::FPMin:
-        result = ctx.OpFMin(value_type, op_a, op_b);
+        result = ctx.OpNMin(value_type, op_a, op_b);   // (amd-fix, Lichii #432)
         break;
     case Operation::FPMax:
-        result = ctx.OpFMax(value_type, op_a, op_b);
+        result = ctx.OpNMax(value_type, op_a, op_b);   // (amd-fix, Lichii #432)
         break;
     default:
         break;
@@ -498,6 +498,26 @@ EmitContext::EmitContext(const Profile& profile_, const RuntimeInfo& runtime_inf
     DefineCommonTypes(program.info);
     DefineCommonConstants();
     DefineInterfaces(program);
+    // (RX_VK_MESH_FIRST=1, with RX_VK_MESH_ARGS=1: off, one task program with it hung or ended the game at its first draw)
+    if (stage == Stage::Task && getenv("RX_VK_MESH_FIRST") && profile.unified_descriptor_binding) {
+        // (hookshot) the draw's first task workgroup, read through a pushed address (EmitIsbeRead)
+        wants_mesh_first = true;
+        if (getenv("RX_VK_FOLLOW_MESH") && !getenv("RX_VK_NO_FOLLOW") && program.info.uses_global_memory) {
+            wants_guest_pages = true;   // (the block is made once: with the page table's member if the stage will want it)
+        }
+        AddCapability(spv::Capability::PhysicalStorageBufferAddresses);
+        AddExtension("SPV_KHR_physical_storage_buffer");
+        SetMemoryModel(spv::AddressingModel::PhysicalStorageBuffer64, spv::MemoryModel::GLSL450);
+        if (!Sirit::ValidId(draw_index)) {
+            draw_index = DefineInput(*this, U32[1], true, spv::BuiltIn::DrawIndex);
+        }
+        const Id block{TypeStruct(U32[1])};
+        Decorate(block, spv::Decoration::Block);
+        MemberDecorate(block, 0, spv::Decoration::Offset, 0U);
+        mesh_first_block_pointer = TypePointer(spv::StorageClass::PhysicalStorageBuffer, block);
+        mesh_first_member_pointer = TypePointer(spv::StorageClass::PhysicalStorageBuffer, U32[1]);
+        DefineRescalingInputPushConstant();
+    }
     DefineMesh(program);
     DefineLocalMemory(program);
     DefineSharedMemory(program);
@@ -1205,7 +1225,7 @@ void EmitContext::DefineRescalingInput(const Info& info) {
 }
 
 void EmitContext::DefineRescalingInputPushConstant() {
-    boost::container::static_vector<Id, 4> members{};
+    boost::container::static_vector<Id, 5> members{};
     u32 member_index{0};
 
     rescaling_textures_type = TypeArray(U32[1], Const(4u));
@@ -1225,6 +1245,10 @@ void EmitContext::DefineRescalingInputPushConstant() {
     if (wants_guest_pages) {
         members.push_back(U64);
         guest_pages_member_index = member_index++;
+    }
+    if (wants_mesh_first) {
+        members.push_back(U64);
+        mesh_first_member_index = member_index++;
     }
     const Id push_constant_struct{TypeStruct(std::span(members.data(), members.size()))};
     Decorate(push_constant_struct, spv::Decoration::Block);
@@ -1247,6 +1271,10 @@ void EmitContext::DefineRescalingInputPushConstant() {
     if (wants_guest_pages) {
         MemberDecorate(push_constant_struct, guest_pages_member_index, spv::Decoration::Offset, GUEST_PAGES_PUSH_OFFSET);
         MemberName(push_constant_struct, guest_pages_member_index, "guest_pages");
+    }
+    if (wants_mesh_first) {
+        MemberDecorate(push_constant_struct, mesh_first_member_index, spv::Decoration::Offset, MESH_FIRST_PUSH_OFFSET);
+        MemberName(push_constant_struct, mesh_first_member_index, "mesh_first");
     }
     const Id pointer_type{TypePointer(spv::StorageClass::PushConstant, push_constant_struct)};
     rescaling_push_constants = AddGlobalVariable(pointer_type, spv::StorageClass::PushConstant);

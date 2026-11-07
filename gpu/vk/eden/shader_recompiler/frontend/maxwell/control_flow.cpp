@@ -433,8 +433,15 @@ CFG::AnalysisState CFG::AnalyzeBRX(Block* block, Location pc, Instruction inst, 
                                    FunctionId function_id) {
     const std::optional brx_table{TrackIndirectBranchTable(env, pc, program_start)};
     if (!brx_table) {
-        TrackIndirectBranchTable(env, pc, program_start);
-        throw NotImplementedException("Failed to track indirect branch");
+        // (amd-fix, diagnosis) the instructions before the jump, newest first: the pattern the tracker did not know
+        // (OoT's foliage mesh programs fail here)
+        std::string seen;
+        Location at{pc};
+        for (int k = 0; k < 14 && at >= program_start; ++k, --at) {
+            const u64 raw{env.ReadInstruction(at.Offset())};
+            seen += fmt::format(" {}:{:016x}", NameOf(Decode(raw)), raw);
+        }
+        throw NotImplementedException("Failed to track indirect branch at {:#x}:{}", pc.Offset(), seen);
     }
     const IR::FlowTest flow_test{inst.branch.flow_test};
     const Predicate pred{inst.Pred()};

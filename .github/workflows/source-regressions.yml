@@ -58,6 +58,9 @@ on:
       - builder/linux/hookshot-builder.desktop
       - scripts/linux/appimage.sh
       - tests/test_hookshot_launch.py
+      - tests/global_load_16_ir.cpp
+      - tests/global_load_16/**
+      - gpu/vk/eden/shader_recompiler/backend/spirv/emit_spirv_memory.cpp
       - .github/workflows/source-regressions.yml
   pull_request:
     branches: [main]
@@ -116,6 +119,9 @@ on:
       - builder/linux/hookshot-builder.desktop
       - scripts/linux/appimage.sh
       - tests/test_hookshot_launch.py
+      - tests/global_load_16_ir.cpp
+      - tests/global_load_16/**
+      - gpu/vk/eden/shader_recompiler/backend/spirv/emit_spirv_memory.cpp
       - .github/workflows/source-regressions.yml
   workflow_dispatch:
 
@@ -222,3 +228,37 @@ jobs:
       - name: Check the game launcher
         if: runner.os == 'Linux'
         run: python -I -B tests/test_hookshot_launch.py
+
+  spirv-global16:
+    name: SPIR-V global halfword lowering
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Check out pinned SPIR-V headers
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          repository: KhronosGroup/SPIRV-Headers
+          ref: 496543121ce6419f23d6fa5d7194ba66c36212d2
+          path: _deps/spirv-headers
+          persist-credentials: false
+      - name: Install Clang C++20 and SPIR-V validator
+        run: sudo apt-get update && sudo apt-get install -y clang spirv-tools
+      - name: Configure the focused real-IR fixture
+        run: >-
+          CC=clang CXX=clang++ cmake -S tests/global_load_16 -B ${{ runner.temp }}/global-load-16
+          -DREPO_ROOT=${{ github.workspace }}
+          -DSPIRV_HEADERS_ROOT=${{ github.workspace }}/_deps/spirv-headers
+      - name: Build the focused fixture
+        run: cmake --build ${{ runner.temp }}/global-load-16 --parallel 2
+      - name: Emit and inspect real IR modules
+        run: ${{ runner.temp }}/global-load-16/global_load_16_ir ${{ runner.temp }}/global-load-16/modules
+      - name: Validate every emitted module
+        shell: bash
+        run: |
+          for module in "${{ runner.temp }}"/global-load-16/modules/*.spv; do
+            spirv-val --target-env vulkan1.3 "$module"
+          done

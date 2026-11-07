@@ -31,6 +31,7 @@
 #include "vk_jobs.h"
 #include "vk_shader.h"
 #include "vk_texture.h"
+#include "movie_upscale_policy.h"
 
 #include "shaders/clear_f_frag_spv.h"
 #include "shaders/clear_i_frag_spv.h"
@@ -4307,6 +4308,17 @@ bool movie_upscale(VkCommandBuffer cmd, uint32_t in_handle, uint32_t out_handle,
 std::atomic<bool> movie_networks_slow{false};
 bool gameplay_network(uint64_t key) { return key == 0xfd029a317a9a4b94ull || key == 0x9dc98871eb7fc101ull; }
 
+static movie_upscale_policy::Mode movie_upscale_mode() {
+    // Read on first dispatch, after host/hos_main.c has loaded hookshot_env.txt.
+    static const auto mode = movie_upscale_policy::parse(getenv("RX_VK_MOVIE_UPSCALE"));
+    return mode;
+}
+
+static bool movie_keep_all_networks() {
+    static const bool keep = getenv("RX_VK_NETWORK_KEEP") && !strcmp(getenv("RX_VK_NETWORK_KEEP"), "all");
+    return keep;
+}
+
 bool upscale_stub(VkCommandBuffer cmd, const NvnState& s, uint64_t key) {
     static const bool off = getenv("RX_VK_NO_UPSCALE_STUB") != nullptr;
     if (off) return false;
@@ -4361,6 +4373,9 @@ bool upscale_stub(VkCommandBuffer cmd, const NvnState& s, uint64_t key) {
     if (dst->format == VK_FORMAT_R8G8B8A8_UNORM && movie_upscale(cmd, in_h, out_h, dst)) {
         full_barrier(cmd);
         texture_written(dst);
+        static std::atomic<bool> logged_movie_upscale{false};
+        if (!logged_movie_upscale.exchange(true, std::memory_order_relaxed))
+            logf("vk: movie upscaling uses the linear compute path");
         return true;
     }
     VkImageBlit bl{};
@@ -4771,8 +4786,10 @@ void dispatch(VkCommandBuffer cmd, NvnState& s, uint32_t x, uint32_t y, uint32_t
             logf("vk: dispatches of program %016llx are left out (it did not translate): grid %ux%ux%u%s",
                  (unsigned long long)cp->key, s.grid[0], s.grid[1], s.grid[2], indirect ? " (indirect)" : "");
     }
-    const bool slow_network = movie_networks_slow.load(std::memory_order_relaxed) && cp && !cp->failed && !cp->stages.empty() &&
-                              cp->stages[0].info.uses_cooperative_matrix && !gameplay_network(cp->key);
+    const bool slow_network = cp && !cp->failed && !cp->stages.empty() &&
+                              movie_upscale_policy::use_linear(movie_upscale_mode(),
+                                  movie_networks_slow.load(std::memory_order_relaxed), movie_keep_all_networks(),
+                                  cp->stages[0].info.uses_cooperative_matrix, gameplay_network(cp->key));
     if ((!cp || cp->failed || slow_network) && upscale_stub(cmd, s, compute_code_key(s))) return void(st_dispatches++);
     if (slow_network) SKIP_HERE();   // (an earlier pass of the network: the stub is its last pass)
     if (!cp || !cp->ready.load(std::memory_order_acquire) || cp->failed) SKIP_HERE();

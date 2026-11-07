@@ -152,6 +152,7 @@ static void call_guest(Ctx *c, uint64_t addr, uint64_t sp, const char *what) {
     call_guest_args(c, addr, sp, what);
 }
 
+void hos_update_check(void);   /* (host/hos_update.c) */
 #ifndef _WIN32
 /* (linux) Saves live in $XDG_DATA_HOME/hookshot (~/.local/share/hookshot), so a rebuilt game folder still finds them.
    A user/ folder beside the executable from before is moved there the first time, entry by entry. Anything that
@@ -337,6 +338,7 @@ static int game_main(int argc, char **argv) {
             snprintf(beside_romfs, MAX_PATH, "%s" SEP_S "romfs", dir);
             snprintf(beside_user, MAX_PATH, "%s" SEP_S "user", dir);
             if (GetFileAttributesA(beside_image) != INVALID_FILE_ATTRIBUTES) {
+                hos_update_check();   /* (a game folder from the builder: is a newer release out? host/hos_update.c) */
                 image = beside_image;
                 if (!hos_romfs_dir) hos_romfs_dir = beside_romfs;
 #ifndef _WIN32

@@ -12,7 +12,7 @@ struct Options {
     int resolution = 0;   // the 3D's: 0 Auto (the game's dynamic resolution), else 100%, 75%, 67%, 50% of its full scale (nx2/oot_patches.py)
     int upscale = 0;      // to the window: 0 off (the plain copy to the window), 1 Catmull-Rom, 2 Lanczos
     int sharpness = 0;    // 0 to 100
-    int realtime = 0;     // game time follows the clock (host/nn_vi.c)
+    int realtime = 1;     // game time follows the clock (host/nn_vi.c); 0: per frame (slower frames, slower game)
     int handheld = 0;     // the game's handheld profile: ~4 fps, softer; read once, at the start (host/nn_applet.c)
     int ultrawide = 0;    // the camera at the monitor's shape when it is wider than 16:9; read once, at the start (host/hos_main.c)
     int show_fps = 0;

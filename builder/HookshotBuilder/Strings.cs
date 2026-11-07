@@ -13,6 +13,8 @@ enum S
     Subtitle, GameFiles, Nup, Folders, DropHint, SaveTo, Build, Browse, Needs, Free, Checking, VersionOk, VersionBad, ToolsMissing, PythonMissing,
     Building, Patience, Elapsed, Read, Lift, Compile, Finish, ShowDetails, HideDetails, Cancel, Back, OpenFolder, Play, Ready, BuiltIn,
     Stopped, Cancelled, CancelledNote, CloseQuestion, LanguageLabel,
+    // (the update, English only for now: Strings.Text falls back to it)
+    Download, Updating, UpdateFailed,
 }
 
 static class Strings
@@ -26,6 +28,7 @@ static class Strings
         "Building", "This takes a while, and your PC stays usable.", "Elapsed", "Reading your game files", "Translating the game to PC code", "Compiling",
         "Putting the game folder together", "Show details", "Hide details", "Cancel", "Back", "Open folder", "Play", "Your game is ready", "built in",
         "The build stopped", "Build cancelled", "You can start again from the same folder.", "Stop the build and close?", "Language",
+        "Downloading the new version", "Updating your game", "The update could not be downloaded",
     };
     static readonly string[] Fr =
     {

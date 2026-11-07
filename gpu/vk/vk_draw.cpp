@@ -40,6 +40,9 @@
 #include "shader_recompiler/backend/spirv/mma_layout.h"
 
 namespace mkwvk {
+// (EvilOOT, RX_VK_DRAW_STATS: the pointer table's regions, vk_bank.cpp)
+struct PointerEntry { uint64_t addr, size; };
+const PointerEntry* pointer_table(const NvnState& s, int stage);
 uint32_t stage_cbuf_word(const NvnState& s, const Stage& st, uint32_t index, uint32_t offset);   // (vk_shader.cpp)
 namespace {
 
@@ -76,6 +79,178 @@ struct Switches {
 const Switches& sw() {
     static const Switches s;
     return s;
+}
+
+// (EvilOOT, RX_VK_DRAW_STATS) the storage buffers bound in the measured frame, with their programs: who writes what
+struct StatsBind {
+    uint64_t prog, addr, size;
+    int stage;
+    bool written, table;
+    uint32_t cbuf = 0, off = 0;
+    uint64_t raw = 0;
+    uint64_t vkbuf = 0, vkoff = 0;   // (the Vulkan buffer and offset the binding resolved to: two pools over one range show here)
+};
+std::mutex stats_bind_mu;
+std::vector<StatsBind> stats_binds;
+// (and the GPU addresses the small storage buffers of each dispatch hold: pointers its program may follow)
+struct StatsPtr { uint64_t prog, in_buffer, value; };
+std::vector<StatsPtr> stats_ptrs;
+std::vector<StatsPtr> stats_ptrs2;   // (second level: in the pointer table's regions, covered by nothing the dispatch has)
+// (RX_VK_DRAW_STATS_PROGS: those programs' uniform and storage buffers as the dispatch saw them, hex, once each)
+std::vector<std::string> stats_dumps;
+// (and as the GPU held them after the wanted draws: 32 slots of up to 1 MB each; StatsQuery::gpu_dump)
+constexpr uint32_t kGpuDumpSlot = 1u << 20, kGpuDumpSlots = 32;
+VkBuffer stats_gpu = VK_NULL_HANDLE;
+VmaAllocation stats_gpu_mem = nullptr;
+uint8_t* stats_gpu_map = nullptr;
+struct GpuDumpRec { uint64_t prog, addr; uint32_t slot, bytes; int stage, index; };
+std::vector<GpuDumpRec> stats_gpu_recs;
+// (RX_VK_MISS_LOG=1: each program's slice of one host-visible buffer, its c0+0xff0 descriptor: the global memory
+// accesses no binding held, counted, the first 63 addresses kept; translate_program.cpp, spirv_emit_context.cpp)
+// (RX_VK_BLOCK_PROBE: 16 KB slices, the per-block entry counters at word 128 + block, emit_spirv.cpp Traverse)
+const uint32_t kMissSlice = getenv("RX_VK_BLOCK_PROBE") ? 16384u : 512u, kMissSlices = getenv("RX_VK_BLOCK_PROBE") ? 1024u : 4096u;
+VkBuffer miss_buf = VK_NULL_HANDLE;
+VmaAllocation miss_mem = nullptr;
+uint32_t* miss_map = nullptr;
+std::mutex miss_mu;
+std::unordered_map<uint64_t, uint32_t> miss_slot;   // program key -> slice
+VkDescriptorBufferInfo miss_binding(uint64_t prog) {
+    std::lock_guard lk(miss_mu);
+    if (!miss_buf) {
+        void* m = nullptr;
+        if (!create_buffer((uint64_t)kMissSlice * kMissSlices, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true, miss_buf, miss_mem, &m))
+            return {VK_NULL_HANDLE, 0, VK_WHOLE_SIZE};
+        miss_map = (uint32_t*)m;
+        std::memset(miss_map, 0, (size_t)kMissSlice * kMissSlices);
+    }
+    auto it = miss_slot.find(prog);
+    if (it == miss_slot.end()) {
+        if (miss_slot.size() >= kMissSlices) return {miss_buf, 0, kMissSlice};   // (full: all share the first)
+        it = miss_slot.emplace(prog, (uint32_t)miss_slot.size()).first;
+    }
+    return {miss_buf, (VkDeviceSize)it->second * kMissSlice, kMissSlice};
+}
+/// (RX_VK_DRAW_STATS_PROGS) a stage's uniform and storage buffers as recorded, hex (first 1 KB each), once per program
+void stats_dump_stage(uint64_t prog, const NvnState& s, int stage) {
+    static std::mutex dm;
+    static std::unordered_set<uint64_t> done;
+    static int64_t done_frame = -1;   // (once per program per measured frame)
+    {
+        std::lock_guard lk(dm);
+        const int64_t f = (int64_t)texture_frame_no();
+        if (f != done_frame) done.clear(), done_frame = f;
+        if (!done.insert(prog ^ ((uint64_t)stage << 56)).second) return;
+    }
+    const auto dump = [&](const char* kind, int slot, const nvn_p_bind_buf& b) {
+        if (!b.addr || !b.size) return;
+        // (uniform buffers whole up to 2 KB and with the stream's inline updates, ub_read: what the shader reads)
+        const bool ubo = kind[0] == 'u';
+        // (RX_VK_DUMP_LIVE=1: storage buffers as guest memory holds them now, not as submitted: what the CPU wrote since)
+        static const bool live = getenv("RX_VK_DUMP_LIVE") != nullptr;
+        const auto read = [&](uint64_t a, void* dst, uint64_t bytes) {
+            return ubo ? ub_read(a, dst, bytes) : live ? host->gpu_read(a, dst, bytes) : memory_read_as_submitted(a, dst, bytes);
+        };
+        const uint64_t n = std::min<uint64_t>(b.size, ubo ? 0x800 : 0x400) & ~15ull;
+        std::vector<uint32_t> w(n / 4);
+        if (w.empty() || !read(b.addr, w.data(), n)) return;
+        uint64_t nonzero = 0, total = 0;   // (over the whole binding, up to 16 MB: is anything in it at all)
+        uint64_t first_nz = UINT64_MAX;    // (and where the data past the first 64 bytes starts, 64 words of it shown)
+        std::vector<uint32_t> at_nz;
+        {
+            const uint64_t all = std::min<uint64_t>(b.size, 16ull << 20) & ~3ull;
+            std::vector<uint32_t> big(all / 4);
+            if (!big.empty() && read(b.addr, big.data(), all))
+                for (size_t i = 0; i < big.size(); i++) {
+                    nonzero += big[i] != 0, total++;
+                    if (big[i] && i >= 16 && first_nz == UINT64_MAX) first_nz = i * 4;
+                }
+            if (first_nz != UINT64_MAX && first_nz >= 0x400)
+                at_nz.assign(big.begin() + first_nz / 4, big.begin() + std::min<size_t>(big.size(), first_nz / 4 + 64));
+        }
+        std::string text;
+        char line[240];
+        snprintf(line, sizeof line, "%016llx s%d %s%d at %#llx size %#llx (game memory: %llu of %llu words non-zero; first past "
+                 "+0x40 at %s%llx):\n", (unsigned long long)prog, stage, kind, slot, (unsigned long long)b.addr,
+                 (unsigned long long)b.size, (unsigned long long)nonzero, (unsigned long long)total, first_nz == UINT64_MAX ? "none " : "+",
+                 (unsigned long long)(first_nz == UINT64_MAX ? 0 : first_nz));
+        text += line;
+        for (size_t i = 0; i < w.size(); i += 4) {
+            snprintf(line, sizeof line, "  +%03zx: %08x %08x %08x %08x\n", i * 4, w[i], w[i + 1], w[i + 2], w[i + 3]);
+            text += line;
+        }
+        for (size_t i = 0; i + 4 <= at_nz.size(); i += 4) {
+            snprintf(line, sizeof line, "  +%06llx: %08x %08x %08x %08x\n", (unsigned long long)(first_nz + i * 4), at_nz[i], at_nz[i + 1],
+                     at_nz[i + 2], at_nz[i + 3]);
+            text += line;
+        }
+        std::lock_guard bl(stats_bind_mu);
+        if (stats_dumps.size() < 256) stats_dumps.push_back(text);
+    };
+    for (int i = 0; i < 16; i++) dump("ubo", i, s.ubo[stage][i]);
+    for (int i = 0; i < 16; i++) dump("ssbo", i, s.ssbo[stage][i]);
+}
+bool stats_prog_wanted(uint64_t key) {
+    static const std::vector<uint64_t> want = [] {
+        std::vector<uint64_t> v;
+        for (const char* q = getenv("RX_VK_DRAW_STATS_PROGS"); q && *q;) {
+            char* end;
+            const uint64_t k = strtoull(q, &end, 16);
+            if (end == q) break;
+            v.push_back(k);
+            q = *end ? end + 1 : end;
+        }
+        return v;
+    }();
+    return std::find(want.begin(), want.end(), key) != want.end();
+}
+bool stats_frame_now();   // (below: the frame being measured is the current one)
+/// (EvilOOT) RX_VK_SKIP_FILE=<file>: the draws of the programs listed in it (hex keys, comma or newline separated) left out,
+/// the file read again whenever it changes (checked every 300 ms): a bisection in one run, from the scene being looked at
+bool skip_live(uint64_t key) {
+    static const char* path = getenv("RX_VK_SKIP_FILE");
+    if (!path || !*path) return false;
+    static std::mutex mu;
+    static std::vector<uint64_t> keys;
+    static std::atomic<int64_t> next_check{0};
+    static int64_t last_size = -1, last_time = -1;
+    const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    std::lock_guard lk(mu);
+    if (now >= next_check.load(std::memory_order_relaxed)) {
+        next_check.store(now + 300, std::memory_order_relaxed);
+        WIN32_FILE_ATTRIBUTE_DATA fa{};
+        if (GetFileAttributesExA(path, GetFileExInfoStandard, &fa)) {
+            const int64_t size = ((int64_t)fa.nFileSizeHigh << 32) | fa.nFileSizeLow;
+            const int64_t time = ((int64_t)fa.ftLastWriteTime.dwHighDateTime << 32) | fa.ftLastWriteTime.dwLowDateTime;
+            if (size != last_size || time != last_time) {
+                last_size = size, last_time = time;
+                keys.clear();
+                if (FILE* f = fopen(path, "rb")) {
+                    std::string text;
+                    char buf[4096];
+                    for (size_t n; (n = fread(buf, 1, sizeof buf, f)) > 0;) text.append(buf, n);
+                    fclose(f);
+                    for (const char* q = text.c_str(); *q;) {
+                        char* e;
+                        const uint64_t k = strtoull(q, &e, 16);
+                        if (e == q) { q++; continue; }
+                        keys.push_back(k);
+                        q = e;
+                    }
+                    std::sort(keys.begin(), keys.end());
+                }
+                logf("vk: RX_VK_SKIP_FILE: %zu programs left out now", keys.size());
+            }
+        } else if (!keys.empty()) {
+            keys.clear(), last_size = last_time = -1;
+        }
+    }
+    return std::binary_search(keys.begin(), keys.end(), key);
+}
+void stats_note_bind(uint64_t prog, int stage, uint64_t addr, uint64_t size, bool written, bool table, uint32_t cbuf = 0,
+                     uint32_t off = 0, uint64_t raw = 0, uint64_t vkbuf = 0, uint64_t vkoff = 0) {
+    if (!stats_frame_now()) return;
+    std::lock_guard lk(stats_bind_mu);
+    if (stats_binds.size() < 200000) stats_binds.push_back({prog, addr, size, stage, written, table, cbuf, off, raw, vkbuf, vkoff});
 }
 
 /// The recording being built (each recording thread's own)
@@ -317,8 +492,10 @@ void ensure_layout(Program& p) {
     for (const Stage& st : p.stages) p.uses_render_area |= st.info.uses_render_area;
     p.uses_push = p.uses_render_area;
     for (const Stage& st : p.stages) p.uses_push |= st.info.uses_rescaling_uniform;
-    for (const Stage& st : p.stages)   // (the page table)
-        p.uses_push |= (st.vk_stage & (VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_MESH_BIT_EXT)) &&
+    static const bool follow_graphics = !getenv("RX_VK_FOLLOW_GRAPHICS") || atoi(getenv("RX_VK_FOLLOW_GRAPHICS")) != 0;
+    for (const Stage& st : p.stages)   // (the page table; EvilOOT: and graphics stages with RX_VK_FOLLOW_GRAPHICS)
+        p.uses_push |= ((st.vk_stage & (VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_MESH_BIT_EXT)) ||
+                        follow_graphics) &&
                        st.info.uses_global_memory;
     for (const Stage& st : p.stages) p.uses_push |= (st.vk_stage & VK_SHADER_STAGE_TASK_BIT_EXT) != 0;   // (its first workgroup)
     std::atomic_thread_fence(std::memory_order_release);   // (the layout last: a thread that sees it sees the rest)
@@ -1335,11 +1512,26 @@ void build_descriptors(const NvnState& s, const Program& p) {
             const size_t first = dw.bufs.size();
             for (uint32_t k = 0; k < d.count; k++) {
                 const uint32_t off = d.cbuf_offset + k * 16;
-                // (AyyBeeDee20738, PR 138) through the stage's banks as its program reads them: a storage buffer named in c1 (the
-                // program's own constants) read 0 from the driver banks and was bound to nothing
+                if (d.count == 1 && d.cbuf_index == 0 && d.cbuf_offset == 0xff0) {   // (EvilOOT, RX_VK_MISS_LOG)
+                    dw.bufs.push_back(miss_binding(p.key));
+                    continue;
+                }
+                // (AyyBeeDee20738, PR 138; EvilOOT the same before it, for OoT's culling tables in c4) through the stage's banks as
+                // its program reads them (c1 from the program, c3+ from the bound uniform buffer with the stream's inline updates):
+                // a storage buffer named there read 0 from the driver banks and was bound to nothing
                 const uint64_t addr = stage_cbuf_word(s, st, d.cbuf_index, off) |
                                       (uint64_t)stage_cbuf_word(s, st, d.cbuf_index, off + 4) << 32;
-                const uint64_t size = stage_cbuf_word(s, st, d.cbuf_index, off + 8);
+                uint64_t size = stage_cbuf_word(s, st, d.cbuf_index, off + 8);
+                // (EvilOOT) a table entry that is a bare pointer (its size word 0, as OoT's culling setup keeps them): bound up to
+                // 1 MB of its pool, as the mesh pointer table's regions are; the shader takes the binding's length as its end.
+                // Not marked written: the 1 MB is a guess past the real buffer, and its copy back to guest memory overwrote
+                // the CPU's own data beside it (a pool header's pointer, the game crashed). What the GPU writes there (the
+                // culling passes' group counts) is read by later GPU work, which binds the same mirror.
+                bool bare = false;
+                if (d.count > 1 && !size && addr && !(addr & 3) && host->gpu_guest(addr))
+                    if (const uint64_t end = gpu_pool_end(addr); end > addr) size = std::min<uint64_t>(end - addr, 1ull << 20), bare = true;
+                // (EvilOOT) the pointer table's regions (c0+0x880, vk_bank.cpp pointer_table) are guesses too: GPU-only, as above
+                if (d.cbuf_index == 0 && d.cbuf_offset == 0x880 && d.count == 3) bare = true;
                 const uint64_t base = addr & ~(salign - 1);
                 uint64_t n = std::max<uint64_t>(((size + (addr - base)) + 3) & ~3ull, 16);
                 {   // (hookshot, RX_VK_SSBO_STRETCH=1: a read-only buffer bound to its pool's end, up to 64 MB. Lichii bf3f395c9: the grass's
@@ -1349,18 +1541,70 @@ void build_descriptors(const NvnState& s, const Program& p) {
                         if (const uint64_t end = gpu_pool_end(base); end > base + n)
                             n = std::max<uint64_t>(n, std::min<uint64_t>(end - base, 64ull << 20) & ~uint64_t{3});
                 }
+                // (EvilOOT) RX_VK_SSBO_WIDE=<MB>, experiment: single storage buffers bound from their base to the end of their
+                // pool (that many MB at most), so that a pointer loaded through the buffer and used with the buffer's binding
+                // (the pointer pass's split accesses) reads its target instead of 0 past the descriptor's size. Only the
+                // descriptor's own range is marked written (copied back to guest memory): the rest stays the GPU's.
+                uint64_t wide_n = 0;
+                {
+                    static const uint64_t wide = getenv("RX_VK_SSBO_WIDE") ? (uint64_t)atoll(getenv("RX_VK_SSBO_WIDE")) << 20 : 0;
+                    if (wide && d.count == 1 && addr)
+                        if (const uint64_t end = gpu_pool_end(base); end > base + n) wide_n = std::min(end - base, wide) & ~3ull;
+                }
                 const auto t0 = std::chrono::steady_clock::now();
                 // (hookshot) a storage buffer table's entries (count > 1, Info::global_tables): the ones past the table's
                 // end are whatever the constant buffer holds there, bound only when they look like a buffer
                 const bool plausible = d.count == 1 || (size && size <= (256ull << 20) && host->gpu_guest(base));
-                BufferRef b = addr && plausible ? gpu_buffer_bind(base, n, d.is_written) : BufferRef{};
+                BufferRef b = addr && plausible ? gpu_buffer_bind(base, n, d.is_written && !bare) : BufferRef{};
                 // (AyyBeeDee20738, PR 138) a table entry's region that does not fit its pool this moment bound nothing, and the next
                 // frame bound it again: its reads flipped between the data and 0, the picture between bright and dark. Smaller,
-                // down to 1 MB, rather than nothing
-                if (!b.buffer && d.count > 1 && addr && plausible) {
+                // down to 1 MB, rather than nothing (and past what is bound the shaders' search now goes on to the page table)
+                static const bool no_shrink = getenv("RX_VK_NO_TABLE_SHRINK") != nullptr;   // (A/B: unbound as before)
+                if (!b.buffer && d.count > 1 && addr && plausible && !no_shrink) {
                     uint64_t m = n;
                     if (const uint64_t end = gpu_pool_end(base); end > base) m = std::min<uint64_t>(m, end - base);
-                    for (; !b.buffer && m >= (1ull << 20); m = (m / 2) & ~3ull) b = gpu_buffer_bind(base, m, d.is_written);
+                    for (; !b.buffer && m >= (1ull << 20); m = (m / 2) & ~3ull) {
+                        b = gpu_buffer_bind(base, m, d.is_written && !bare);
+                        if (b.buffer) {   // (EvilOOT: the descriptor's range what was bound, so the search ends there)
+                            n = m;
+                            break;
+                        }
+                    }
+                }
+                // (EvilOOT) a bare entry the program writes through: its first 64 bytes marked written (the same mirror), so
+                // the counts and records the culling setup writes there survive the mirror's syncs from guest memory and go
+                // back to it, as on the console; the rest of the guessed 1 MB stays the GPU's (copied back whole, it
+                // overwrote the CPU's own data beside it)
+                if (b && bare && d.is_written && d.cbuf_offset != 0x880) {
+                    const uint64_t head = std::min<uint64_t>(n, (addr - base) + 0x40);
+                    (void)gpu_buffer_bind(base, (head + 3) & ~3ull, true);
+                }
+                if (b && wide_n) {   // (the same buffer, its binding longer, nothing more marked written)
+                    const BufferRef w = gpu_buffer_bind(base, wide_n, false);
+                    if (w && w.buffer == b.buffer && w.offset == b.offset) b = w, n = wide_n;
+                }
+                {   // (EvilOOT) the wanted programs' storage descriptors in order, once: descriptor n = the IR's "#n"
+                    static std::mutex lm;
+                    static std::unordered_set<uint64_t> told;
+                    static const bool stats_env = getenv("RX_VK_DRAW_STATS") != nullptr;
+                    if (stats_env && stats_prog_wanted(p.key)) {
+                        const size_t n_desc = (size_t)(&d - info.storage_buffers_descriptors.data());
+                        std::lock_guard lk(lm);
+                        const uint64_t tk = p.key ^ ((uint64_t)ns << 56) ^ ((uint64_t)n_desc << 48) ^ ((uint64_t)k << 40);
+                        if (told.insert(tk).second)
+                            logf("vk: descriptors of %016llx stage %d: #%zu[%u] c%u+%#x%s -> %#llx size %#llx (bound %s)", (unsigned long long)p.key,
+                                 ns, n_desc, k, (unsigned)d.cbuf_index, off, d.is_written ? " written" : "", (unsigned long long)addr,
+                                 (unsigned long long)size, b ? "yes" : "NO");
+                    }
+                }
+                // (census: every single descriptor, and table entries that hold something, with where they came from)
+                if (d.count == 1 || addr) {
+                    // (unresolved: the uniform buffer the word was read from, its address and size, in the vk fields)
+                    const nvn_p_bind_buf* ub = d.cbuf_index >= 3 && d.cbuf_index < 3 + 16
+                                                   ? &s.ubo[std::clamp(ns, 0, kNvnStages - 1)][d.cbuf_index - 3] : nullptr;
+                    const bool none = !(addr && plausible);
+                    stats_note_bind(p.key, ns, none ? 0 : base, none ? size : n, d.is_written, d.count > 1, d.cbuf_index, off, addr,
+                                    none && ub ? ub->addr : (uint64_t)(uintptr_t)b.buffer, none && ub ? ub->size : b.offset);
                 }
                 static std::atomic<int> table_told{0};   // (the tracker below stops with its log: a mutex and a map per entry per draw)
                 if (d.count > 1 && table_told.load(std::memory_order_relaxed) < 60) {   // (hookshot) a table entry bound one frame and not the next (or back), 60 of them
@@ -2798,6 +3042,650 @@ void exposure_log_dump(const char* why) {
     logf("%s", line);
 }
 
+// ---- (EvilOOT) RX_VK_DRAW_STATS=<dir>: what each program's draws produce on the GPU, for one frame. When <dir>\draw_stats.now
+// appears (checked every half second; the file is removed), every draw of the next frame runs inside a pipeline statistics
+// query: vertex / task / mesh shader invocations, primitives into and out of clipping, fragment shader invocations. Eight
+// frames later the results are read and written to <dir>\draw_stats_<frame>.txt, one line per program, the programs whose
+// draws run but output nothing first (a draw whose mesh threads run and whose primitives never reach the clipper is one that
+// made no triangles: NaN positions, culled lists, empty records). ----
+namespace {
+constexpr uint32_t kStatsQueries = 32768;
+struct StatsMeta {
+    uint64_t prog;
+    uint8_t mesh, indirect, indexed, args_read;
+    int32_t count, instances, max, stride;
+    uint64_t count_addr, args_addr;
+    uint32_t guest[4], guest_count;   // (the same words as the game's memory held them when the draw was recorded)
+    uint8_t dispatch;                 // (a compute dispatch: its grid, or its indirect arguments as above)
+    uint32_t grid[3];
+    uint64_t args_vkbuf, args_vkoff;  // (the Vulkan buffer and offset the arguments were read from)
+};
+VkQueryPool stats_pool = VK_NULL_HANDLE;
+// (indirect draws: after the draw, the first 16 bytes of its arguments and its count word as the GPU holds them, 32 bytes a
+// query: args[4], count)
+VkBuffer stats_args = VK_NULL_HANDLE;
+VmaAllocation stats_args_mem = nullptr;
+uint32_t* stats_args_map = nullptr;
+// (EvilOOT) RX_VK_WATCH_ADDRS=<gpu address>[,...] (hex, at most 4): 16 bytes at each, as the GPU holds them after every
+// dispatch of the measured frame; the report lists the dispatches that changed them. Which pass writes a launch count.
+constexpr uint32_t kWatchMax = 4;
+VkBuffer stats_watch = VK_NULL_HANDLE;
+VmaAllocation stats_watch_mem = nullptr;
+uint32_t* stats_watch_map = nullptr;
+std::vector<uint64_t> parse_hex_list(const char* q, size_t max) {
+    std::vector<uint64_t> a;
+    while (q && *q && a.size() < max) {
+        char* end;
+        const uint64_t x = strtoull(q, &end, 16);
+        if (end == q) break;
+        a.push_back(x);
+        q = *end ? end + 1 : end;
+    }
+    return a;
+}
+// (RX_VK_WATCH_ARGS_OF=<program>[,<program>]: the launch arguments of those dispatches instead: their addresses differ
+// from start to start, and the game alternates two sets frame by frame: the last two each program used, noted at every
+// dispatch, watched from the measured frame on)
+std::mutex argwatch_mu;
+std::vector<std::pair<uint64_t, std::array<uint64_t, 2>>> watch_seen;   // (program -> its last two argument addresses)
+std::vector<uint64_t> watch_live;   // (what the measured frame watches: set when it is armed)
+void watch_note(uint64_t prog, uint64_t indirect) {
+    static const std::vector<uint64_t> progs = parse_hex_list(getenv("RX_VK_WATCH_ARGS_OF"), 2);
+    if (progs.empty() || !indirect || std::find(progs.begin(), progs.end(), prog) == progs.end()) return;
+    std::lock_guard lk(argwatch_mu);
+    for (auto& [p, a] : watch_seen)
+        if (p == prog) {
+            if (a[0] != indirect) a[1] = a[0], a[0] = indirect;
+            return;
+        }
+    watch_seen.push_back({prog, {indirect, 0}});
+}
+// (RX_VK_WATCH_SB=<program>:<slot>:<offset>[,...], hex: a compute program's storage buffer slot + offset, as it binds it)
+std::vector<uint64_t> watch_sb_seen;
+void watch_note_sb(uint64_t prog, const NvnState& s) {
+    struct Want { uint64_t prog; uint32_t slot; uint64_t off; };
+    static const std::vector<Want> want = [] {
+        std::vector<Want> v;
+        for (const char* q = getenv("RX_VK_WATCH_SB"); q && *q && v.size() < 2;) {
+            char* e;
+            Want w{};
+            w.prog = strtoull(q, &e, 16);
+            if (*e != ':') break;
+            w.slot = (uint32_t)strtoul(e + 1, &e, 16);
+            if (*e != ':') break;
+            w.off = strtoull(e + 1, &e, 16);
+            v.push_back(w);
+            q = *e ? e + 1 : e;
+        }
+        return v;
+    }();
+    for (const Want& w : want) {   // (slot 0x10 and up: uniform buffer slot - 0x10)
+        const nvn_p_bind_buf* b = w.slot < 16 ? &s.ssbo[5][w.slot] : w.slot < 32 ? &s.ubo[5][w.slot - 16] : nullptr;
+        if (w.prog != prog || !b || !b->addr) continue;
+        const uint64_t a = b->addr + w.off;
+        std::lock_guard lk(argwatch_mu);
+        if (std::find(watch_sb_seen.begin(), watch_sb_seen.end(), a) == watch_sb_seen.end()) {
+            watch_sb_seen.insert(watch_sb_seen.begin(), a);
+            if (watch_sb_seen.size() > 2) watch_sb_seen.pop_back();
+        }
+    }
+}
+void watch_arm() {   // (stats_tick, as a frame is armed)
+    static const std::vector<uint64_t> fixed = parse_hex_list(getenv("RX_VK_WATCH_ADDRS"), kWatchMax);
+    std::lock_guard lk(argwatch_mu);
+    watch_live.clear();
+    for (const uint64_t a : fixed) watch_live.push_back(a & ~15ull);
+    for (const uint64_t a : watch_sb_seen)
+        if (watch_live.size() < kWatchMax) watch_live.push_back(a & ~15ull);
+    for (const auto& [p, a] : watch_seen)
+        for (const uint64_t x : a)
+            if (x && watch_live.size() < kWatchMax) watch_live.push_back(x & ~15ull);
+}
+const std::vector<uint64_t>& watch_addrs() { return watch_live; }
+bool watch_wanted() { return getenv("RX_VK_WATCH_ADDRS") || getenv("RX_VK_WATCH_ARGS_OF") || getenv("RX_VK_WATCH_SB"); }
+bool stats_mesh_bits = false;
+StatsMeta stats_meta[kStatsQueries];
+std::atomic<uint32_t> stats_used{0};
+std::atomic<int64_t> stats_frame{-1};   // (the frame measured; -1 none)
+std::atomic<bool> stats_written{false};
+std::mutex stats_mu;
+const char* stats_dir() {
+    static const char* d = getenv("RX_VK_DRAW_STATS");
+    return d && *d ? d : nullptr;
+}
+bool stats_frame_now() {
+    if (!stats_dir()) return false;
+    const int64_t at = stats_frame.load(std::memory_order_relaxed);
+    return at >= 0 && (int64_t)texture_frame_no() == at && !stats_written.load(std::memory_order_relaxed);
+}
+bool stats_make_pool() {
+    VkQueryPoolCreateInfo qi{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+    qi.queryType = VK_QUERY_TYPE_PIPELINE_STATISTICS;
+    qi.queryCount = kStatsQueries;
+    const VkQueryPipelineStatisticFlags base = VK_QUERY_PIPELINE_STATISTIC_VERTEX_SHADER_INVOCATIONS_BIT |
+                                               VK_QUERY_PIPELINE_STATISTIC_CLIPPING_INVOCATIONS_BIT |
+                                               VK_QUERY_PIPELINE_STATISTIC_CLIPPING_PRIMITIVES_BIT |
+                                               VK_QUERY_PIPELINE_STATISTIC_FRAGMENT_SHADER_INVOCATIONS_BIT |
+                                               VK_QUERY_PIPELINE_STATISTIC_COMPUTE_SHADER_INVOCATIONS_BIT;
+    qi.pipelineStatistics = base;
+    if (dev.mesh_shader) {
+        qi.pipelineStatistics = base | VK_QUERY_PIPELINE_STATISTIC_TASK_SHADER_INVOCATIONS_BIT_EXT |
+                                VK_QUERY_PIPELINE_STATISTIC_MESH_SHADER_INVOCATIONS_BIT_EXT;
+        if (vkCreateQueryPool(dev.device, &qi, nullptr, &stats_pool) == VK_SUCCESS) {
+            stats_mesh_bits = true;
+            return true;
+        }
+        qi.pipelineStatistics = base;
+    }
+    return vkCreateQueryPool(dev.device, &qi, nullptr, &stats_pool) == VK_SUCCESS;
+}
+/// (each draw) arms a capture when the trigger file is there; writes the results once the measured frame is long done
+void stats_tick() {
+    const char* dir = stats_dir();
+    if (!dir) return;
+    const int64_t frame = (int64_t)texture_frame_no();
+    const int64_t at = stats_frame.load(std::memory_order_relaxed);
+    if (at < 0) {
+        static std::atomic<int64_t> next_check{0};
+        const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::steady_clock::now().time_since_epoch()).count();
+        if (now < next_check.load(std::memory_order_relaxed)) return;
+        next_check.store(now + 500, std::memory_order_relaxed);
+        const std::string trigger = std::string(dir) + "\\draw_stats.now";
+        FILE* f = fopen(trigger.c_str(), "rb");
+        if (!f) return;
+        fclose(f);
+        std::remove(trigger.c_str());
+        std::lock_guard lk(stats_mu);
+        if (stats_frame.load() >= 0) return;
+        if (!stats_pool && !stats_make_pool()) {
+            logf("vk: draw stats: no pipeline statistics query pool");
+            return;
+        }
+        if (!stats_args) {
+            void* m = nullptr;
+            if (create_buffer((uint64_t)kStatsQueries * 32, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true, stats_args, stats_args_mem, &m))
+                stats_args_map = (uint32_t*)m;
+        }
+        if (stats_args_map) std::memset(stats_args_map, 0xEE, (size_t)kStatsQueries * 32);   // (0xEEEEEEEE: never copied)
+        watch_arm();
+        if (watch_wanted() && !stats_watch) {
+            void* m = nullptr;
+            if (create_buffer((uint64_t)kStatsQueries * kWatchMax * 16, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true, stats_watch, stats_watch_mem, &m))
+                stats_watch_map = (uint32_t*)m;
+        }
+        if (stats_watch_map) std::memset(stats_watch_map, 0xEE, (size_t)kStatsQueries * kWatchMax * 16);
+        vkResetQueryPool(dev.device, stats_pool, 0, kStatsQueries);
+        {
+            std::lock_guard bl(stats_bind_mu);
+            stats_binds.clear();
+            stats_ptrs.clear();
+            stats_ptrs2.clear();
+            stats_dumps.clear();
+            stats_gpu_recs.clear();
+        }
+        {
+            std::lock_guard ml(miss_mu);   // (the misses from here on: older frames' in-flight work may still add some)
+            if (miss_map) std::memset(miss_map, 0, (size_t)kMissSlice * kMissSlices);
+        }
+        stats_used.store(0);
+        stats_written.store(false);
+        stats_frame.store(frame + 2);   // (a frame not yet started on any replay thread)
+        logf("vk: draw stats: measuring frame %lld%s", (long long)(frame + 2), stats_mesh_bits ? " (with task and mesh counts)" : "");
+        return;
+    }
+    if (frame < at + 8 || stats_written.load()) return;
+    std::lock_guard lk(stats_mu);
+    if (stats_written.exchange(true)) return;
+    const uint32_t n = std::min(stats_used.load(), kStatsQueries);
+    const uint32_t words = stats_mesh_bits ? 7 : 5;   // (in bit order: vs, clip in, clip out, fs, cs, [task, mesh])
+    std::vector<uint64_t> r((size_t)n * words);
+    VkResult res = n ? vkGetQueryPoolResults(dev.device, stats_pool, 0, n, r.size() * 8, r.data(), (VkDeviceSize)words * 8,
+                                             VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT)
+                     : VK_SUCCESS;
+    struct Sum {
+        uint64_t draws = 0, vs = 0, clip_in = 0, clip_out = 0, fs = 0, cs = 0, task = 0, mesh = 0;
+        bool is_mesh = false, indirect = false, is_dispatch = false;
+        std::string args;   // (indirect: the GPU's argument words and count of its first draws)
+    };
+    std::map<uint64_t, Sum> by;
+    for (uint32_t i = 0; i < n && res == VK_SUCCESS; i++) {
+        const StatsMeta& m = stats_meta[i];
+        Sum& x = by[m.prog];
+        const uint64_t* v = &r[(size_t)i * words];
+        x.draws++, x.vs += v[0], x.clip_in += v[1], x.clip_out += v[2], x.fs += v[3], x.cs += v[4];
+        if (stats_mesh_bits) x.task += v[5], x.mesh += v[6];
+        x.is_mesh |= m.mesh != 0, x.indirect |= m.indirect != 0, x.is_dispatch |= m.dispatch != 0;
+        if (m.dispatch && x.draws == 1) x.args += " #" + std::to_string(i);   // (its place in the frame's recording)
+        if (m.dispatch && !m.indirect && x.args.size() < 200) {
+            char b[64];
+            snprintf(b, sizeof b, " [grid %u %u %u]", m.grid[0], m.grid[1], m.grid[2]);
+            x.args += b;
+        }
+        if (m.indirect && x.args.size() < 200) {
+            char b[160];
+            const uint32_t* a = stats_args_map ? stats_args_map + (size_t)i * 8 : nullptr;
+            const uint32_t* g = m.guest;
+            if (!a || !m.args_read)
+                snprintf(b, sizeof b, " [@%llx gpu not read, mem %u %u %u %u]", (unsigned long long)m.args_addr, g[0], g[1], g[2], g[3]);
+            else if (m.count_addr)
+                snprintf(b, sizeof b, " [@%llx gpu %u %u %u %u cnt=%u | mem %u %u %u %u cnt=%u]", (unsigned long long)m.args_addr, a[0],
+                         a[1], a[2], a[3], a[4], g[0], g[1], g[2], g[3], m.guest_count);
+            else
+                snprintf(b, sizeof b, " [@%llx gpu %u %u %u %u | mem %u %u %u %u]", (unsigned long long)m.args_addr, a[0], a[1], a[2],
+                         a[3], g[0], g[1], g[2], g[3]);
+            x.args += b;
+        }
+    }
+    std::vector<std::pair<uint64_t, Sum>> rows(by.begin(), by.end());
+    // (no output first: shaders ran and nothing reached the clipper, then nothing shaded)
+    const auto rank = [](const Sum& x) {
+        if (x.is_dispatch) return x.cs ? 5 : 4;   // (dispatches after the draws: those that ran no thread first)
+        const bool ran = x.vs || x.mesh || x.task;
+        return !ran ? 2 : !x.clip_in ? 0 : !x.fs ? 1 : 3;
+    };
+    std::stable_sort(rows.begin(), rows.end(), [&](const auto& a, const auto& b) { return rank(a.second) < rank(b.second); });
+    const std::string path = std::string(dir) + "\\draw_stats_" + std::to_string(at) + ".txt";
+    if (FILE* f = fopen(path.c_str(), "wb")) {
+        fprintf(f, "# frame %lld: %u draws, %zu programs (query result %d). kind prog draws | vs task mesh | clip_in clip_out | fs | note\n",
+                (long long)at, n, rows.size(), (int)res);
+        for (const auto& [prog, x] : rows) {
+            const int k = rank(x);
+            if (x.is_dispatch) {   // (compute: its dispatches, the threads they ran)
+                fprintf(f, "comp %016llx %6llu | cs threads %12llu | %s%s\n", (unsigned long long)prog, (unsigned long long)x.draws,
+                        (unsigned long long)x.cs, k == 4 ? "NO THREADS" : "", (x.indirect ? " (indirect)" + x.args : x.args).c_str());
+                continue;
+            }
+            fprintf(f, "%s %016llx %6llu | %10llu %8llu %10llu | %10llu %10llu | %11llu | %s%s\n", x.is_mesh ? "mesh" : "draw",
+                    (unsigned long long)prog, (unsigned long long)x.draws, (unsigned long long)x.vs, (unsigned long long)x.task,
+                    (unsigned long long)x.mesh, (unsigned long long)x.clip_in, (unsigned long long)x.clip_out,
+                    (unsigned long long)x.fs, k == 0 ? "RAN, NO PRIMITIVES" : k == 1 ? "primitives, no fragments" : k == 2 ? "no shader work" : "",
+                    x.indirect ? (" (indirect)" + x.args).c_str() : "");
+        }
+        // who binds each indirect draw's argument words in this frame: written (W) or only read (r), by which programs
+        std::vector<StatsBind> binds;
+        {
+            std::lock_guard bl(stats_bind_mu);
+            binds = stats_binds;
+        }
+        // (RX_VK_DRAW_STATS_PROGS=<key>,...: every storage buffer those programs bound in this frame)
+        if (const char* want = getenv("RX_VK_DRAW_STATS_PROGS")) {
+            for (const char* q = want; *q;) {
+                char* end;
+                const uint64_t k = strtoull(q, &end, 16);
+                if (end == q) break;
+                q = *end ? end + 1 : end;
+                fprintf(f, "\n# bindings of %016llx:\n", (unsigned long long)k);
+                std::vector<std::pair<uint64_t, uint64_t>> seen;
+                for (const StatsBind& b : binds) {
+                    const std::pair<uint64_t, uint64_t> slot{b.addr ^ ((uint64_t)b.off << 40) ^ ((uint64_t)b.cbuf << 56), b.size};
+                    if (b.prog != k || std::find(seen.begin(), seen.end(), slot) != seen.end()) continue;
+                    seen.push_back(slot);
+                    fprintf(f, "  s%d %s %#llx +%#llx  from c%u+%#x (raw %#llx)%s%s\n", b.stage, b.written ? "W" : "r",
+                            (unsigned long long)b.addr, (unsigned long long)b.size, b.cbuf, b.off, (unsigned long long)b.raw,
+                            b.table ? " (table entry)" : "", !b.addr ? "  <-- UNRESOLVED" : "");
+                }
+            }
+        }
+        {
+            std::lock_guard bl(stats_bind_mu);
+            for (const std::string& d : stats_dumps) fprintf(f, "\n%s", d.c_str());
+            for (const GpuDumpRec& r : stats_gpu_recs) {   // (as the GPU held them after the wanted draws)
+                if (!stats_gpu_map) break;
+                const uint32_t* w = (const uint32_t*)(stats_gpu_map + (size_t)r.slot * kGpuDumpSlot);
+                uint64_t nonzero = 0;
+                uint32_t first = UINT32_MAX;
+                for (uint32_t i = 0; i < r.bytes / 4; i++)
+                    if (w[i]) nonzero++, first = std::min(first, i);
+                fprintf(f, "\n%016llx s%d ssbo%d at %#llx AS THE GPU HELD IT after the %s (%llu of %u words non-zero, first at +%x):\n",
+                        (unsigned long long)r.prog, r.stage, r.index, (unsigned long long)r.addr, r.stage == 5 ? "dispatch" : "draw",
+                        (unsigned long long)nonzero, r.bytes / 4, first == UINT32_MAX ? 0 : first * 4);
+                const uint32_t from = first == UINT32_MAX ? 0 : first & ~3u;
+                for (uint32_t i = from; i + 4 <= r.bytes / 4 && i < from + 64; i += 4)
+                    fprintf(f, "  +%05x: %08x %08x %08x %08x\n", i * 4, w[i], w[i + 1], w[i + 2], w[i + 3]);
+            }
+        }
+        // (second level) pointers found in compute programs' pointer table regions that no binding or region of theirs covers
+        {
+            std::lock_guard bl(stats_bind_mu);
+            std::map<uint64_t, std::vector<std::pair<uint64_t, uint64_t>>> by;   // program -> (region, pointer)
+            for (const StatsPtr& q : stats_ptrs2) by[q.prog].emplace_back(q.in_buffer, q.value);
+            fprintf(f, "\n# second-level pointers no binding covers: %zu programs\n", by.size());
+            for (auto& [prog, v] : by) {
+                std::sort(v.begin(), v.end());
+                v.erase(std::unique(v.begin(), v.end()), v.end());
+                std::string t;
+                for (size_t i = 0; i < v.size() && i < 10; i++) {
+                    char b[96];
+                    snprintf(b, sizeof b, " %#llx(in %#llx, pool end %#llx)", (unsigned long long)v[i].second,
+                             (unsigned long long)v[i].first, (unsigned long long)gpu_pool_end(v[i].second));
+                    t += b;
+                }
+                fprintf(f, "  %016llx %zu pointers:%s\n", (unsigned long long)prog, v.size(), t.c_str());
+            }
+        }
+        // (RX_VK_MISS_LOG) the global memory accesses no binding held, since the capture was armed, by program: how many,
+        // and the first addresses with the pool each lies in
+        {
+            std::lock_guard ml(miss_mu);
+            std::vector<std::pair<uint32_t, uint64_t>> rows;   // (misses, program)
+            if (miss_map)
+                for (const auto& [prog, slot] : miss_slot)
+                    if (const uint32_t m = miss_map[(size_t)slot * (kMissSlice / 4)]) rows.emplace_back(m, prog);
+            std::sort(rows.rbegin(), rows.rend());
+            fprintf(f, "\n# global memory misses (RX_VK_MISS_LOG): %zu programs\n", rows.size());
+            for (const auto& [m, prog] : rows) {
+                const uint32_t* w = miss_map + (size_t)miss_slot[prog] * (kMissSlice / 4);
+                std::string addrs;
+                std::vector<uint64_t> uniq;
+                for (uint32_t i = 0; i < std::min<uint32_t>(m, 63); i++) {
+                    const uint64_t a = w[1 + 2 * i] | (uint64_t)w[2 + 2 * i] << 32;
+                    if (std::find(uniq.begin(), uniq.end(), a) != uniq.end() || uniq.size() >= 12) continue;
+                    uniq.push_back(a);
+                    char t[64];
+                    snprintf(t, sizeof t, " %#llx(pool end %#llx)", (unsigned long long)a, (unsigned long long)gpu_pool_end(a));
+                    addrs += t;
+                }
+                fprintf(f, "  %016llx %u misses:%s\n", (unsigned long long)prog, m, addrs.c_str());
+            }
+        }
+        if (getenv("RX_VK_BLOCK_PROBE") && miss_map) {   // (EvilOOT) the probed programs' blocks: invocations that entered each
+            std::lock_guard ml(miss_mu);
+            for (const auto& [prog, slot] : miss_slot) {
+                const uint32_t* w = miss_map + (size_t)slot * (kMissSlice / 4);
+                fprintf(f, "\n# block probe %016llx (invocations entering IR Block $n, since the frame was armed)\n", (unsigned long long)prog);
+                for (uint32_t b = 0; 128 + b < kMissSlice / 4; b++)
+                    if (w[128 + b]) fprintf(f, "  $%u %u\n", b, w[128 + b]);
+            }
+        }
+        if (const std::vector<uint64_t>& w = watch_addrs(); !w.empty() && stats_watch_map) {   // (RX_VK_WATCH_ADDRS)
+            fprintf(f, "\n# watched addresses: bindings over them this frame (W written; tables left out)\n");
+            for (const uint64_t a : w) {
+                std::vector<std::string> seen;
+                for (const StatsBind& b : binds) {
+                    if (b.table || !b.addr || a < b.addr || a >= b.addr + b.size) continue;
+                    char t[96];
+                    snprintf(t, sizeof t, "%s%016llx@s%d[%#llx+%#llx]", b.written ? "W:" : "r:", (unsigned long long)b.prog, b.stage,
+                             (unsigned long long)b.addr, (unsigned long long)b.size);
+                    if (std::find(seen.begin(), seen.end(), t) == seen.end() && seen.size() < 40) seen.push_back(t);
+                }
+                fprintf(f, "  @%llx:", (unsigned long long)a);
+                for (const std::string& s2 : seen) fprintf(f, " %s", s2.c_str());
+                fprintf(f, "\n");
+            }
+            fprintf(f, "\n# watched addresses, after each dispatch (shown where they changed; #n = its place in the frame)\n");
+            std::vector<std::array<uint32_t, 4>> last(w.size(), {0xEEEEEEEEu, 0xEEEEEEEEu, 0xEEEEEEEEu, 0xEEEEEEEEu});
+            for (uint32_t i = 0; i < n; i++) {
+                if (!stats_meta[i].dispatch) continue;
+                for (size_t k = 0; k < w.size(); k++) {
+                    const uint32_t* v = stats_watch_map + ((size_t)i * kWatchMax + k) * 4;
+                    if (v[0] == 0xEEEEEEEEu && v[1] == 0xEEEEEEEEu) continue;   // (not copied)
+                    std::array<uint32_t, 4> now{v[0], v[1], v[2], v[3]};
+                    if (now == last[k]) continue;
+                    fprintf(f, "  #%u %016llx: @%llx = %u %u %u %u (was %u %u %u %u)\n", i, (unsigned long long)stats_meta[i].prog,
+                            (unsigned long long)w[k], now[0], now[1], now[2], now[3], last[k][0], last[k][1], last[k][2], last[k][3]);
+                    last[k] = now;
+                }
+            }
+        }
+        // (census) single storage buffer descriptors that resolved to nothing in this frame, by program and slot: a shader
+        // that reads or writes a buffer it was never given. Empty table entries are left out (tables have holes).
+        {
+            std::map<std::tuple<uint64_t, int, uint32_t, uint32_t>, std::tuple<uint64_t, bool, uint64_t, uint64_t, int>> unresolved;
+            for (const StatsBind& b : binds)   // (-> raw, written, the uniform buffer's address and size, times seen)
+                if (!b.table && !b.addr) {
+                    auto& e = unresolved[{b.prog, b.stage, b.cbuf, b.off}];
+                    e = {b.raw, b.written, b.vkbuf, b.vkoff, std::get<4>(e) + 1};
+                }
+            fprintf(f, "\n# unresolved single descriptors: %zu\n", unresolved.size());
+            for (const auto& [k, v] : unresolved)
+                fprintf(f, "  %016llx s%d c%u+%#x raw %#llx %s (x%d; from the uniform buffer at %#llx size %#llx)\n",
+                        (unsigned long long)std::get<0>(k), std::get<1>(k), std::get<2>(k), std::get<3>(k),
+                        (unsigned long long)std::get<0>(v), std::get<1>(v) ? "WRITTEN" : "read", std::get<4>(v),
+                        (unsigned long long)std::get<2>(v), (unsigned long long)std::get<3>(v));
+        }
+        fprintf(f, "\n# indirect arguments: the storage buffers of this frame that hold them (%zu bindings noted)\n", binds.size());
+        std::vector<uint64_t> done;
+        for (uint32_t i = 0; i < n; i++) {
+            const StatsMeta& m = stats_meta[i];
+            if (!m.indirect || std::find(done.begin(), done.end(), m.args_addr) != done.end()) continue;
+            done.push_back(m.args_addr);
+            std::string who;
+            std::vector<std::pair<uint64_t, bool>> seen;
+            for (const StatsBind& b : binds) {
+                if (m.args_addr < b.addr || m.args_addr >= b.addr + b.size) continue;
+                const std::pair<uint64_t, bool> k{b.prog, b.written};
+                if (std::find(seen.begin(), seen.end(), k) != seen.end()) continue;
+                seen.push_back(k);
+                char t[160];
+                // (vk: the Vulkan buffer and the offset in it this binding gives the argument words; the read's own after the
+                // list: different ones mean two copies of the same memory)
+                snprintf(t, sizeof t, " %s%016llx@s%d[%#llx+%#llx]%s vk %llx+%#llx", b.written ? "W:" : "r:", (unsigned long long)b.prog,
+                         b.stage, (unsigned long long)b.addr, (unsigned long long)b.size, b.table ? "(table)" : "",
+                         (unsigned long long)b.vkbuf, (unsigned long long)(b.vkoff + (m.args_addr - b.addr)));
+                if (who.size() < 3000) who += t;
+            }
+            fprintf(f, "args %#llx (draw prog %016llx, read from vk %llx+%#llx):%s\n", (unsigned long long)m.args_addr,
+                    (unsigned long long)m.prog, (unsigned long long)m.args_vkbuf, (unsigned long long)m.args_vkoff,
+                    who.empty() ? " NO BINDING HOLDS THEM" : who.c_str());
+            // (and the dispatches whose small buffers hold a pointer into the buffer around them: 1 MB either side)
+            std::string ptr_who;
+            std::vector<uint64_t> pseen;
+            for (const StatsPtr& q : stats_ptrs) {
+                if (q.value + (1ull << 20) < m.args_addr || q.value > m.args_addr + (1ull << 20)) continue;
+                if (std::find(pseen.begin(), pseen.end(), q.prog ^ q.value) != pseen.end()) continue;
+                pseen.push_back(q.prog ^ q.value);
+                char t[96];
+                snprintf(t, sizeof t, " %016llx(%#llx in %#llx)", (unsigned long long)q.prog, (unsigned long long)q.value,
+                         (unsigned long long)q.in_buffer);
+                if (ptr_who.size() < 1200) ptr_who += t;
+            }
+            if (!ptr_who.empty()) fprintf(f, "     pointed to by:%s\n", ptr_who.c_str());
+        }
+        fclose(f);
+    }
+    logf("vk: draw stats: frame %lld, %u draws of %zu programs -> %s", (long long)at, n, rows.size(), path.c_str());
+    stats_frame.store(-1);   // (ready for another trigger)
+}
+/// One draw's query, ended on every way out of draw()
+struct StatsQuery {
+    VkCommandBuffer cmd = VK_NULL_HANDLE;
+    uint32_t index = 0;
+    DrawArgs own{};
+    const DrawArgs* draw = &own;
+    StatsQuery(VkCommandBuffer c, uint64_t prog, const DrawArgs& d) { begin(c, prog, d, false, nullptr); }
+    /// a compute dispatch: its grid, or its indirect arguments (12 bytes, read back as a draw's)
+    StatsQuery(VkCommandBuffer c, uint64_t prog, uint64_t indirect, uint32_t x, uint32_t y, uint32_t z) {
+        if (stats_dir()) watch_note(prog, indirect);
+        DrawArgs d{};
+        d.indirect = indirect;
+        const uint32_t grid[3] = {x, y, z};
+        begin(c, prog, d, true, grid);
+    }
+    void begin(VkCommandBuffer c, uint64_t prog, const DrawArgs& d, bool dispatch, const uint32_t* grid) {
+        if (!stats_dir() || !stats_pool) return;
+        const int64_t at = stats_frame.load(std::memory_order_relaxed);
+        if (at < 0 || (int64_t)texture_frame_no() != at || stats_written.load(std::memory_order_relaxed)) return;
+        const uint32_t i = stats_used.fetch_add(1);
+        if (i >= kStatsQueries) return;
+        stats_meta[i] = {prog, (uint8_t)d.mesh, (uint8_t)(d.indirect != 0), (uint8_t)d.indexed, 0, d.count, d.instances, d.max,
+                         d.stride, d.count_addr, d.indirect, {}, 0, (uint8_t)dispatch, {}, 0, 0};
+        if (grid) std::memcpy(stats_meta[i].grid, grid, sizeof stats_meta[i].grid);
+        if (d.indirect) {
+            host->gpu_read(d.indirect, stats_meta[i].guest, dispatch ? 12 : 16);
+            if (d.count_addr) host->gpu_read(d.count_addr, &stats_meta[i].guest_count, 4);
+        }
+        own = d;
+        is_dispatch = dispatch;
+        if (dispatch) copy_args(c, own, i);   // (before the dispatch: outside any pass already)
+        vkCmdBeginQuery(c, stats_pool, i, 0);
+        cmd = c, index = i;
+    }
+    bool is_dispatch = false;
+    const NvnState* state = nullptr;   // (a wanted draw: its mesh stage's storage buffers copied from the GPU after it)
+    uint64_t prog = 0;
+    ~StatsQuery() {
+        if (!cmd) return;
+        vkCmdEndQuery(cmd, stats_pool, index);
+        if (!is_dispatch) copy_args(cmd, *draw, index);   // (a dispatch's were copied before it ran: begin)
+        if (is_dispatch) copy_watch(cmd, index);
+        if (state) gpu_dump(cmd, *state, prog, is_dispatch);
+    }
+    /// (RX_VK_DRAW_STATS_PROGS) the first 1 KB of each storage buffer of the mesh stage, as the GPU holds it after the draw,
+    /// once per program: into stats_gpu (host-visible), printed with the report beside the memory view
+    static void gpu_dump(VkCommandBuffer cmd, const NvnState& s, uint64_t prog, bool is_dispatch_dump = false);
+    static void copy_args(VkCommandBuffer cmd, const DrawArgs& d, uint32_t index);
+    static void copy_watch(VkCommandBuffer cmd, uint32_t index);
+};
+void StatsQuery::copy_watch(VkCommandBuffer cmd, uint32_t index) {
+    const std::vector<uint64_t>& w = watch_addrs();
+    if (w.empty() || !stats_watch) return;
+    end_pass(cmd);
+    VkMemoryBarrier2 mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+    mb.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, mb.srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
+    mb.dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT, mb.dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
+    VkDependencyInfo di{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+    di.memoryBarrierCount = 1, di.pMemoryBarriers = &mb;
+    vkCmdPipelineBarrier2(cmd, &di);
+    for (size_t k = 0; k < w.size(); k++) {
+        const BufferRef r = gpu_buffer_bind(w[k], 16, false);
+        if (!r) continue;
+        VkBufferCopy c{r.offset, ((VkDeviceSize)index * kWatchMax + k) * 16, 16};
+        vkCmdCopyBuffer(cmd, r.buffer, stats_watch, 1, &c);
+    }
+    mb.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT, mb.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    mb.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT | VK_PIPELINE_STAGE_2_HOST_BIT;
+    mb.dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_HOST_READ_BIT;
+    vkCmdPipelineBarrier2(cmd, &di);
+}
+void StatsQuery::gpu_dump(VkCommandBuffer cmd, const NvnState& s, uint64_t prog, bool is_dispatch_dump) {
+    std::lock_guard bl(stats_bind_mu);
+    for (const GpuDumpRec& r : stats_gpu_recs)
+        if (r.prog == prog) return;
+    if (!stats_gpu) {
+        void* m = nullptr;
+        if (!create_buffer((uint64_t)kGpuDumpSlot * kGpuDumpSlots, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true, stats_gpu, stats_gpu_mem, &m))
+            return;
+        stats_gpu_map = (uint8_t*)m;
+    }
+    end_pass(cmd);
+    VkMemoryBarrier2 mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+    mb.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, mb.srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
+    mb.dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT, mb.dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
+    VkDependencyInfo di{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+    di.memoryBarrierCount = 1, di.pMemoryBarriers = &mb;
+    vkCmdPipelineBarrier2(cmd, &di);
+    for (const int stage : {7, 6, 5})
+        for (int i = 0; i < 16; i++) {
+            if ((stage == 5) != is_dispatch_dump) continue;   // (EvilOOT: a dispatch's own, stage 5)
+            const nvn_p_bind_buf& b = s.ssbo[stage][i];
+            if (!b.addr || !b.size || stats_gpu_recs.size() >= kGpuDumpSlots) continue;
+            const uint32_t bytes = (uint32_t)std::min<uint64_t>(b.size, kGpuDumpSlot) & ~3u;
+            const BufferRef r = gpu_buffer_bind(b.addr, bytes, false);
+            if (!r) continue;
+            const uint32_t slot = (uint32_t)stats_gpu_recs.size();
+            VkBufferCopy c{r.offset, (VkDeviceSize)slot * kGpuDumpSlot, bytes};
+            vkCmdCopyBuffer(cmd, r.buffer, stats_gpu, 1, &c);
+            stats_gpu_recs.push_back({prog, b.addr, slot, bytes, stage, i});
+        }
+    mb.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT, mb.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    mb.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT | VK_PIPELINE_STAGE_2_HOST_BIT;
+    mb.dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_HOST_READ_BIT;
+    vkCmdPipelineBarrier2(cmd, &di);
+}
+/// The arguments as the GPU holds them: copied outside the pass, which the next draw opens again, as RX_VK_DUMP_EACH
+/// does. A dispatch's before the dispatch (what it launched with: it may reset them itself), a draw's after it.
+void StatsQuery::copy_args(VkCommandBuffer cmd, const DrawArgs& d, uint32_t index) {
+    {
+        if (!d.indirect || !stats_args) return;
+        const BufferRef args = gpu_buffer_bind(d.indirect, 16, false);
+        const BufferRef cnt = d.count_addr ? gpu_buffer_bind(d.count_addr, 4, false) : BufferRef{};
+        if (!args) return;
+        stats_meta[index].args_vkbuf = (uint64_t)(uintptr_t)args.buffer, stats_meta[index].args_vkoff = args.offset;
+        end_pass(cmd);
+        VkMemoryBarrier2 mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+        mb.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, mb.srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
+        mb.dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT, mb.dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
+        VkDependencyInfo di{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+        di.memoryBarrierCount = 1, di.pMemoryBarriers = &mb;
+        vkCmdPipelineBarrier2(cmd, &di);
+        VkBufferCopy c{args.offset, (VkDeviceSize)index * 32, 16};
+        vkCmdCopyBuffer(cmd, args.buffer, stats_args, 1, &c);
+        if (cnt) {
+            VkBufferCopy cc{cnt.offset, (VkDeviceSize)index * 32 + 16, 4};
+            vkCmdCopyBuffer(cmd, cnt.buffer, stats_args, 1, &cc);
+        }
+        VkMemoryBarrier2 back{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+        back.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT, back.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        back.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT | VK_PIPELINE_STAGE_2_HOST_BIT;
+        back.dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_HOST_READ_BIT;
+        di.pMemoryBarriers = &back;
+        vkCmdPipelineBarrier2(cmd, &di);
+        stats_meta[index].args_read = 1;
+    }
+}
+} // namespace
+
+// ---- (EvilOOT) NVN2's indirect mesh draws in Vulkan's layout ----
+// NVN2 keeps an indirect mesh draw as {task count, first task} (as its direct DrawMeshTasks(first, count) and NVIDIA's
+// mesh shading always did); vkCmdDrawMeshTasksIndirectEXT reads {x, y, z} workgroups. Read as they were, "7 tasks from 0"
+// was 7 x 0 x 1: no work, so every GPU-built mesh draw (OoT's foliage, grass, falling leaves, fireflies) drew nothing even
+// once its counts were right. Before each, outside the pass, its records go to a ring as {count, 1, 1} (a fill of 1s,
+// then each record's count word copied over x). RX_VK_MESH_IND_COUNT_WORD=1 takes the second word for the count
+// instead; RX_VK_MESH_IND_RAW=1 draws from the records as they are, as before. A first task other than 0 has no Vulkan
+// counterpart (as for the direct draws: drawn from 0).
+namespace {
+constexpr uint64_t kMeshRing = 4ull << 20;
+VkBuffer mesh_ring = VK_NULL_HANDLE;
+VmaAllocation mesh_ring_mem = nullptr;
+std::mutex mesh_ring_mu;
+uint64_t mesh_ring_at = 0;
+thread_local VkBuffer mesh_conv_buf = VK_NULL_HANDLE;   // (the converted records for the draw in progress)
+thread_local uint64_t mesh_conv_off = 0;
+bool mesh_indirect_convert(VkCommandBuffer cmd, const DrawArgs& d) {
+    mesh_conv_buf = VK_NULL_HANDLE;
+    static const bool raw = getenv("RX_VK_MESH_IND_RAW") && atoi(getenv("RX_VK_MESH_IND_RAW")) != 0;
+    static const uint32_t word = getenv("RX_VK_MESH_IND_COUNT_WORD") ? (uint32_t)atoi(getenv("RX_VK_MESH_IND_COUNT_WORD")) & 3 : 0;
+    if (raw || !d.mesh || !d.indirect) return false;
+    const uint32_t n = (uint32_t)std::clamp(d.max, 1, 4096);
+    const uint32_t stride = d.stride > 0 ? (uint32_t)d.stride : 8;
+    const BufferRef args = gpu_buffer_bind(d.indirect, (uint64_t)(n - 1) * stride + 4 * (word + 1), false);
+    if (!args) return false;
+    uint64_t off;
+    {
+        std::lock_guard lk(mesh_ring_mu);
+        if (!mesh_ring) {
+            void* unused = nullptr;
+            if (!create_buffer(kMeshRing, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT, false, mesh_ring,
+                               mesh_ring_mem, &unused))
+                return false;
+        }
+        const uint64_t bytes = ((uint64_t)n * 12 + 15) & ~15ull;
+        if (mesh_ring_at + bytes > kMeshRing) mesh_ring_at = 0;   // (4 MB: frames of draws before it comes round)
+        off = mesh_ring_at;
+        mesh_ring_at += bytes;
+    }
+    end_pass(cmd);
+    VkMemoryBarrier2 mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+    VkDependencyInfo di{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+    di.memoryBarrierCount = 1, di.pMemoryBarriers = &mb;
+    mb.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, mb.srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
+    mb.dstStageMask = VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT, mb.dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    vkCmdPipelineBarrier2(cmd, &di);
+    vkCmdFillBuffer(cmd, mesh_ring, off, (uint64_t)n * 12, 1u);
+    mb.srcStageMask = VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT, mb.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    mb.dstStageMask = VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT, mb.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    vkCmdPipelineBarrier2(cmd, &di);
+    std::vector<VkBufferCopy> regions(n);
+    for (uint32_t i = 0; i < n; i++) regions[i] = {args.offset + (uint64_t)i * stride + 4 * word, off + (uint64_t)i * 12, 4};
+    vkCmdCopyBuffer(cmd, args.buffer, mesh_ring, n, regions.data());
+    mb.srcStageMask = VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT, mb.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    mb.dstStageMask = VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT, mb.dstAccessMask = VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT;
+    vkCmdPipelineBarrier2(cmd, &di);
+    mesh_conv_buf = mesh_ring, mesh_conv_off = off;
+    return true;
+}
+} // namespace
 // (hookshot) NVN's indirect mesh draws hold (count, first) and Vulkan's (x, y, z): given as they were, every one drew y = first = 0 workgroups,
 // with no error. They are most of the game's vegetation: the forest's trees, ferns and grass (GPU culling writes their counts, so they can only
 // be moved on the GPU): each count is copied into this buffer of (count, 1, 1) just before its draw. The GPU runs the copies and draws in
@@ -2835,6 +3723,8 @@ uint32_t mesh_args_take(uint32_t n) {   // (n entries of the ring, never entry 0
 
 void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
     PROF(PROF_DRAW);
+    stats_tick();
+    mesh_indirect_convert(cmd, d);   // (EvilOOT: before the pass opens; sets mesh_conv_buf for the mesh draw below)
     VkPrimitiveTopology topo = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
     if (!d.mesh && !topology(d.prim, topo)) {
         static int logged[32];
@@ -2876,6 +3766,7 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
                               program_code_keys(s).c_str());
         SKIP_HERE();
     }
+    if (skip_live(cp->key)) return;   // (EvilOOT, RX_VK_SKIP_FILE)
     {   // (hookshot, RX_VK_SKIP_PROG: draws too, their native code keys logged once; =-: none. By default OoT's 53509044401d78d2, 128
         // draws of a full-screen pass over two 64^3 volumes, once, while the game loads: on about half the first starts the GPU stalled in
         // them for Windows' two seconds and the device was lost, a black screen with the frame counter over it. Its shaders are straight-line
@@ -3121,6 +4012,14 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
                      d.indirect ? " indirect" : "", d.count);
         }
     }
+    StatsQuery stats_query(cmd, p.key, d);   // (EvilOOT, RX_VK_DRAW_STATS)
+    if (stats_frame_now() && stats_prog_wanted(p.key)) {   // (and the wanted programs' buffers: a mesh draw's stages, fragment)
+        for (const int stage : {6, 7, 1}) stats_dump_stage(p.key, s, stage);
+        // (and as the GPU holds them, after it: RX_VK_GPU_DUMP=1 only; its bindings can sync a pool's mirror mid-frame, and
+        // the culling chain then measured as broken)
+        static const bool gpu_dump_on = getenv("RX_VK_GPU_DUMP") != nullptr;
+        if (stats_query.cmd && gpu_dump_on) stats_query.state = &s, stats_query.prog = p.key;
+    }
     if (d.mesh) {
         {   // (amd-fix, diagnosis) RX_VK_LOG_MESH_PROGS=1: each mesh program's first draw and every 600th, with what its
             // indirect arguments hold in guest memory (0 groups: the culling pass before it left nothing)
@@ -3175,6 +4074,16 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
         }
         if (d.indirect) {
             BufferRef cnt = d.count_addr ? gpu_buffer_bind(d.count_addr, 4, false) : BufferRef{};
+            if (mesh_conv_buf) {   // (EvilOOT: the records as {count, 1, 1}, mesh_indirect_convert)
+                if (cnt && vkCmdDrawMeshTasksIndirectCountEXT)
+                    vkCmdDrawMeshTasksIndirectCountEXT(cmd, mesh_conv_buf, mesh_conv_off, cnt.buffer, cnt.offset, d.max, 12);
+                else
+                    vkCmdDrawMeshTasksIndirectEXT(cmd, mesh_conv_buf, mesh_conv_off, std::max(d.max, 1), 12);
+                mesh_conv_buf = VK_NULL_HANDLE;
+                st_mesh++;
+                st_draws++, pass.draws++;
+                return;
+            }
             if (!mesh_args.buffer) {
                 mesh_args = gpu_buffer_bind(d.indirect, (uint64_t)std::max(d.max, 1) * std::max(d.stride, 12), false);
                 if (!mesh_args) SKIP_HERE();
@@ -3608,11 +4517,12 @@ void prepare_run(void (*progress)(size_t done, size_t total)) {
     // did not end, and the next start goes without it. Those libraries are then built when a draw first needs them
     const std::string warming = path + ".warming";
     bool warm = gpl_wanted() && !getenv("RX_VK_NO_WARM");
+    bool warm_cs = !getenv("RX_VK_NO_WARM");
     if (FILE* f = fopen(warming.c_str(), "rb")) {
         fclose(f);
-        warm = false;
+        warm = warm_cs = false;
         logf("vk: the last start did not finish the driver's part of the shaders: left out");
-    } else if (warm) {
+    } else if (warm || warm_cs) {
         if (FILE* w = fopen(warming.c_str(), "wb")) fclose(w);
     }
     auto blank = std::make_unique<NvnState>();
@@ -3626,6 +4536,24 @@ void prepare_run(void (*progress)(size_t done, size_t total)) {
             if (i >= total) return;
             if (std::unique_ptr<Program> p = seed_program(i / 3, (int)(i % 3))) {
                 if (!p->failed) made++;
+                if (!p->failed && warm_cs && p->compute && !taau_key(p->key)) {
+                    // (hookshot) compute pipelines too, for the driver's own cache: built in play they stopped the game while the
+                    // driver compiled them, seconds each for the culling programs (53caac5f: 6.5 s, 41 s inlined), which looked like a hang
+                    ensure_layout(*p);
+                    VkComputePipelineCreateInfo ci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+                    ci.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+                    ci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+                    ci.stage.module = p->stages[0].module;
+                    ci.stage.pName = "main";
+                    pin_subgroup(ci.stage, p->workgroup[0]);
+                    ci.layout = p->layout;
+                    if (getenv("RX_VK_NOOPT")) ci.flags |= VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT;
+                    VkPipeline pl = VK_NULL_HANDLE;
+                    if (guarded_compute(VK_NULL_HANDLE, &ci, &pl) == VK_SUCCESS && pl) {
+                        vkDestroyPipeline(dev.device, pl, nullptr);
+                        libs++;
+                    }
+                }
                 if (!p->failed && warm && !p->compute) {
                     ensure_layout(*p);
                     Targets at{};
@@ -3856,12 +4784,20 @@ void dispatch(VkCommandBuffer cmd, NvnState& s, uint32_t x, uint32_t y, uint32_t
             if (noopt) ci.flags |= VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT;
         }
         const auto t0 = std::chrono::steady_clock::now();
+        {   // (EvilOOT, 11-07: a freeze after Load was the driver's compiler on one compute pipeline, here, on the submit's thread)
+            static std::atomic<int> told{0};
+            if (told++ < 400) logf("vk: compute pipeline of %016llx: compiling", (unsigned long long)p.key);
+        }
         if (const VkResult made = guarded_compute(pcache, &ci, &p.compute_pipeline); made != VK_SUCCESS) {
             static std::atomic<int> told{0};
             if (told++ < 20) logf("vk: compute pipeline of %016llx not made (%d)", (unsigned long long)p.key, (int)made);
             p.compute_pipeline = VK_NULL_HANDLE;
             p.failed = true;
             SKIP_HERE();
+        }
+        {
+            const int64_t ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+            if (ms >= 200) logf("vk: compute pipeline of %016llx: SLOW compile, %lld ms", (unsigned long long)p.key, (long long)ms);
         }
         st_pipeline_us += std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count();
         st_pipelines++;
@@ -3924,12 +4860,57 @@ void dispatch(VkCommandBuffer cmd, NvnState& s, uint32_t x, uint32_t y, uint32_t
     if (!bind_descriptors(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, p)) SKIP_HERE();
     push_constants(cmd, p, nullptr);
     gprof_begin(cmd);
-    if (indirect) {
-        BufferRef args = gpu_buffer_bind(indirect, 12, false);
-        if (!args) SKIP_HERE();
-        vkCmdDispatchIndirect(cmd, args.buffer, args.offset);
-    } else {
-        vkCmdDispatch(cmd, x, y, z);
+    if (stats_frame_now()) {   // (EvilOOT, RX_VK_DRAW_STATS) the pointers this dispatch's small buffers hold
+        const auto scan = [&](const nvn_p_bind_buf& b, uint64_t most) {
+            if (!b.addr || !b.size) return;
+            const uint64_t n = std::min<uint64_t>(b.size, most) & ~7ull;
+            std::vector<uint64_t> w(n / 8);
+            if (w.empty() || !memory_read_as_submitted(b.addr, w.data(), n)) return;
+            std::lock_guard bl(stats_bind_mu);
+            for (const uint64_t v : w)
+                if (!(v & 3) && v >= (1ull << 32) && v < (1ull << 40) && host->gpu_guest(v) && stats_ptrs.size() < 400000)
+                    stats_ptrs.push_back({p.key, b.addr, v});
+        };
+        for (const nvn_p_bind_buf& b : s.ssbo[5]) scan(b, 0x400);
+        for (const nvn_p_bind_buf& b : s.ubo[5]) scan(b, 0x1000);
+        {   // (second level) pointers inside the pointer table's regions that nothing this dispatch has covers
+            const PointerEntry* e = pointer_table(s, 5);
+            const auto covered = [&](uint64_t v) {
+                for (const nvn_p_bind_buf& b : s.ssbo[5])
+                    if (b.addr && v >= b.addr && v < b.addr + b.size) return true;
+                for (int i = 0; i < 3; i++)
+                    if (e[i].addr && v >= e[i].addr && v < e[i].addr + e[i].size) return true;
+                return false;
+            };
+            for (int i = 0; i < 3; i++) {
+                if (!e[i].addr || !e[i].size) continue;
+                const uint64_t n = std::min<uint64_t>(e[i].size, 256u << 10) & ~7ull;
+                std::vector<uint64_t> w(n / 8);
+                if (w.empty() || !memory_read_as_submitted(e[i].addr, w.data(), n)) continue;
+                uint32_t found = 0;
+                std::lock_guard bl(stats_bind_mu);
+                for (const uint64_t v : w)
+                    if (!(v & 3) && v >= (1ull << 32) && v < (1ull << 40) && host->gpu_guest(v) && gpu_pool_end(v) && !covered(v) &&
+                        found++ < 64 && stats_ptrs2.size() < 400000)
+                        stats_ptrs2.push_back({p.key, e[i].addr, v});
+            }
+        }
+        if (stats_prog_wanted(p.key)) stats_dump_stage(p.key, s, 5);   // (with each buffer's non-zero words)
+    }
+    if (stats_dir()) watch_note_sb(p.key, s);   // (RX_VK_WATCH_SB)
+    {
+        StatsQuery stats_query(cmd, p.key, indirect, x, y, z);   // (EvilOOT, RX_VK_DRAW_STATS)
+        {   // (RX_VK_GPU_DUMP=1 with RX_VK_DRAW_STATS_PROGS: the wanted dispatches' storage buffers as the GPU holds them after)
+            static const bool gpu_dump_on = getenv("RX_VK_GPU_DUMP") != nullptr;
+            if (gpu_dump_on && stats_query.cmd && stats_prog_wanted(p.key)) stats_query.state = &s, stats_query.prog = p.key;
+        }
+        if (indirect) {
+            BufferRef args = gpu_buffer_bind(indirect, 12, false);
+            if (!args) SKIP_HERE();
+            vkCmdDispatchIndirect(cmd, args.buffer, args.offset);
+        } else {
+            vkCmdDispatch(cmd, x, y, z);
+        }
     }
     if (dump_on() && dump_ssbo_wanted(p.key)) dump_ssbos(cmd, p, "after");
     if (gprof_on()) {

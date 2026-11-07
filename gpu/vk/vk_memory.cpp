@@ -47,6 +47,10 @@ struct Pool {
     uint64_t direct_write_epoch = 0;   // (the part that last wrote it in guest memory, before it had a mirror)
     uint64_t retired_value = 0;  // (retired: the submission that may still use it)
     bool was_mirrored = false;   // (its mirror was given back: its pages stay in the captures, for the next one)
+    // (EvilOOT) retired with its mirror on: the pool that took it in copies the GPU's contents from it when its own mirror is
+    // made (mirror_make), and until then the mirror stays (mirrors_give_back)
+    bool inherit_pending = false;
+    uint64_t retired_epoch = 0;
 };
 uint64_t mem_rec_value = 0, mem_completed = 0;   // (the recording being made, and the GPU's progress)
 
@@ -1282,6 +1286,12 @@ void retire_pool(std::map<uint64_t, Pool>::iterator it) {
     old->retired_value = std::max(old->last_value, mem_rec_value);
     std::erase(mirror_wanted, old);   // (the new pool gets the mirror)
     if (old->mstate == Pool::MIRROR_WANTED) old->mstate = Pool::MIRROR_NONE;
+    // (EvilOOT, 11-07) what the GPU wrote into its mirror and nowhere else (the culling's bare table entries past their first
+    // 64 bytes, stores through the page table) was lost here: the new pool's mirror is filled from guest memory. Kokiri's
+    // foliage records, written by the GPU while the scene loaded and its pools were remade larger, came out zero: every
+    // count 0, the trees' leaf clusters never drawn. RX_VK_NO_INHERIT=1: as before
+    static const bool no_inherit = getenv("RX_VK_NO_INHERIT") != nullptr;
+    if (old->mstate == Pool::MIRROR_ON && !no_inherit) old->inherit_pending = true, old->retired_epoch = mirror_epoch;
     pools_gen++;
     retired_pools.push_back(imported.extract(it));
     last_pool = nullptr;
@@ -1437,11 +1447,36 @@ void publish_cap_ranges() {
     cap_ranges.swap(v);
     cap_ranges_ver++;
 }
+// (EvilOOT, 11-07) the game's own memory pool holding a GPU address (below 1 TB, where the address is the guest's), not the
+// import that happens to cover it: imports are 16 MB chunks around what was bound, and since upstream 1c7c9c7 only around
+// the bound range, so the pool's end was a chunk's end: the pointer tables of the task and mesh stages (whole pools) and the
+// bare entries stopped there, the grass's programs read their records 12-18 MB further on as 0 and culled every blade
+static bool game_pool_of(uint64_t gpu, uint64_t& lo, uint64_t& hi) {   // (pools_mu held)
+    if (gpu >= (1ull << 40) || guest_pools.empty()) return false;
+    auto it = std::upper_bound(guest_pools.begin(), guest_pools.end(), gpu, [](uint64_t a, const GuestPool& p) { return a < p.lo; });
+    if (it == guest_pools.begin()) return false;
+    --it;
+    if (gpu < it->lo || gpu >= it->hi) return false;
+    lo = it->lo, hi = it->hi;
+    return true;
+}
 uint64_t gpu_pool_end(uint64_t gpu) {
     ParLock plk;   // (before pools_mu, always)
     std::lock_guard lk(pools_mu);
+    uint64_t lo, hi;
+    static const bool imported_only = getenv("RX_VK_POOL_END_IMPORTED") != nullptr;   // (A/B: the import's end, as before)
+    if (!imported_only && game_pool_of(gpu, lo, hi)) return hi;
     const Pool* p = pool_of(gpu, 1);
     return p ? p->hi : 0;
+}
+uint64_t gpu_pool_start(uint64_t gpu) {   // (EvilOOT) where it begins
+    ParLock plk;
+    std::lock_guard lk(pools_mu);
+    uint64_t lo, hi;
+    static const bool imported_only = getenv("RX_VK_POOL_END_IMPORTED") != nullptr;
+    if (!imported_only && game_pool_of(gpu, lo, hi)) return lo;
+    const Pool* p = pool_of(gpu, 1);
+    return p ? p->lo : 0;
 }
 
 BufferRef gpu_buffer_bind(uint64_t gpu, uint64_t size, bool written) {
@@ -1518,6 +1553,18 @@ BufferRef gpu_buffer_bind(uint64_t gpu, uint64_t size, bool written) {
 constexpr uint64_t kIdleEpochs = 600, kLongIdle = 6000;
 int64_t st_mirrors_freed = 0;
 uint64_t st_mirror_bytes_freed = 0;
+// (hookshot) A freed mirror's buffer is destroyed only once the GPU is past everything recorded until then. Its pool's
+// last_value counts the draws and dispatches that bound it, not the shaders that reach it through the guest page table:
+// a culling or fog compute pass already running read a mirror destroyed under it (device lost in 53caac5f and ee7764a6,
+// issues 132 and 195, AMD after a scene change). The table goes back to guest memory at once, as before
+struct DeadMirror { VkBuffer buffer; VmaAllocation alloc; uint64_t value; };
+std::deque<DeadMirror> dead_mirrors;
+void reap_mirrors() {   // (pools_mu held)
+    while (!dead_mirrors.empty() && dead_mirrors.front().value <= mem_completed) {
+        destroy_buffer(dead_mirrors.front().buffer, dead_mirrors.front().alloc);
+        dead_mirrors.pop_front();
+    }
+}
 void mirror_free(Pool& p) {
     p.was_mirrored = true;
     {   // (the table back to guest memory, for a pool still in use only: a retired one's range is another pool's now, and its
@@ -1525,7 +1572,7 @@ void mirror_free(Pool& p) {
         const auto live = imported.find(p.lo);
         if (live != imported.end() && &live->second == &p) guest_pages_set(p.lo, p.hi, p.address);
     }
-    destroy_buffer(p.mirror, p.mirror_alloc);
+    dead_mirrors.push_back({p.mirror, p.mirror_alloc, std::max(mem_rec_value, p.last_value)});
     p.mirror = VK_NULL_HANDLE, p.mirror_alloc = nullptr;
     mirror_bytes -= p.hi - p.lo;
     st_mirror_bytes_freed += p.hi - p.lo;
@@ -1538,7 +1585,9 @@ void mirrors_give_back(uint64_t want_bytes) {   // (pools_mu held)
     if (keep) return;
     for (auto& nh : retired_pools) {
         Pool& p = nh.mapped();
-        if (p.mstate == Pool::MIRROR_ON && p.retired_value <= mem_completed) mirror_free(p);
+        // (EvilOOT: kept while the pool that took it in has not made its mirror, for 600 submissions at most)
+        if (p.inherit_pending && mirror_epoch - p.retired_epoch > kIdleEpochs) p.inherit_pending = false;
+        if (p.mstate == Pool::MIRROR_ON && p.retired_value <= mem_completed && !p.inherit_pending) mirror_free(p);
     }
     std::vector<Pool*> idle;
     for (auto& [lo, p] : imported)
@@ -1557,6 +1606,7 @@ void mirrors_give_back(uint64_t want_bytes) {   // (pools_mu held)
 
 void memory_begin_submission() {
     std::lock_guard lk(pools_mu);
+    reap_mirrors();
     mirror_epoch++;
     mirror_upload = true;
     mirror_synced.clear();
@@ -1628,6 +1678,38 @@ bool mirror_make(Pool& pool) {
         }
         const VkBufferCopy all{0, 0, n};
         vkCmdCopyBuffer(upload_command_buffer(), p->buffer, p->mirror, 1, &all);   // (all of it, at this generation)
+        {   // (EvilOOT) then the mirrors of the pools it took in, over their part: what the GPU wrote there and only there
+            // (retire_pool). The captures' pages go over it after, as before: the CPU's newer writes win
+            bool barrier_done = false;
+            int inherited = 0;
+            for (auto& nh : retired_pools) {
+                Pool& r = nh.mapped();
+                if (!r.inherit_pending || r.mstate != Pool::MIRROR_ON || !r.mirror || r.hi <= p->lo || r.lo >= p->hi) continue;
+                if (!barrier_done) {   // (after the full copy, and after the shaders of earlier submissions wrote the old mirror)
+                    VkMemoryBarrier2 mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+                    mb.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+                    mb.srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
+                    mb.dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+                    mb.dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT;
+                    VkDependencyInfo di{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+                    di.memoryBarrierCount = 1, di.pMemoryBarriers = &mb;
+                    vkCmdPipelineBarrier2(upload_command_buffer(), &di);
+                    barrier_done = true;
+                }
+                const uint64_t a = std::max(r.lo, p->lo), b = std::min(r.hi, p->hi);
+                const VkBufferCopy part{a - r.lo, a - p->lo, b - a};
+                vkCmdCopyBuffer(upload_command_buffer(), r.mirror, p->mirror, 1, &part);
+                r.inherit_pending = false;
+                r.retired_value = std::max(r.retired_value, mem_rec_value);   // (in use by this upload until it is done)
+                inherited++;
+            }
+            if (inherited) {
+                static int logged;
+                if (logged++ < 16)
+                    logf("vk: pool %#llx..%#llx: mirror made with the GPU's contents of %d retired pool(s)", (unsigned long long)p->lo,
+                         (unsigned long long)p->hi, inherited);
+            }
+        }
         {   // (then the pages a capture holds as they were at their submit: guest memory is the game's frame ahead)
             std::map<VkBuffer, std::vector<VkBufferCopy>> over;
             for (uint64_t page = p->lo >> kPageShift; page < (p->hi + 4095) >> kPageShift; page++) {

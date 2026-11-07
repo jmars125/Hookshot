@@ -970,6 +970,21 @@ void GatherInfoFromHeader(Environment& env, Info& info) {
 }
 } // Anonymous namespace
 
+/// (EvilOOT) NVN2 compute's storage buffer table in c0 for the program being translated on this thread, set by
+/// gpu/vk/vk_shader.cpp from the control section (vk_bank.cpp cs_layout): right after the push constants and the uniform
+/// buffer table (0x40 for OoT's culling passes), not Maxwell's 0x310, where c0 holds nothing. With 0x310 every compute
+/// access left to the global memory fallbacks searched an empty table: it read 0 and its writes were lost (the GPU-culled
+/// draw lists all came out empty: no foliage, grass, falling leaves or fireflies). 0: Maxwell's.
+thread_local u32 g_nvn2_compute_ssbo_base{0};
+thread_local u32 g_nvn2_compute_ssbo_count{16};
+/// (and where that layout ends: 0 unknown. Below 0x880 the program gets the back end's pointer table there, as task and
+/// mesh programs do: translate_program.cpp AddGlobalTables, vk_bank.cpp pointer_table)
+thread_local u32 g_nvn2_compute_layout_end{0};
+/// (RX_VK_MISS_LOG: whether the program being translated gets the miss log; vk_shader.cpp sets it per program)
+thread_local bool g_nvn2_miss_log_this{true};
+/// (RX_VK_ALL_GLOBAL_PROGS=<key prefix>[,...], a test: the program's memory accesses all left global, none bound)
+thread_local bool g_all_global_this{false};
+
 void CollectShaderInfoPass(Environment& env, IR::Program& program) {
     Info& info{program.info};
     const u32 base{[&] {
@@ -990,7 +1005,7 @@ void CollectShaderInfoPass(Environment& env, IR::Program& program) {
         case Stage::Fragment:
             return 0x510u;
         case Stage::Compute:
-            return 0x310u;
+            return g_nvn2_compute_ssbo_base ? g_nvn2_compute_ssbo_base : 0x310u;
         }
         throw InvalidArgument("Invalid stage {}", program.stage);
     }()};

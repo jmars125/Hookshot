@@ -3,6 +3,7 @@
     python -I nx2/make_game.py --nup <file.nup> --out <folder> [--work <folder>] [--jobs <n>]
     python -I nx2/make_game.py --romfs <dir> --exefs <dir> --out <folder> [--work <folder>] [--jobs <n>]
     python -I nx2/make_game.py --check --nup <file.nup>       (or --exefs <dir>: is this the right game and version?)
+    python -I nx2/make_game.py --update <folder>             (a folder built before, again with these tools: the game files it keeps)
 
 The folder holds the executable and all it needs, started with a double click: nothing goes back into the repository, and no game
 data ever comes with the tools. Lines the app reads, each on its own line of stdout:
@@ -61,23 +62,45 @@ def fail(text):
     sys.exit(1)
 
 
+def failure_reason(lines):
+    """The line a stopped step is named with. Only the last 12 lines used to be kept, so a compiler's "error:" hundreds
+    of lines earlier was replaced by "compiled in 790s, 1 failed"."""
+    tail, seen = [], None
+    for line in lines:
+        tail = (tail + [line])[-12:]
+        if "error:" in line.lower() and "CalledProcessError" not in line:
+            seen = line
+    if seen is not None:
+        return seen
+    return tail[-1] if tail else "no output"
+
+
+def reported(line):
+    """The sentence a builder shows. @@check is '@@check <ok|bad> <text>'; @@error is '@@error <text>'. None otherwise."""
+    if line.startswith("@@error "):
+        return line[len("@@error "):]
+    if line.startswith("@@check "):
+        parts = line.split(" ", 2)
+        return parts[2] if len(parts) == 3 else ""
+    return None
+
+
 def run(cmd, env=None, on_line=None):
     e = dict(os.environ, PYTHONIOENCODING="utf-8")
     e.update(env or {})
     p = subprocess.Popen(cmd, cwd=ROOT, env=e, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8",
                          errors="replace", bufsize=1)
     no_throttle(getattr(p, "_handle", None))
-    tail = []
+    lines = []
     for line in p.stdout:
         line = line.rstrip()
         print(line, flush=True)
-        tail = (tail + [line])[-12:]
+        lines.append(line)
         if on_line:
             on_line(line)
     if p.wait():
-        why = [l for l in tail if "error:" in l.lower() and "CalledProcessError" not in l]
         step = next((os.path.basename(c) for c in cmd[1:] if c.endswith(".py")), os.path.basename(cmd[-1]))   # (issue 154: not "-u")
-        fail("%s stopped: %s" % (step, why[-1] if why else tail[-1] if tail else "no output"))
+        fail("%s stopped: %s" % (step, failure_reason(lines)))
 
 
 def build_id(main):
@@ -291,6 +314,53 @@ def check_windows_sdk():
     fail("The compiler could not run a test build: %s" % why)
 
 
+def drop_stale_objects(work):
+    """(issue 231) Objects compiled against other system headers are not reused. A first build that compiled with an old Visual Studio's
+    stdio.h (before 2015) left its objects in the cache; once the PC was fixed every later build reused them and the link failed on
+    __iob_func. The headers the compiler finds are noted, and when they change the compiled objects go"""
+    if LINUX:
+        return
+    sys.path.insert(0, os.path.join(ROOT, "third_party", "a64-kit", "tools"))
+    import hashlib
+    import toolchain
+    with tempfile.TemporaryDirectory() as d:
+        src = os.path.join(d, "t.c")
+        with open(src, "w") as f:
+            f.write(chr(10).join(("#include <stdio.h>", "#include <stdlib.h>", "#include <windows.h>", "")))
+        r = subprocess.run([toolchain.need(toolchain.find("clang"))] + toolchain.native_target() + ["-M", src], capture_output=True, text=True,
+                           encoding="utf-8", errors="replace")
+    if r.returncode:
+        return
+    heads = sorted({h.lower() for h in re.findall(r"\S+\.h\b", r.stdout.replace("\\" + chr(10), " "))})
+    stamp = hashlib.sha1(chr(10).join(heads).encode()).hexdigest()
+    note = os.path.join(work, "system_headers.txt")
+    try:
+        with open(note) as f:
+            if f.read().strip() == stamp:
+                return
+    except OSError:
+        pass
+    for sub in (os.path.join(work, "objcache"), os.path.join(work, "sa", "build", "obj")):
+        if os.path.isdir(sub):
+            print("the system headers changed since the last build: its compiled objects are not reused (%s)" % sub, flush=True)
+            shutil.rmtree(sub, ignore_errors=True)
+    with open(note, "w") as f:
+        f.write(stamp + chr(10))
+
+
+def folder_language(out):
+    """the language a game folder was built in: the code line of its language.txt"""
+    try:
+        with open(os.path.join(out, "language.txt"), encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and any(line == code for code, _ in LANGUAGES):
+                    return line
+    except OSError:
+        pass
+    return None
+
+
 def profile_readable(prof):
     """(linux) the profile is made by a recent clang (the Windows tools'): an older one, the system's, cannot read it and stops the
     build. Then the game is built without it (a little slower in play), not at all"""
@@ -337,6 +407,7 @@ def main():
     p.add_argument("--jobs", type=int, default=int(os.environ.get("HOOKSHOT_JOBS") or 0) or max(1, (os.cpu_count() or 2) // 2))
     p.add_argument("--language", default="en-US", help="the game's language: a code from LANGUAGES, written to language.txt")
     p.add_argument("--check", action="store_true")
+    p.add_argument("--update", help="a game folder built before: built again from the game files it keeps (the game's update offer)")
     a = p.parse_args()
     os.makedirs(a.work, exist_ok=True)
     no_throttle()
@@ -345,7 +416,10 @@ def main():
         ctypes.WinDLL("kernel32").SetThreadExecutionState(0x80000000 | 0x00000001)
     if a.check:
         return check(a, a.work)
-    if not a.out or not (a.nup or (a.romfs and a.exefs)):
+    if a.update:
+        a.out = a.update
+        a.language = folder_language(a.update) or a.language
+    if not a.out or not (a.update or a.nup or (a.romfs and a.exefs)):
         fail("needs --out, and --nup or --romfs with --exefs")
     out = os.path.abspath(a.out)
     work = os.path.abspath(a.work)
@@ -354,17 +428,25 @@ def main():
     # compiler is still said before the long compile, not after the package has been read
     if not LINUX:
         check_windows_sdk()
+    drop_stale_objects(work)
     exefs = os.path.join(work, "exefs")
     romfs = os.path.join(out, "romfs")
 
     say("stage", "read", "Reading your game files")
     shutil.rmtree(exefs, ignore_errors=True)
-    if a.nup:
+    kept = os.path.join(out, ".hookshot_exefs")   # (the game's code as read, kept in the folder: what an update builds from again)
+    if a.update:
+        if not os.path.isdir(kept) or not os.path.isdir(romfs):
+            fail("This game folder has no copy of the game files to update from: it was built before updates came in. Choose your game files "
+                 "in Hookshot Builder and build into the same folder once; updates after that work by themselves.")
+        check_cache_paths(out, (kept, romfs))
+        shutil.copytree(kept, exefs)
+        check_modules(exefs)
+    elif a.nup:
         # (what an earlier build left is not kept without a reason to trust it: builders before the compressed .nup fix wrote those files as
         # they lay, so a folder they left held broken game data, and the game crashed at start over its empty dictionaries)
         game = os.path.join(out, ".game")
         good = os.path.join(out, ".hookshot_romfs")
-        kept = os.path.join(out, ".hookshot_exefs")
         check_cache_paths(out, (game, good, kept, romfs))
         # (an update of the builder over the same .nup: nothing to read again, only what the build needs. Issues 21 and 28)
         st = os.stat(a.nup)
@@ -399,6 +481,9 @@ def main():
         shutil.copytree(a.exefs, exefs)   # (unpacked in place: the user's copy stays as it is)
         run(PY + ["nx2/unpack.py", exefs])
         link_or_copy(a.romfs, romfs)
+        check_cache_paths(out, (kept,))
+        shutil.rmtree(kept, ignore_errors=True)
+        shutil.copytree(exefs, kept)
     check_supported_build(exefs)
 
     # (made once on the development PC: lists of addresses and counts, no game code)
@@ -452,6 +537,15 @@ def main():
     with open(language, "w", encoding="utf-8", newline="\n") as f:
         f.write("# The game's language. Change the line below to one of the codes listed here, save, and start the game again.\n\n%s\n\n" % a.language)
         f.writelines("# %-8s %s\n" % l for l in LANGUAGES)
+    # (what the game's update offer reads, host/hos_update.c: which release these tools are, and where the builder that made the folder is)
+    version = os.path.join(ROOT, "version.txt")
+    if os.path.isfile(version):
+        with open(version, encoding="utf-8") as f:
+            tag = f.read().strip()
+        with open(os.path.join(out, "hookshot_version.txt"), "w", encoding="utf-8", newline="\n") as f:
+            f.write("version=%s\n" % tag)
+            if os.environ.get("HOOKSHOT_BUILDER_EXE"):
+                f.write("builder=%s\n" % os.environ["HOOKSHOT_BUILDER_EXE"])
     say("done", out)
 
 

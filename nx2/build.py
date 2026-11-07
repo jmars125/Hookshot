@@ -86,7 +86,7 @@ def HOT_ORDER():
 
 
 HOST_LIBS = ["-lpthread", "-ldl", "-lm"] if LINUX else \
-    ["-luser32", "-lwinmm", "-ladvapi32", "-lole32", "-lshell32", "-lgdi32", "-ldbghelp"]
+    ["-lwinhttp", "-luser32", "-lwinmm", "-ladvapi32", "-lole32", "-lshell32", "-lgdi32", "-ldbghelp"]
 GPU = os.path.join(kit.HERE, "..", "gpu")
 # FFmpeg (libavcodec's VP8/VP9 decoders, swscale) for nn::codec's video decoders (host/nn_video.c): the static build
 # in the Eglantine clone's package cache
@@ -351,8 +351,11 @@ def main():
                 [os.path.join(rt64, "a64_rt.c")]
         if a.standalone:
             srcs += [os.path.join(gen, f) for f in ("a64_stubs.c", "hos_image.c", "nvn2_exports.c")]
+            # (EvilOOT) host/rx_nowgpu.c stands in for the WebGPU renderer only when there is no wgpu-native to build it with (Linux has
+            # its own stand-ins, host/posix/linux_stubs.c)
+            have_wgpu = os.path.isfile(os.path.join(WGPU, "include", "webgpu", "webgpu.h"))
             host_srcs = sorted(os.path.join(HOST, f) for f in os.listdir(HOST) if f.endswith(".c") and (f != "pgo_rt.c" or PGO == "gen")
-                               and not (LINUX and f in ("display.c", "mf_av1.c")))
+                               and not (LINUX and f in ("display.c", "mf_av1.c", "rx_nowgpu.c")) and (f != "rx_nowgpu.c" or not have_wgpu))
             if LINUX:   # (the window on SDL2, the Win32 calls on POSIX, no Media Foundation and no WebGPU renderer)
                 host_srcs += [os.path.join(POSIX, f) for f in ("win32_posix.c", "display_sdl.c", "linux_stubs.c")]
         else:

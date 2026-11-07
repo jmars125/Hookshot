@@ -152,6 +152,113 @@ static void call_guest(Ctx *c, uint64_t addr, uint64_t sp, const char *what) {
     call_guest_args(c, addr, sp, what);
 }
 
+#ifndef _WIN32
+/* (linux) Saves live in $XDG_DATA_HOME/hookshot (~/.local/share/hookshot), so a rebuilt game folder still finds them.
+   A user/ folder beside the executable from before is moved there the first time, entry by entry. Anything that
+   cannot be moved keeps the old place. --user still wins. */
+static int is_dir(const char *p) {
+    const DWORD a = GetFileAttributesA(p);
+    return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
+}
+static int copy_tree(const char *from, const char *to) {
+    if (!is_dir(from)) {
+        FILE *in = fopen(from, "rb"), *out = in ? fopen(to, "wb") : NULL;
+        int ok = in && out;
+        char buf[1 << 16];
+        for (size_t n; ok && (n = fread(buf, 1, sizeof buf, in)) > 0;) ok = fwrite(buf, 1, n, out) == n;
+        ok = ok && in && !ferror(in);
+        if (in) fclose(in);
+        if (out && fclose(out)) ok = 0;
+        return ok;
+    }
+    if (!CreateDirectoryA(to, NULL) && !is_dir(to)) return 0;
+    char pattern[MAX_PATH];
+    snprintf(pattern, sizeof pattern, "%s" SEP_S "*", from);
+    WIN32_FIND_DATAA fd;
+    HANDLE h = FindFirstFileA(pattern, &fd);
+    int ok = 1;
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            if (!strcmp(fd.cFileName, ".") || !strcmp(fd.cFileName, "..")) continue;
+            char a[MAX_PATH], b[MAX_PATH];
+            snprintf(a, sizeof a, "%s" SEP_S "%s", from, fd.cFileName);
+            snprintf(b, sizeof b, "%s" SEP_S "%s", to, fd.cFileName);
+            ok = copy_tree(a, b);
+        } while (ok && FindNextFileA(h, &fd));
+        FindClose(h);
+    }
+    return ok;
+}
+static void delete_tree(const char *p) {
+    if (!is_dir(p)) {
+        DeleteFileA(p);
+        return;
+    }
+    char pattern[MAX_PATH];
+    snprintf(pattern, sizeof pattern, "%s" SEP_S "*", p);
+    WIN32_FIND_DATAA fd;
+    HANDLE h = FindFirstFileA(pattern, &fd);
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            if (!strcmp(fd.cFileName, ".") || !strcmp(fd.cFileName, "..")) continue;
+            char a[MAX_PATH];
+            snprintf(a, sizeof a, "%s" SEP_S "%s", p, fd.cFileName);
+            delete_tree(a);
+        } while (FindNextFileA(h, &fd));
+        FindClose(h);
+    }
+    RemoveDirectoryA(p);
+}
+static const char *saves_dir(const char *beside) {
+    static char dir[MAX_PATH];
+    const char *xdg = getenv("XDG_DATA_HOME"), *home = getenv("HOME");
+    if (xdg && xdg[0] == '/') snprintf(dir, sizeof dir, "%s", xdg);
+    else if (home && home[0] == '/') {
+        snprintf(dir, sizeof dir, "%s/.local", home);
+        CreateDirectoryA(dir, NULL);
+        snprintf(dir, sizeof dir, "%s/.local/share", home);
+    } else return beside;
+    CreateDirectoryA(dir, NULL);
+    snprintf(dir + strlen(dir), sizeof dir - strlen(dir), "/hookshot");
+    CreateDirectoryA(dir, NULL);
+    if (GetFileAttributesA(dir) == INVALID_FILE_ATTRIBUTES) return beside;
+    char pattern[MAX_PATH];
+    snprintf(pattern, sizeof pattern, "%s" SEP_S "*", beside);
+    WIN32_FIND_DATAA fd;
+    HANDLE h = FindFirstFileA(pattern, &fd);
+    if (h == INVALID_HANDLE_VALUE) return dir;
+    int moved = 0, kept = 0;
+    do {
+        if (!strcmp(fd.cFileName, ".") || !strcmp(fd.cFileName, "..")) continue;
+        char from[MAX_PATH], to[MAX_PATH];
+        snprintf(from, sizeof from, "%s" SEP_S "%s", beside, fd.cFileName);
+        snprintf(to, sizeof to, "%s" SEP_S "%s", dir, fd.cFileName);
+        if (GetFileAttributesA(to) != INVALID_FILE_ATTRIBUTES) kept++;
+        else if (MoveFileExA(from, to, 0)) moved++;
+        else if (copy_tree(from, to)) delete_tree(from), moved++;
+        else delete_tree(to), kept++;
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+    if (kept) {
+        hos_log("saves: %d of %s's entries could not go to %s: the saves stay in %s", kept, beside, dir, beside);
+        return beside;
+    }
+    RemoveDirectoryA(beside);
+    if (moved) {
+        char note[MAX_PATH];
+        const char *sep = strrchr(beside, SEP);
+        snprintf(note, sizeof note, "%.*s" SEP_S "saves-moved.txt", sep ? (int)(sep - beside) : 0, beside);
+        FILE *f = fopen(note, "w");
+        if (f) {
+            fprintf(f, "Hookshot's saves are now in\n%s\n\nThey moved there from the user folder that was here.\n", dir);
+            fclose(f);
+        }
+        hos_log("saves: moved from %s to %s", beside, dir);
+    }
+    return dir;
+}
+#endif
+
 float hos_aspect_ratio = 0;   /* (the window's default shape: host/display.c) */
 #ifdef _WIN32
 int main(int argc, char **argv) {
@@ -218,7 +325,11 @@ static int game_main(int argc, char **argv) {
             if (GetFileAttributesA(beside_image) != INVALID_FILE_ATTRIBUTES) {
                 image = beside_image;
                 if (!hos_romfs_dir) hos_romfs_dir = beside_romfs;
+#ifndef _WIN32
+                if (!hos_user_dir) hos_user_dir = saves_dir(beside_user);
+#else
                 if (!hos_user_dir) hos_user_dir = beside_user;
+#endif
             }
         }
     }

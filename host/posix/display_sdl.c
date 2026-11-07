@@ -18,6 +18,7 @@
 
 int rx_start(void *hwnd);
 void rx_resize(int width, int height);
+void hos_sdl_pads_pump(void);   /* host/pad_sdl.c: controllers, on this thread, as SDL's queue wants */
 
 volatile LONG64 hos_present_count;   /* (nvn_native.c: the game's presents) */
 __attribute__((visibility("default"))) volatile uint8_t hos_posix_keys[256];
@@ -164,6 +165,7 @@ __attribute__((visibility("default"))) void hos_posix_post_message(uint32_t msg,
     if (msg == WM_APP + 7) __atomic_store_n(&fullscreen_asked, wp ? 1 : 0, __ATOMIC_RELEASE);
 }
 static int sdl_ready;
+int hos_display_owns_sdl(void) { return sdl_ready; }   /* (controllers stay on this thread while it runs SDL) */
 
 /* main(), before the game: SDL's video on this, the main, thread; the screen's size for GetSystemMetrics */
 int hos_display_init(void) {
@@ -215,6 +217,7 @@ void hos_display_loop(void) {
     if (getenv("HOS_FULLSCREEN") && atoi(getenv("HOS_FULLSCREEN"))) set_fullscreen(1);
     CloseHandle(CreateThread(NULL, 0, renderer_main, NULL, 0, NULL));
     for (;;) {
+        hos_sdl_pads_pump();
         if (sdl.WaitEventTimeout(&e, 4)) {
             do {
                 switch (e.type) {

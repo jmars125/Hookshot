@@ -201,6 +201,26 @@ if LINUX:
     FFMPEG = None
 
 
+def ffmpeg_version_key():
+    """The FFmpeg headers this build compiles against, so a host object from another major version is not reused.
+    Codec numbers and struct layouts differ between them."""
+    incs = []
+    if FFMPEG:
+        incs.append(os.path.join(FFMPEG, "include"))
+    if LINUX and FFMPEG_LX:
+        incs += [f[2:] for f in FFMPEG_LX[0] if f.startswith("-I")]
+    incs.append("/usr/include")
+    for inc in incs:
+        parts = []
+        for name in ("version_major.h", "version.h"):
+            path = os.path.join(inc, "libavcodec", name)
+            if os.path.exists(path):
+                parts.append(open(path, "rb").read())
+        if parts:
+            return b"".join(parts)
+    return b""
+
+
 # the soft write watch (rt/a64.h A64_MARK): lifted stores mark their 4 KB page, and the renderer reads the marks
 # instead of Windows' write watch (GetWriteWatch over the 6 GB MKW's GPU sees took ~20 ms a scan, in one thread or
 # four: the race's replay waited ~12 ms a frame for it). RX_SOFT_WRITE_WATCH=0: Windows' write watch (a full rebuild)
@@ -361,6 +381,7 @@ def main():
     if LINUX:
         host_deps += b"".join(open(os.path.join(POSIX, f), "rb").read() for f in sorted(os.listdir(POSIX)) if f.endswith(".h"))
         host_deps += open(os.path.join(GPU, "vk", "vk_api.h"), "rb").read()
+    host_deps += ffmpeg_version_key()
     jobs += [(cc, s, os.path.join(obj_dir, "host_" + os.path.basename(s)[:-2] + ".o"),
               host_fl + ["-I" + os.path.join(OPUS, "include")] +
               (["-I" + os.path.join(FFMPEG, "include")] if FFMPEG else []) +

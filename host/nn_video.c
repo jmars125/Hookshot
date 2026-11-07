@@ -182,12 +182,18 @@ HLE(_ZN2nn5codec26ReadDecoderOutputImageNv12EPKNS0_25VideoDecoderImagePoolTypeEj
 static void dec_init_sized(Ctx *c, enum AVCodecID id, const char *what, int w, int h);
 static void dec_init(Ctx *c, enum AVCodecID id, const char *what) { dec_init_sized(c, id, what, 0, 0); }
 static void dec_init_sized(Ctx *c, enum AVCodecID id, const char *what, int w, int h) {
-    const AVCodec *codec = avcodec_find_decoder(id);
+    const AVCodec *codec = NULL;
+#ifndef _WIN32   /* (linux) FFmpeg's own AV1 decoder needs a hardware context, and there is no Media Foundation to fall
+                    back on: dav1d, else libaom, by name */
+    if (id == AV_CODEC_ID_AV1) codec = avcodec_find_decoder_by_name("libdav1d");
+    if (!codec && id == AV_CODEC_ID_AV1) codec = avcodec_find_decoder_by_name("libaom-av1");
+#endif
+    if (!codec) codec = avcodec_find_decoder(id);
     Dec *d = (Dec *)calloc(1, sizeof *d);
     InitializeSRWLock(&d->lock);
     if (codec) {
         d->ctx = avcodec_alloc_context3(codec);
-        d->ctx->thread_count = 2;
+        d->ctx->thread_count = id == AV_CODEC_ID_AV1 ? 4 : 2;   /* (1080p AV1 in software) */
         if (avcodec_open2(d->ctx, codec, NULL) < 0) avcodec_free_context(&d->ctx);
     }
     if (!d->ctx && id == AV_CODEC_ID_AV1) d->mf = mf_av1_open(w, h);

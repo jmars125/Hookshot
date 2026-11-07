@@ -323,7 +323,8 @@ def main():
     p.add_argument("--out")
     p.add_argument("--work", default=os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"), "hookshot-builder")
                    if LINUX else os.path.join(os.environ.get("LOCALAPPDATA", ROOT), "HookshotBuilder"))
-    p.add_argument("--jobs", type=int, default=max(1, (os.cpu_count() or 2) // 2))
+    # (HOOKSHOT_JOBS: fewer compilers on a PC short of memory; the AppImage's builds pass no --jobs)
+    p.add_argument("--jobs", type=int, default=int(os.environ.get("HOOKSHOT_JOBS") or 0) or max(1, (os.cpu_count() or 2) // 2))
     p.add_argument("--language", default="en-US", help="the game's language: a code from LANGUAGES, written to language.txt")
     p.add_argument("--check", action="store_true")
     a = p.parse_args()
@@ -339,7 +340,10 @@ def main():
     out = os.path.abspath(a.out)
     work = os.path.abspath(a.work)
     os.makedirs(out, exist_ok=True)
-    check_windows_sdk()
+    # (linux) the compiler probe waits until the compile. The game-free cache test stops at the lift, and a missing
+    # compiler is still said before the long compile, not after the package has been read
+    if not LINUX:
+        check_windows_sdk()
     exefs = os.path.join(work, "exefs")
     romfs = os.path.join(out, "romfs")
 
@@ -407,6 +411,8 @@ def main():
     if os.path.isfile(os.path.join(work, "sa", "gen", "code_hot.c")):
         run(PY + ["nx2/split_hot.py", os.path.join(work, "sa", "gen")], env)   # (eight files side by side: ~6 minutes, not 79)
 
+    if LINUX:
+        check_linux_compiler()
     say("stage", "compile", "Compiling")
     done = {"n": 0, "of": 1}
 

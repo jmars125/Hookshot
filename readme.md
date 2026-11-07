@@ -91,7 +91,8 @@ From the command line: `./Hookshot-<version>-x86_64.AppImage --cli --nup ~/your-
 
 You need a 64-bit x86 PC with glibc 2.35 or newer (Ubuntu 22.04, Debian 12, Fedora, Arch, SteamOS ...), a Vulkan 1.3
 driver with mesh shaders (Mesa or NVIDIA), and the same memory and disk space as on Windows. The build's own files go
-to `~/.cache/hookshot-builder`.
+to `~/.cache/hookshot-builder`. Saves go in `$XDG_DATA_HOME/hookshot` (`~/.local/share/hookshot`). A `user` folder
+beside the game from an earlier build is moved there once. `HOOKSHOT_JOBS` sets how many files compile at once.
 
 Building it yourself without the AppImage: `clang` and `lld` (LLVM 23 or newer reads the play profile; an older one
 builds without it), Python 3 with `lz4`, `numpy`, `capstone`, `unicorn` and `zstandard`, FFmpeg's development files
@@ -204,7 +205,7 @@ Hookshot exists thanks to the work of many people:
 
 Hookshot is free software under the [GNU General Public License, version 3 or later](LICENSE) (GPL-3.0-or-later).
 It includes code from Eden, suyu and Orchid, which are under the GPL too. Third-party parts under other licenses that
-work with the GPL (Sirit, the Vulkan Memory Allocator, SDL, Opus, zbic and the a64-kit tools) keep their own notices
+work with the GPL (Sirit, the Vulkan Memory Allocator, SDL, Opus, stb, zbic and the a64-kit tools) keep their own notices
 in their folders.
 
 Hookshot is an unofficial fan project, not affiliated with or endorsed by Nintendo. The Legend of Zelda and Ocarina of

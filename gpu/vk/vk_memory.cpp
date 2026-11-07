@@ -772,6 +772,13 @@ bool memory_read_as_submitted(uint64_t gpu, void* dst, uint64_t n) {
     return true;
 }
 
+uint64_t memory_capture_view() { return cap_view_gen.load(std::memory_order_acquire); }
+uint32_t memory_page_stamp(uint64_t gpu) {
+    const uint64_t guest = gpu < (1ull << 40) ? gpu : host->gpu_guest(gpu);
+    if (!guest) return 0;
+    return page_gen(guest >> kPageShift);
+}
+
 bool memory_has_shadow(uint64_t guest, uint64_t n) {
     if (!n || !shadow_n.load(std::memory_order_relaxed)) return false;
     std::lock_guard lk(shadow_mu);

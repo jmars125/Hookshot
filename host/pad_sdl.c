@@ -1,7 +1,8 @@
 /* Game controllers through SDL2 (third_party/sdl2/SDL2.dll, zlib license, loaded at run time): DualSense,
    DualShock 4, Switch Pro, Xbox and most other pads, over USB or Bluetooth. XInput alone sees only Xbox-style pads.
 
-   A thread of its own opens every controller SDL knows (and ones plugged in later), polls them every 4 ms and keeps
+   A thread of its own (on Linux the window's, which runs SDL there too) opens every controller SDL knows (and ones
+   plugged in later), polls them every 4 ms and keeps
    the merged state; nn_hid.c ORs it into the input with XInput, keyboard and mouse. Without SDL2.dll nothing
    changes. HOS_NO_SDL=1 leaves SDL out. Buttons map by position, as for XInput: the bottom face button is the
    Switch's B (cross on a DualSense, A on an Xbox pad), the right one A, left Y, top X. */
@@ -101,9 +102,8 @@ static int32_t stick_value(int16_t v, int flip) {
     return (a > 7849 || a < -7849) ? a : 0;   /* XInput's dead zone, as nn_hid.c uses */
 }
 
-static DWORD WINAPI pad_main(void *arg) {
-    (void)arg;
-    hos_host_thread_register_self("gamepads (SDL)");
+/* SDL's controller support started; 0 when it could not be */
+static int pads_start(void) {
     /* poll in the background, whatever window is in front (nn_hid.c decides when input counts) */
     sdl.SetHint("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "1");
     sdl.SetHint("SDL_JOYSTICK_HIDAPI_PS5_RUMBLE", "1");
@@ -116,10 +116,14 @@ static DWORD WINAPI pad_main(void *arg) {
         return 0;
     }
     hos_log("hid: SDL controller support ready (DualSense, DualShock 4, Switch Pro, Xbox and others)");
-    int64_t next_scan = 0;
-    uint16_t last_lo = 0, last_hi = 0;
-    for (;;) {
-        sdl.Update();
+    return 1;
+}
+
+/* one poll: controllers plugged in or gone (each second), then every open one's buttons, sticks and rumble */
+static void pads_poll(void) {
+    static int64_t next_scan = 0;
+    static uint16_t last_lo = 0, last_hi = 0;
+    sdl.Update();
         const int64_t now = hos_now_ns();
         if (now >= next_scan) {   /* new controllers (and ones that went away) */
             next_scan = now + 1000000000LL;
@@ -175,9 +179,29 @@ static DWORD WINAPI pad_main(void *arg) {
         memcpy(state_stick, s, sizeof s);
         state_count = count;
         ReleaseSRWLockExclusive(&state_lock);
+}
+
+static DWORD WINAPI pad_main(void *arg) {
+    (void)arg;
+    hos_host_thread_register_self("gamepads (SDL)");
+    if (!pads_start()) return 0;
+    for (;;) {
+        pads_poll();
         Sleep(4);
     }
 }
+#ifndef _WIN32
+int hos_display_owns_sdl(void);   /* host/posix/display_sdl.c */
+/* (linux) SDL also runs the window (host/posix/display_sdl.c), and its event queue is not for two threads. Polled
+   from the window's thread, between its events. Two threads pumping it corrupted the heap once a controller was
+   attached. */
+static volatile LONG pads_loaded;
+void hos_sdl_pads_pump(void) {
+    static int state;   /* 0 not started, 1 polling, -1 not available */
+    if (!state && pads_loaded) state = pads_start() ? 1 : -1;
+    if (state > 0) pads_poll();
+}
+#endif
 
 /* The controllers' merged state (nn_hid.c): ORs the buttons in, keeps the larger stick deflections; returns how many
    controllers SDL has open. Starts the SDL thread on the first call. */
@@ -189,7 +213,14 @@ int hos_sdl_pads(uint64_t *buttons, int32_t stick[4]) {
             hos_log("hid: SDL2.dll not found next to the exe: only XInput controllers (Xbox pads) work");
             return 0;
         }
+#ifdef _WIN32
         CreateThread(NULL, 0, pad_main, NULL, 0, NULL);
+#else
+        if (hos_display_owns_sdl())
+            InterlockedExchange(&pads_loaded, 1);   /* (the window's thread polls: hos_sdl_pads_pump) */
+        else
+            CreateThread(NULL, 0, pad_main, NULL, 0, NULL);   /* (no window: nothing else pumps SDL) */
+#endif
     }
     AcquireSRWLockShared(&state_lock);
     const int n = state_count;

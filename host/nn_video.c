@@ -70,6 +70,8 @@ typedef struct {
     int eos;                         /* the last submission is in and decoded: an empty queue is the end */
     Pending *phead, *ptail;          /* submissions not decoded yet, oldest first */
     int64_t submits, acquires;
+    int clock_set;                   /* (hookshot) the movie's clock: the picture at clock_pts was due at clock_ns */
+    int64_t clock_ns, clock_pts;
     SRWLOCK lock;
 } Dec;
 
@@ -182,12 +184,18 @@ HLE(_ZN2nn5codec26ReadDecoderOutputImageNv12EPKNS0_25VideoDecoderImagePoolTypeEj
 static void dec_init_sized(Ctx *c, enum AVCodecID id, const char *what, int w, int h);
 static void dec_init(Ctx *c, enum AVCodecID id, const char *what) { dec_init_sized(c, id, what, 0, 0); }
 static void dec_init_sized(Ctx *c, enum AVCodecID id, const char *what, int w, int h) {
-    const AVCodec *codec = avcodec_find_decoder(id);
+    const AVCodec *codec = NULL;
+#ifndef _WIN32   /* (linux) FFmpeg's own AV1 decoder needs a hardware context, and there is no Media Foundation to fall
+                    back on: dav1d, else libaom, by name */
+    if (id == AV_CODEC_ID_AV1) codec = avcodec_find_decoder_by_name("libdav1d");
+    if (!codec && id == AV_CODEC_ID_AV1) codec = avcodec_find_decoder_by_name("libaom-av1");
+#endif
+    if (!codec) codec = avcodec_find_decoder(id);
     Dec *d = (Dec *)calloc(1, sizeof *d);
     InitializeSRWLock(&d->lock);
     if (codec) {
         d->ctx = avcodec_alloc_context3(codec);
-        d->ctx->thread_count = 2;
+        d->ctx->thread_count = id == AV_CODEC_ID_AV1 ? 4 : 2;   /* (1080p AV1 in software) */
         if (avcodec_open2(d->ctx, codec, NULL) < 0) avcodec_free_context(&d->ctx);
     }
     if (!d->ctx && id == AV_CODEC_ID_AV1) d->mf = mf_av1_open(w, h);
@@ -277,8 +285,13 @@ static void drain(Dec *d) {
     }
 }
 /* the oldest submissions decoded until a picture comes out (or none are left) */
+static void decode_next(Dec *d);
 static void decode_pending(Dec *d) {
-    while (!d->qn && d->phead) {
+    while (!d->qn && d->phead) decode_next(d);
+}
+/* one submission decoded (its pictures into the queue, if any) */
+static void decode_next(Dec *d) {
+    if (d->phead) {
         Pending *n = d->phead;
         d->phead = n->next;
         if (!d->phead) d->ptail = NULL;
@@ -353,6 +366,7 @@ static void dec_flush(Ctx *c) {
         for (int i = 0; i < d->qn; i++) picture_free(&d->queue[(d->qhead + i) % MAX_QUEUE]);
         d->qhead = d->qn = 0;
         d->eos = 0;
+        d->clock_set = 0;
         for (int i = 0; i < MAX_SLOTS; i++) d->slot_last[i] = 0;
         ReleaseSRWLockExclusive(&d->lock);
     }
@@ -403,6 +417,29 @@ static void dec_acquire(Ctx *c) {
         RET(0);
         return;
     }
+    {   /* (hookshot) The game takes one picture a frame, and the sound plays on: under 60 fps the movie fell behind its
+           sound (the intro "slow motion, audio ahead", issues 146 and 179). Pictures behind the movie's clock are skipped:
+           the next ones decoded, as the whole movie is submitted at once. HOS_VIDEO_NO_CATCHUP=1: as before */
+        static int off = -1;
+        if (off < 0) off = getenv("HOS_VIDEO_NO_CATCHUP") != NULL;
+        const int64_t now = hos_now_ns(), late = 25000000;   /* (a frame and a half at 60 fps) */
+        Picture *h = &d->queue[d->qhead];
+        if (!d->clock_set || h->pts < d->clock_pts) d->clock_set = 1, d->clock_ns = now, d->clock_pts = h->pts;   /* (a start, a loop) */
+        int skipped = 0;
+        for (int guard = 0; !off && guard < 600 && !d->queue[d->qhead].last; guard++) {
+            const int64_t due = d->clock_pts + (now - d->clock_ns);
+            if (d->queue[d->qhead].pts + late >= due) break;
+            if (d->qn < 2) {
+                if (!d->phead) break;
+                decode_next(d);
+                continue;
+            }
+            picture_free(&d->queue[d->qhead]);
+            d->qhead = (d->qhead + 1) % MAX_QUEUE, d->qn--;
+            skipped++;
+        }
+        if (skipped && video_log()) hos_log("video: %d pictures skipped to catch up with the movie's clock", skipped);
+    }
     Picture *p = &d->queue[d->qhead];
     Pool *o = (Pool *)host_of(d->slots[slot], POOL_MAGIC);
     /* (the picture at the pool's size: rows and columns past either are left out) */
@@ -429,6 +466,14 @@ static void dec_acquire(Ctx *c) {
     d->slot_pts[slot] = p->pts;
     d->slot_last[slot] = p->last;
     d->busy[slot] = 1;
+    {   /* (hookshot) HOS_VIDEO_LOG: the picture's time against the time since the first, to see the picture fall behind the sound */
+        static int64_t first_ns, first_pts;
+        if (d->acquires == 1) first_ns = hos_now_ns(), first_pts = p->pts;
+        if (video_log() && d->acquires % 60 == 0)
+            hos_log("video: acquire %lld: picture at %.2f s, wall clock %.2f s (behind by %.2f s), %d decoded ahead", (long long)d->acquires,
+                    (double)(p->pts - first_pts) / 1e9, (double)(hos_now_ns() - first_ns) / 1e9,
+                    (double)(hos_now_ns() - first_ns - (p->pts - first_pts)) / 1e9, d->qn);
+    }
     if (video_log() && (d->acquires <= 8 || p->last || d->acquires % 300 == 0)) {
         uint64_t sum = 0, n = 0;   /* (the picture's mean luma and RGB, sampled: a black or garbage decode shows) */
         uint64_t rgb[3] = {0, 0, 0};

@@ -36,6 +36,7 @@ typedef struct { uint64_t rets[4], target; void *buf[32]; } SjSlot;   /* (buf: r
 typedef struct { SjSlot slot[DEPTH]; int depth, overflow; } SjStack;
 static _Thread_local SjStack *stack;
 
+#ifdef _WIN32
 /* buf: rbx rbp rdi rsi r12 r13 r14 r15 at 0-56, rsp (after the return) at 64, the return address at 72, xmm6-15 at
    80-224, mxcsr at 240 and the x87 control word at 244 */
 __attribute__((naked, returns_twice)) int recomp_sj_setjmp(void **buf) {
@@ -98,6 +99,48 @@ __attribute__((naked, noreturn)) static void recomp_sj_longjmp(void **buf, int v
         "movq 64(%rcx), %rsp\n\t"
         "jmpq *72(%rcx)\n\t");
 }
+
+#else
+/* (linux) the System V ABI's: the buffer as above, its callee-saved registers only (rbx rbp r12-r15: rdi, rsi and the
+   xmm registers are the caller's to keep there), buf in rdi and the value in esi */
+__attribute__((naked, returns_twice)) int recomp_sj_setjmp(void **buf) {
+    __asm__ volatile(
+        "movq %rbx, 0(%rdi)\n\t"
+        "movq %rbp, 8(%rdi)\n\t"
+        "movq %r12, 32(%rdi)\n\t"
+        "movq %r13, 40(%rdi)\n\t"
+        "movq %r14, 48(%rdi)\n\t"
+        "movq %r15, 56(%rdi)\n\t"
+        "leaq 8(%rsp), %rdx\n\t"
+        "movq %rdx, 64(%rdi)\n\t"
+        "movq (%rsp), %rdx\n\t"
+        "movq %rdx, 72(%rdi)\n\t"
+        "stmxcsr 240(%rdi)\n\t"
+        "fnstcw 244(%rdi)\n\t"
+        "xorl %eax, %eax\n\t"
+        "ret\n\t");
+}
+
+__attribute__((naked, noreturn)) static void recomp_sj_longjmp(void **buf, int value) {
+    __asm__ volatile(
+        "movq 0(%rdi), %rbx\n\t"
+        "movq 8(%rdi), %rbp\n\t"
+        "movq 32(%rdi), %r12\n\t"
+        "movq 40(%rdi), %r13\n\t"
+        "movq 48(%rdi), %r14\n\t"
+        "movq 56(%rdi), %r15\n\t"
+        "ldmxcsr 240(%rdi)\n\t"
+        "fldcw 244(%rdi)\n\t"
+        "movl %esi, %eax\n\t"
+        "testl %eax, %eax\n\t"
+        "jnz 1f\n\t"
+        "incl %eax\n\t"
+        "1:\n\t"
+        "movq 64(%rdi), %rsp\n\t"
+        "jmpq *72(%rdi)\n\t");
+}
+
+#endif
 
 void **recomp_sj_push(Ctx *c, uint64_t r0, uint64_t r1, uint64_t r2, uint64_t r3) {
     (void)c;

@@ -123,14 +123,29 @@ bool pick_device() {
     vkEnumeratePhysicalDevices(dev.instance, &n, nullptr);
     std::vector<VkPhysicalDevice> all(n);
     vkEnumeratePhysicalDevices(dev.instance, &n, all.data());
+    // (AMD laptops) With AMD graphics in the processor and an AMD card, Windows has two AMD drivers installed, one an
+    // adapter, and each one's Vulkan driver lists every AMD GPU: the card shows up twice. It came first through the
+    // processor graphics' driver, which the card's own update leaves as it was: on an RX 7700S that older driver
+    // (amdvlk64.dll 32.0.11036.4002) crashed in its shader compiler (0xc0000409) on the game's compute pipelines while
+    // the card's 32.0.32015.7029 built them. The same kind of GPU twice: the one with the newer driver wins.
+    // RX_VK_DEVICE=<n>: that device, as listed in the log
     int best = -1, best_score = -1;
+    uint32_t best_driver = 0;
+    const char* want = getenv("RX_VK_DEVICE");
     for (uint32_t i = 0; i < n; i++) {
         VkPhysicalDeviceProperties p;
         vkGetPhysicalDeviceProperties(all[i], &p);
+        logf("vk: device %u: %s, Vulkan %u.%u, driver %#x, type %d", i, p.deviceName, VK_API_VERSION_MAJOR(p.apiVersion),
+             VK_API_VERSION_MINOR(p.apiVersion), p.driverVersion, (int)p.deviceType);
         if (p.apiVersion < VK_API_VERSION_1_3) continue;
+        if (want && *want) {
+            if ((uint32_t)atoi(want) == i) best = (int)i, best_score = 3;
+            continue;
+        }
         const int score = p.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU ? 2 :
                           p.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU ? 1 : 0;
-        if (score > best_score) best = (int)i, best_score = score;
+        if (score > best_score || (score == best_score && p.driverVersion > best_driver))
+            best = (int)i, best_score = score, best_driver = p.driverVersion;
     }
     if (best < 0) {
         logf("vk: no Vulkan 1.3 GPU");

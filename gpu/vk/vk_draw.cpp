@@ -1473,6 +1473,14 @@ void dump_ssbos(VkCommandBuffer cmd, const Program& p, const char* when) {
     }
 }
 
+// The table-entry flip log is diagnostic. It stops after 60 lines, and after this many looks: a game that
+// never flips was taking a mutex and updating a map for every storage-buffer table entry of every draw.
+// unlimited (RX_VK_LOG_TABLE=1) keeps looking until the 60 lines.
+bool table_track_open(int logged, int seen, int unlimited) {
+    constexpr int kTableTrackLooks = 65536;
+    return logged < 60 && (unlimited || seen < kTableTrackLooks);
+}
+
 void build_descriptors(const NvnState& s, const Program& p) {
     dw.reset();
     draw_sampled.clear();
@@ -1610,8 +1618,11 @@ void build_descriptors(const NvnState& s, const Program& p) {
                     stats_note_bind(p.key, ns, none ? 0 : base, none ? size : n, d.is_written, d.count > 1, d.cbuf_index, off, addr,
                                     none && ub ? ub->addr : (uint64_t)(uintptr_t)b.buffer, none && ub ? ub->size : b.offset);
                 }
-                static std::atomic<int> table_told{0};   // (the tracker below stops with its log: a mutex and a map per entry per draw)
-                if (d.count > 1 && table_told.load(std::memory_order_relaxed) < 60) {   // (hookshot) a table entry bound one frame and not the next (or back), 60 of them
+                static std::atomic<int> table_told{0}, table_seen{0};
+                static const int table_unlimited = getenv("RX_VK_LOG_TABLE") != nullptr;
+                if (d.count > 1 && table_track_open(table_told.load(std::memory_order_relaxed),
+                                                    table_seen.load(std::memory_order_relaxed), table_unlimited)) {
+                    table_seen.fetch_add(1, std::memory_order_relaxed);   // (hookshot) a table entry bound one frame and not the next, 60 lines, then it stops looking
                     static std::mutex tm;
                     static std::unordered_map<uint64_t, std::pair<bool, uint64_t>> was;   // -> bound, its address
                     static int told;

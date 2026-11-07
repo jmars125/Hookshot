@@ -15,6 +15,7 @@ on:
       - gpu/vk/import_hold.h
       - gpu/vk/vk_menu.cpp
       - tests/test_fps_rate.py
+      - tests/test_fps_overlay_order.py
       - gpu/vk/vk_framegen.cpp
       - tests/test_framegen_gate.py
       - .github/workflows/source-regressions.yml
@@ -32,6 +33,7 @@ on:
       - gpu/vk/import_hold.h
       - gpu/vk/vk_menu.cpp
       - tests/test_fps_rate.py
+      - tests/test_fps_overlay_order.py
       - gpu/vk/vk_framegen.cpp
       - tests/test_framegen_gate.py
       - .github/workflows/source-regressions.yml
@@ -77,6 +79,9 @@ jobs:
       - name: Check the FPS counter's first sample
         if: runner.os == 'Linux'
         run: python -I -B tests/test_fps_rate.py
+      - name: Check FPS overlay transfer ordering
+        if: runner.os == 'Linux'
+        run: python -I -B tests/test_fps_overlay_order.py
       - name: Check frame generation stays off until asked
         if: runner.os == 'Linux'
         run: python -I -B tests/test_framegen_gate.py

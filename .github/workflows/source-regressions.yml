@@ -42,6 +42,11 @@ on:
       - tests/test_movie_upscale_policy.cpp
       - tests/test_movie_upscale_policy.py
       - nx2/test_import_windows.py
+      - builder/linux/hookshot-launch
+      - builder/linux/AppRun
+      - builder/linux/hookshot-builder.desktop
+      - scripts/linux/appimage.sh
+      - tests/test_hookshot_launch.py
       - .github/workflows/source-regressions.yml
   pull_request:
     branches: [main]
@@ -84,6 +89,11 @@ on:
       - tests/test_movie_upscale_policy.cpp
       - tests/test_movie_upscale_policy.py
       - nx2/test_import_windows.py
+      - builder/linux/hookshot-launch
+      - builder/linux/AppRun
+      - builder/linux/hookshot-builder.desktop
+      - scripts/linux/appimage.sh
+      - tests/test_hookshot_launch.py
       - .github/workflows/source-regressions.yml
   workflow_dispatch:
 
@@ -171,3 +181,6 @@ jobs:
       - name: Check import windows
         if: runner.os == 'Linux'
         run: python -I -B nx2/test_import_windows.py --cxx g++
+      - name: Check the game launcher
+        if: runner.os == 'Linux'
+        run: python -I -B tests/test_hookshot_launch.py

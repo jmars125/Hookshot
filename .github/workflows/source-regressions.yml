@@ -9,6 +9,9 @@ on:
       - nx2/unpack.py
       - nx2/test_nup_paths.py
       - tests/test_make_game_cache.py
+      - gpu/vk/vk_present_rect.h
+      - gpu/vk/tests/present_rect_test.cpp
+      - gpu/vk/vk_replay.cpp
       - .github/workflows/source-regressions.yml
   pull_request:
     branches: [main]
@@ -18,6 +21,9 @@ on:
       - nx2/unpack.py
       - nx2/test_nup_paths.py
       - tests/test_make_game_cache.py
+      - gpu/vk/vk_present_rect.h
+      - gpu/vk/tests/present_rect_test.cpp
+      - gpu/vk/vk_replay.cpp
       - .github/workflows/source-regressions.yml
   workflow_dispatch:
 
@@ -50,3 +56,31 @@ jobs:
         run: python -I -B nx2/test_nup_paths.py
       - name: Check source-cache coherency
         run: python -I -B tests/test_make_game_cache.py
+      - name: Check Vulkan presentation rectangle
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: |
+          @echo off
+          set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
+          if not exist "%VSWHERE%" (
+            echo Visual Studio locator not found.
+            exit /b 1
+          )
+          set "VSROOT="
+          for /f "usebackq delims=" %%i in (`call "%VSWHERE%" -latest -products * -version "[17.0,18.0)" -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSROOT=%%i"
+          if not defined VSROOT (
+            echo Visual Studio 2022 C++ tools not found.
+            exit /b 1
+          )
+          if not exist "%VSROOT%\Common7\Tools\VsDevCmd.bat" (
+            echo Visual Studio developer command prompt not found.
+            exit /b 1
+          )
+          call "%VSROOT%\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
+          if errorlevel 1 exit /b 1
+          where cl
+          if errorlevel 1 exit /b 1
+          cl /nologo /std:c++17 /W4 /WX /EHsc /Fo"%TEMP%\present_rect_test.obj" /Fe:"%TEMP%\present_rect_test.exe" gpu\vk\tests\present_rect_test.cpp
+          if errorlevel 1 exit /b 1
+          "%TEMP%\present_rect_test.exe"
+          if errorlevel 1 exit /b 1

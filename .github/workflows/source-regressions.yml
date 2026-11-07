@@ -15,6 +15,9 @@ on:
       - gpu/vk/import_hold.h
       - gpu/vk/vk_menu.cpp
       - tests/test_fps_rate.py
+      - builder/linux/hookshot-launch
+      - scripts/linux/appimage.sh
+      - tests/test_hookshot_launch.py
       - .github/workflows/source-regressions.yml
   pull_request:
     branches: [main]
@@ -30,6 +33,9 @@ on:
       - gpu/vk/import_hold.h
       - gpu/vk/vk_menu.cpp
       - tests/test_fps_rate.py
+      - builder/linux/hookshot-launch
+      - scripts/linux/appimage.sh
+      - tests/test_hookshot_launch.py
       - .github/workflows/source-regressions.yml
   workflow_dispatch:
 
@@ -73,3 +79,6 @@ jobs:
       - name: Check the FPS counter's first sample
         if: runner.os == 'Linux'
         run: python -I -B tests/test_fps_rate.py
+      - name: Check the game launcher
+        if: runner.os == 'Linux'
+        run: python -I -B tests/test_hookshot_launch.py

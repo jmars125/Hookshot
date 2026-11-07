@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Hookshot
+Comment=The Legend of Zelda: Ocarina of Time, built from your copy
+Exec=AppRun
+Icon=hookshot
+Categories=Game;
+Terminal=false

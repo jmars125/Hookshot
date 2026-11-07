@@ -85,6 +85,8 @@ A build takes about 40 minutes, and you can use your PC in the meantime.
 2. Choose your `.nup` (or your `romfs` and `exefs` folders), a language and a folder for the game, and build.
 3. When it finishes, press Play. The game is also added to your applications menu, and starting the AppImage again
    offers Play. The game itself is `hookshot` in the folder you chose: it runs without the AppImage.
+4. `Hookshot-launcher-<version>-x86_64.AppImage` only starts that game. It reads the folder the builder saved
+   and does not carry the compiler. Pass a folder to start a different build: `./Hookshot-launcher-….AppImage ~/Games/Hookshot`.
 
 From the command line: `./Hookshot-<version>-x86_64.AppImage --cli --nup ~/your-game.nup --out ~/Games/Hookshot`
 (the same options as `make_game.py`).

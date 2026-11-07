@@ -3,7 +3,8 @@
 # nothing made from it is in it: the game is built from the player's own copy, as on Windows.
 #
 #   scripts/linux/deps.sh        (first: the compiler, Python, FFmpeg, SDL2, headers into build-linux/deps)
-#   scripts/linux/appimage.sh    -> build-linux/Hookshot-x86_64.AppImage
+#   scripts/linux/appimage.sh    -> build-linux/Hookshot-<version>-x86_64.AppImage          (the builder)
+#                                -> build-linux/Hookshot-launcher-<version>-x86_64.AppImage (starts the built game)
 #
 # Built on the oldest system it is for (CI: Ubuntu 22.04): the sysroot it carries is that system's C library, so the
 # game it builds runs on glibc 2.35 and newer. work/ (hot_funcs.txt, hot_order.txt, hookshot_pieces.prof,
@@ -108,3 +109,18 @@ OUT=$B/Hookshot-$VERSION-x86_64.AppImage
 rm -f "$OUT"
 ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 "$DEPS/appimagetool" --comp zstd "$APPDIR" "$OUT"
 echo "$OUT: $(du -h "$OUT" | cut -f1)"
+
+# The launcher is only the start script, the menu entry and the icon. It runs the game the builder
+# already wrote. It does not carry the compiler.
+LAD=$B/LauncherDir
+rm -rf "$LAD"
+mkdir -p "$LAD/usr/share/icons/hicolor/256x256/apps"
+cp builder/linux/hookshot-launch "$LAD/AppRun"
+chmod +x "$LAD/AppRun"
+cp builder/linux/hookshot-launcher.desktop "$LAD/"
+cp assets/hookshot.png "$LAD/hookshot.png"
+cp assets/hookshot.png "$LAD/usr/share/icons/hicolor/256x256/apps/hookshot.png"
+LOUT=$B/Hookshot-launcher-$VERSION-x86_64.AppImage
+rm -f "$LOUT"
+ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 "$DEPS/appimagetool" --comp zstd "$LAD" "$LOUT"
+echo "$LOUT: $(du -h "$LOUT" | cut -f1)"

@@ -40,6 +40,7 @@ on:
       - gpu/vk/vk_draw.h
       - tests/test_ub_memo.py
       - tests/test_ub_gap.py
+      - tests/test_bind_memo.py
       - tests/test_shader_census_cmd.py
       - gpu/vk/vk_shader.cpp
       - tests/test_same_draw.py
@@ -101,6 +102,7 @@ on:
       - gpu/vk/vk_draw.h
       - tests/test_ub_memo.py
       - tests/test_ub_gap.py
+      - tests/test_bind_memo.py
       - tests/test_shader_census_cmd.py
       - gpu/vk/vk_shader.cpp
       - tests/test_same_draw.py
@@ -200,6 +202,9 @@ jobs:
       - name: Check a repeated uniform word is not read again
         if: runner.os == 'Linux'
         run: python -I -B tests/test_ub_memo.py
+      - name: Check a repeated read bind is not looked up again
+        if: runner.os == 'Linux'
+        run: python -I -B tests/test_bind_memo.py
       - name: Check the shader list's text encoding
         run: python -I -B tests/test_shader_census_cmd.py
       - name: Check the build's version stamp

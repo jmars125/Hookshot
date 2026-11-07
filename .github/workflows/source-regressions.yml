@@ -55,6 +55,10 @@ on:
       - gpu/vk/movie_upscale_policy.h
       - tests/test_movie_upscale_policy.cpp
       - tests/test_movie_upscale_policy.py
+      - host/display.c
+      - host/posix/display_sdl.c
+      - host/nn_hid.c
+      - tests/test_alt_enter.py
       - nx2/test_import_windows.py
       - tests/test_handle_lookup.py
       - builder/linux/hookshot-launch
@@ -117,6 +121,10 @@ on:
       - gpu/vk/movie_upscale_policy.h
       - tests/test_movie_upscale_policy.cpp
       - tests/test_movie_upscale_policy.py
+      - host/display.c
+      - host/posix/display_sdl.c
+      - host/nn_hid.c
+      - tests/test_alt_enter.py
       - nx2/test_import_windows.py
       - tests/test_handle_lookup.py
       - builder/linux/hookshot-launch
@@ -227,6 +235,9 @@ jobs:
       - name: Check movie upscale fallback policy
         if: runner.os == 'Linux'
         run: python -I -B tests/test_movie_upscale_policy.py
+      - name: Check Alt+Enter is fullscreen, not Plus
+        if: runner.os == 'Linux'
+        run: python -I -B tests/test_alt_enter.py
       - name: Check import windows
         if: runner.os == 'Linux'
         run: python -I -B nx2/test_import_windows.py --cxx g++

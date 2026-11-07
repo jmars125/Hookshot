@@ -449,6 +449,15 @@ void menu_tick() {
 
 void menu_record(VkCommandBuffer cmd, VkImage dst, int slot, uint32_t w, uint32_t h) {
     if (opts.show_fps) {
+        // The game image was just blitted (or cleared) into dst. Its write must
+        // finish before the FPS pixels overwrite it; command order alone does
+        // not order these transfer writes. The menu below has its own barrier.
+        VkMemoryBarrier2 mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+        mb.srcStageMask = mb.dstStageMask = VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT;
+        mb.srcAccessMask = mb.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        VkDependencyInfo di{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+        di.memoryBarrierCount = 1, di.pMemoryBarriers = &mb;
+        vkCmdPipelineBarrier2(cmd, &di);
         std::unique_lock lk(bmp_mu);
         const uint32_t fw = fps_bmp.w;
         lk.unlock();

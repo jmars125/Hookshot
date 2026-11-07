@@ -93,6 +93,8 @@ You need a 64-bit x86 PC with glibc 2.35 or newer (Ubuntu 22.04, Debian 12, Fedo
 driver with mesh shaders (Mesa or NVIDIA), and the same memory and disk space as on Windows. The build's own files go
 to `~/.cache/hookshot-builder`. Saves go in `$XDG_DATA_HOME/hookshot` (`~/.local/share/hookshot`). A `user` folder
 beside the game from an earlier build is moved there once. `HOOKSHOT_JOBS` sets how many files compile at once.
+Switches to test (`RX_VK_NOOPT=1` and the others) go in `hookshot_env.txt` beside the game, one `NAME=VALUE` a line,
+as on Windows.
 
 Building it yourself without the AppImage: `clang` and `lld` (LLVM 23 or newer reads the play profile; an older one
 builds without it), Python 3 with `lz4`, `numpy`, `capstone`, `unicorn` and `zstandard`, FFmpeg's development files

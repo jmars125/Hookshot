@@ -259,6 +259,35 @@ static const char *saves_dir(const char *beside) {
 }
 #endif
 
+/* hookshot_env.txt beside the game: NAME=VALUE lines set as environment variables before anything reads them, for the
+   switches players are asked to test (RX_VK_NOOPT and the rest). Lines starting with # are notes. On Linux this runs
+   before the window, so HOS_HEADLESS and HOS_WINDOW_SIZE are already set when the window is made. */
+static void load_hookshot_env(void) {
+    char path[MAX_PATH + 32];
+    DWORD n = GetModuleFileNameA(NULL, path, MAX_PATH);
+    while (n && path[n - 1] != 92 && path[n - 1] != 47) n--;
+    memcpy(path + n, "hookshot_env.txt", 17);
+    FILE *f = fopen(path, "r");
+    if (!f) return;
+    char line[512];
+    while (fgets(line, sizeof line, f)) {
+        char *s = line;
+        if ((unsigned char)s[0] == 0xEF && (unsigned char)s[1] == 0xBB && (unsigned char)s[2] == 0xBF) s += 3;   /* (Notepad's BOM) */
+        while (*s == ' ' || *s == 9) s++;
+        size_t len = strlen(s);
+        while (len && (s[len - 1] == 10 || s[len - 1] == 13 || s[len - 1] == ' ' || s[len - 1] == 9)) s[--len] = 0;
+        if (!len || *s == '#' || !strchr(s, '=')) continue;
+#ifdef _WIN32
+        _putenv(s);
+#else
+        char *eq = strchr(s, '=');
+        *eq = 0;
+        setenv(s, eq + 1, 1);
+#endif
+    }
+    fclose(f);
+}
+
 float hos_aspect_ratio = 0;   /* (the window's default shape: host/display.c) */
 #ifdef _WIN32
 int main(int argc, char **argv) {
@@ -266,27 +295,7 @@ int main(int argc, char **argv) {
 static int game_main(int argc, char **argv) {
 #endif
 #ifdef _WIN32
-    {   // (hookshot_env.txt beside the game: NAME=VALUE lines set as environment variables before anything reads them, for the switches
-        // players are asked to test. Lines starting with # are notes)
-        char path[MAX_PATH + 32];
-        DWORD n = GetModuleFileNameA(NULL, path, MAX_PATH);
-        while (n && path[n - 1] != 92 && path[n - 1] != 47) n--;
-        memcpy(path + n, "hookshot_env.txt", 17);
-        FILE *f = fopen(path, "r");
-        if (f) {
-            char line[512];
-            while (fgets(line, sizeof line, f)) {
-                char *s = line;
-                if ((unsigned char)s[0] == 0xEF && (unsigned char)s[1] == 0xBB && (unsigned char)s[2] == 0xBF) s += 3;   // (Notepad's BOM)
-                while (*s == ' ' || *s == 9) s++;
-                size_t len = strlen(s);
-                while (len && (s[len - 1] == 10 || s[len - 1] == 13 || s[len - 1] == ' ' || s[len - 1] == 9)) s[--len] = 0;
-                if (!len || *s == '#' || !strchr(s, '=')) continue;
-                _putenv(s);
-            }
-            fclose(f);
-        }
-    }
+    load_hookshot_env();
     {   // (the whole process, not only the window's thread: the renderer asks the window's size from its own, and on a 4K screen at 150%
         // Windows answered such a thread 2560 x 1440: the picture was that size, in the corner of the window. Hookshot issues 15, 18, 20)
         typedef BOOL(WINAPI * SetAware)(void *);
@@ -458,6 +467,7 @@ static DWORD WINAPI game_thread(void *p) {
 int main(int argc, char **argv) {
     int hos_display_init(void);
     void hos_display_loop(void);
+    load_hookshot_env();
     game_argc = argc, game_argv = argv;
     const int window = hos_display_init();
     HANDLE t = CreateThread(NULL, 64u << 20, game_thread, NULL, 0, NULL);

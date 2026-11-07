@@ -216,7 +216,7 @@ static DWORD WINAPI display_main(void *p) {
    shaders were being prepared (80 s on a first start) was lost: that run had no ambient light, black foliage and dark characters. The
    game itself goes on starting as it did: held at the start instead, it left holes in the ground */
 void hos_renderer_wait(void) {
-    if (getenv("HOS_NO_RENDERER_WAIT")) return;   /* (a test: the game's first GPU work no longer waits for the renderer, as before lighting-fix) */
+    { const char *e = getenv("HOS_NO_RENDERER_WAIT"); if (e && atoi(e) != 0) return; }   /* (=0: the wait, as without it) */   /* (a test: the game's first GPU work no longer waits for the renderer, as before lighting-fix) */
     if (renderer_up) WaitForSingleObject(renderer_up, INFINITE);
 }
 

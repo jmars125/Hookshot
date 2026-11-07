@@ -40,7 +40,13 @@
 #include "shader_recompiler/backend/spirv/mma_layout.h"
 
 namespace mkwvk {
+uint32_t stage_cbuf_word(const NvnState& s, const Stage& st, uint32_t index, uint32_t offset);   // (vk_shader.cpp)
 namespace {
+
+bool no_a2c() {   // (RX_VK_NO_A2C, read once: it was a getenv on every alpha-to-coverage draw, the foliage's)
+    static const bool v = getenv("RX_VK_NO_A2C") != nullptr;
+    return v;
+}
 
 /// 32 lanes, where the stage can be held to it (workgroup_x: a compute stage's width, which full subgroups must divide)
 void pin_subgroup(VkPipelineShaderStageCreateInfo& st, uint32_t workgroup_x = 0) {
@@ -270,7 +276,7 @@ VkFormat supported_vertex_format(VkFormat f) {
 }
 
 // ---- pipeline layouts and pipelines ----
-constexpr uint32_t kPushSize = Shader::Backend::SPIRV::GUEST_PAGES_PUSH_OFFSET + 8;   // (+ the guest page table's address)
+constexpr uint32_t kPushSize = Shader::Backend::SPIRV::MESH_FIRST_PUSH_OFFSET + 8;   // (+ the guest page table's address, a task draw's first)
 
 void ensure_layout(Program& p) {
     if (p.layout) return;
@@ -314,6 +320,7 @@ void ensure_layout(Program& p) {
     for (const Stage& st : p.stages)   // (the page table)
         p.uses_push |= (st.vk_stage & (VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_MESH_BIT_EXT)) &&
                        st.info.uses_global_memory;
+    for (const Stage& st : p.stages) p.uses_push |= (st.vk_stage & VK_SHADER_STAGE_TASK_BIT_EXT) != 0;   // (its first workgroup)
     std::atomic_thread_fence(std::memory_order_release);   // (the layout last: a thread that sees it sees the rest)
     p.layout = layout;
 }
@@ -416,6 +423,7 @@ bool depth_aspect(VkFormat f) {
 }
 
 // (hookshot) A driver's compiler that faults on a shader (amdvlk64.dll on a mesh program, Hookshot issue 26) costs that one draw, not the game
+#ifdef _WIN32
 __declspec(noinline) VkResult guarded_graphics(VkPipelineCache cache, const VkGraphicsPipelineCreateInfo* ci, VkPipeline* pl) {
     __try {
         return vkCreateGraphicsPipelines(dev.device, cache, 1, ci, nullptr, pl);
@@ -430,6 +438,15 @@ __declspec(noinline) VkResult guarded_compute(VkPipelineCache cache, const VkCom
         return (VkResult)-77;   // (a fault in the driver, told apart from what it returns)
     }
 }
+#else
+// (linux: no structured exceptions; the driver is called as it is)
+VkResult guarded_graphics(VkPipelineCache cache, const VkGraphicsPipelineCreateInfo* ci, VkPipeline* pl) {
+    return vkCreateGraphicsPipelines(dev.device, cache, 1, ci, nullptr, pl);
+}
+VkResult guarded_compute(VkPipelineCache cache, const VkComputePipelineCreateInfo* ci, VkPipeline* pl) {
+    return vkCreateComputePipelines(dev.device, cache, 1, ci, nullptr, pl);
+}
+#endif
 VkPipeline build_graphics(const Program& p, const NvnState& s, const Targets& at, VkPrimitiveTopology topo, int part = -1);
 
 /// A target's write mask: the state's channel mask, nothing for a target the fragment shader leaves unwritten
@@ -439,7 +456,11 @@ uint32_t target_write_mask(const Program& p, const NvnState& s, int i) {
     for (const Stage& st : p.stages)
         if (st.vk_stage == VK_SHADER_STAGE_FRAGMENT_BIT) fs = &st;
     if (!fs || i >= 8 || !fs->info.stores_frag_color[i]) return 0;
-    return (s.chmask.mask >> (4 * i)) & 0xF;
+    // (amd-fix, Lichii #353) and none of the components it does not write: Vulkan writes undefined values there, AMD its
+    // export registers' garbage (NaN and saturated pixels above OoT's horizon, which the bloom spread). RX_VK_ALL_COMPONENTS=1: off
+    static const bool all = getenv("RX_VK_ALL_COMPONENTS") != nullptr;
+    const uint32_t written = fs->info.frag_color_components[i];
+    return (s.chmask.mask >> (4 * i)) & 0xF & (all || !written ? 0xFu : (uint32_t)written);
 }
 thread_local const Program* cur_program = nullptr;   // (the draw's, for its dynamic write masks)
 
@@ -707,7 +728,7 @@ VkPipeline build_graphics(const Program& p, const NvnState& s, const Targets& at
     if (dev.provoking_vertex) rs.pNext = &pvs;
     VkPipelineMultisampleStateCreateInfo ms{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
     ms.rasterizationSamples = at.samples;
-    ms.alphaToCoverageEnable = s.ms.a2c && !dev.eds3_a2c && !getenv("RX_VK_NO_A2C");
+    ms.alphaToCoverageEnable = s.ms.a2c && !dev.eds3_a2c && !no_a2c();
     VkPipelineDepthStencilStateCreateInfo ds{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
     VkPipelineColorBlendAttachmentState cb[8]{};
     for (int i = 0; i < at.n; i++) {
@@ -796,6 +817,11 @@ VkPipeline build_graphics(const Program& p, const NvnState& s, const Targets& at
         }
     }
     VkPipeline pl = VK_NULL_HANDLE;
+    {   // (local) RX_VK_NOOPT=1: build every pipeline without the driver's optimizer. AMD's proprietary compiler crashes
+        // (-13 here) or takes minutes on some Ocarina shaders it builds in seconds unoptimized (Lichii #200, #210).
+        static const bool noopt = getenv("RX_VK_NOOPT") != nullptr;
+        if (noopt) ci.flags |= VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT;
+    }
     const VkResult r = guarded_graphics(part >= 0 ? VK_NULL_HANDLE : pcache, &ci, &pl);
     if (part >= 0) {
         if (r != VK_SUCCESS) {
@@ -855,6 +881,21 @@ VkSampler sampler_for(int id, bool compare) {
     ci.maxAnisotropy = std::clamp(p.aniso, 1.0f, dev.props.limits.maxSamplerAnisotropy);
     ci.compareEnable = compare && p.cmp_mode != 0;
     ci.compareOp = compare_op(p.cmp_func);
+    {   // (amd-fix) A depth-reference sample through a sampler that does not compare is undefined in Vulkan: NVIDIA's driver
+        // compares anyway, AMD's does not (OoT samples this way: compare mode 0, function 0). A shader that compares gets
+        // a comparing sampler: the game's function when it set one, LEQUAL otherwise. RX_VK_DREF_FROM_SAMPLER=1: as before
+        static const bool as_before = getenv("RX_VK_DREF_FROM_SAMPLER") != nullptr;
+        if (compare && !as_before && !ci.compareEnable) {
+            ci.compareEnable = VK_TRUE;
+            ci.compareOp = p.cmp_func >= 1 && p.cmp_func <= 8 ? compare_op(p.cmp_func) : VK_COMPARE_OP_LESS_OR_EQUAL;
+        }
+        static std::mutex lm;
+        static std::unordered_set<uint32_t> told;
+        std::lock_guard lg(lm);
+        if (compare && told.size() < 16 && told.insert((uint32_t)p.cmp_mode << 8 | p.cmp_func).second)
+            logf("vk: depth-compare sampler: the game's compare mode %u function %u -> compare %s op %d", p.cmp_mode, p.cmp_func,
+                 ci.compareEnable ? "on" : "off", (int)ci.compareOp);
+    }
     ci.minLod = std::max(0.0f, p.lod_min);
     // (no mipmap filter: the base level only, as NVN samples it)
     ci.maxLod = (p.minf == NVN_MIN_FILTER_NEAREST || p.minf == NVN_MIN_FILTER_LINEAR) ? ci.minLod + 0.25f
@@ -1294,16 +1335,35 @@ void build_descriptors(const NvnState& s, const Program& p) {
             const size_t first = dw.bufs.size();
             for (uint32_t k = 0; k < d.count; k++) {
                 const uint32_t off = d.cbuf_offset + k * 16;
-                const uint64_t addr = driver_bank_word(s, (int)d.cbuf_index, ns, off) |
-                                      (uint64_t)driver_bank_word(s, (int)d.cbuf_index, ns, off + 4) << 32;
-                const uint64_t size = driver_bank_word(s, (int)d.cbuf_index, ns, off + 8);
-                const uint64_t base = addr & ~(salign - 1), n = std::max<uint64_t>(((size + (addr - base)) + 3) & ~3ull, 16);
+                // (AyyBeeDee20738, PR 138) through the stage's banks as its program reads them: a storage buffer named in c1 (the
+                // program's own constants) read 0 from the driver banks and was bound to nothing
+                const uint64_t addr = stage_cbuf_word(s, st, d.cbuf_index, off) |
+                                      (uint64_t)stage_cbuf_word(s, st, d.cbuf_index, off + 4) << 32;
+                const uint64_t size = stage_cbuf_word(s, st, d.cbuf_index, off + 8);
+                const uint64_t base = addr & ~(salign - 1);
+                uint64_t n = std::max<uint64_t>(((size + (addr - base)) + 3) & ~3ull, 16);
+                {   // (hookshot, RX_VK_SSBO_STRETCH=1: a read-only buffer bound to its pool's end, up to 64 MB. Lichii bf3f395c9: the grass's
+                    // task and mesh programs read records 12-18 MB past a base whose size word said less, read 0 and culled every blade)
+                    static const bool stretch = getenv("RX_VK_SSBO_STRETCH") != nullptr;
+                    if (stretch && !d.is_written && addr && d.count == 1)
+                        if (const uint64_t end = gpu_pool_end(base); end > base + n)
+                            n = std::max<uint64_t>(n, std::min<uint64_t>(end - base, 64ull << 20) & ~uint64_t{3});
+                }
                 const auto t0 = std::chrono::steady_clock::now();
                 // (hookshot) a storage buffer table's entries (count > 1, Info::global_tables): the ones past the table's
                 // end are whatever the constant buffer holds there, bound only when they look like a buffer
                 const bool plausible = d.count == 1 || (size && size <= (256ull << 20) && host->gpu_guest(base));
                 BufferRef b = addr && plausible ? gpu_buffer_bind(base, n, d.is_written) : BufferRef{};
-                if (d.count > 1) {   // (hookshot) a table entry bound one frame and not the next (or back), 60 of them
+                // (AyyBeeDee20738, PR 138) a table entry's region that does not fit its pool this moment bound nothing, and the next
+                // frame bound it again: its reads flipped between the data and 0, the picture between bright and dark. Smaller,
+                // down to 1 MB, rather than nothing
+                if (!b.buffer && d.count > 1 && addr && plausible) {
+                    uint64_t m = n;
+                    if (const uint64_t end = gpu_pool_end(base); end > base) m = std::min<uint64_t>(m, end - base);
+                    for (; !b.buffer && m >= (1ull << 20); m = (m / 2) & ~3ull) b = gpu_buffer_bind(base, m, d.is_written);
+                }
+                static std::atomic<int> table_told{0};   // (the tracker below stops with its log: a mutex and a map per entry per draw)
+                if (d.count > 1 && table_told.load(std::memory_order_relaxed) < 60) {   // (hookshot) a table entry bound one frame and not the next (or back), 60 of them
                     static std::mutex tm;
                     static std::unordered_map<uint64_t, std::pair<bool, uint64_t>> was;   // -> bound, its address
                     static int told;
@@ -1312,7 +1372,7 @@ void build_descriptors(const NvnState& s, const Program& p) {
                     std::lock_guard lk(tm);
                     auto it = was.find(key);
                     if (it != was.end() && it->second.first != bound && told < 60) {
-                        told++;
+                        told++, table_told++;
                         logf("vk: table entry %s at frame %llu: prog %016llx ssbo %u of %u (c%u+%#x) addr %#llx size %#llx "
                              "(before %#llx)", bound ? "bound again" : "UNBOUND", (unsigned long long)texture_frame_no(),
                              (unsigned long long)p.key, k, d.count, (unsigned)d.cbuf_index, off, (unsigned long long)addr,
@@ -1346,7 +1406,7 @@ void build_descriptors(const NvnState& s, const Program& p) {
                 if (dump_on() && dump_ssbo_wanted(p.key)) {   // (RX_VK_DUMP_SSBO: where it is, and what the CPU's memory holds)
                     std::vector<uint32_t> words((size_t)std::min<uint64_t>(n, 65536) / 4);
                     size_t nz = 0;
-                    const bool read = addr && !words.empty() && host->gpu_read(base, words.data(), words.size() * 4);
+                    const bool read = b && addr && !words.empty() && host->gpu_read(base, words.data(), words.size() * 4);
                     if (read)
                         for (uint32_t w : words) nz += w != 0;
                     logf("vk: dump ssbo %03d prog %016llx stage %d sb%u (c%u+%#x%s): addr %#llx size %#llx bound %s; guest "
@@ -1359,7 +1419,7 @@ void build_descriptors(const NvnState& s, const Program& p) {
                     static const char* peek = getenv("RX_VK_PEEK_PROG");
                     static std::atomic<int> peeked{0};
                     char hex[24];
-                    snprintf(hex, sizeof hex, "%016llx", (unsigned long long)p.key);
+                    if (peek) snprintf(hex, sizeof hex, "%016llx", (unsigned long long)p.key);   // (only with the switch: once per buffer per draw)
                     if (peek && addr && !strncmp(hex, peek, strlen(peek)) && peeked++ < 60) {
                         uint32_t w[8]{}, q[8]{};
                         const bool ok = host->gpu_read(addr, w, sizeof w);
@@ -1516,6 +1576,8 @@ void draw_skip_report(double frames) { skip_report_impl(frames); }
 void descriptors_disturbed() {
     pushed[0].cmd = pushed[1].cmd = VK_NULL_HANDLE;
 }
+bool mesh_args_ready();             // (below: the task programs' firsts)
+extern uint64_t mesh_args_address;
 namespace {
 
 void write_words(const VkWriteDescriptorSet& w, std::vector<uint64_t>& out) {
@@ -1600,6 +1662,10 @@ void push_constants(VkCommandBuffer cmd, const Program& p, const Targets* at) {
     {   // (guest memory's page table, for the pointers compute, task and mesh stages follow)
         static const uint64_t pages = memory_guest_pages();
         std::memcpy(data + Shader::Backend::SPIRV::GUEST_PAGES_PUSH_OFFSET, &pages, 8);
+    }
+    if (at && mesh_args_ready()) {   // (a task program's firsts: entry 0's 0 until its draw says otherwise, never address 0)
+        const uint64_t firsts = mesh_args_address + 12;
+        std::memcpy(data + Shader::Backend::SPIRV::MESH_FIRST_PUSH_OFFSET, &firsts, 8);
     }
     if (p.uses_render_area && at) {
         // (at the block's own offset, 0, as Eden pushes it: the SPIR-V back end declares RenderAreaInfo at offset 0,
@@ -1952,7 +2018,7 @@ void dynamic_state(VkCommandBuffer cmd, const NvnState& s, const Targets& at, Vk
     d.poly = s.poly.mode == 0 ? VK_POLYGON_MODE_POINT : s.poly.mode == 1 ? VK_POLYGON_MODE_LINE : VK_POLYGON_MODE_FILL;
     static const bool fp_lines = getenv("RX_VK_FOOTPRINT_LINES") != nullptr;   // (the footprints as wireframes)
     if (fp && fp_lines) d.poly = VK_POLYGON_MODE_LINE;
-    d.clamp = s.depth_clamp, d.a2c = s.ms.a2c != 0 && !getenv("RX_VK_NO_A2C");
+    d.clamp = s.depth_clamp, d.a2c = s.ms.a2c != 0 && !no_a2c();
     d.n = dev.eds3_blend ? at.n : 0;
     for (int i = 0; i < d.n; i++) {
         const nvn_blend_st& b = s.blend[i];
@@ -1997,7 +2063,7 @@ void dynamic_state(VkCommandBuffer cmd, const NvnState& s, const Targets& at, Vk
     if (DYN_CHANGED(front)) vkCmdSetFrontFace(cmd, d.front);
     if (!mesh) {
         if (DYN_CHANGED(topo)) vkCmdSetPrimitiveTopology(cmd, d.topo);
-        if (DYN_CHANGED(restart)) vkCmdSetPrimitiveRestartEnable(cmd, d.restart);
+        if (DYN_CHANGED(restart) || last_dyn.topo == VK_PRIMITIVE_TOPOLOGY_MAX_ENUM) vkCmdSetPrimitiveRestartEnable(cmd, d.restart);
     }
     if (DYN_CHANGED(dt)) vkCmdSetDepthTestEnable(cmd, d.dt);
     if (DYN_CHANGED(dw)) vkCmdSetDepthWriteEnable(cmd, d.dw);
@@ -2451,9 +2517,11 @@ void probe_draw(const NvnState& s, const Program& p, int pass_draws) {
         for (const auto& d : st.info.storage_buffers_descriptors) {
             for (uint32_t k = 0; k < d.count && k < 8; k++) {
                 const uint32_t off = d.cbuf_offset + k * 16;
-                const uint64_t addr = driver_bank_word(s, (int)d.cbuf_index, ns, off) |
-                                      (uint64_t)driver_bank_word(s, (int)d.cbuf_index, ns, off + 4) << 32;
-                const uint64_t size = driver_bank_word(s, (int)d.cbuf_index, ns, off + 8);
+                // (amd-fix) through the stage's banks as its program reads them: a storage buffer named in c1 (the program's
+                // own constants) read 0 from the driver banks and was bound to nothing
+                const uint64_t addr = stage_cbuf_word(s, st, d.cbuf_index, off) |
+                                      (uint64_t)stage_cbuf_word(s, st, d.cbuf_index, off + 4) << 32;
+                const uint64_t size = stage_cbuf_word(s, st, d.cbuf_index, off + 8);
                 static thread_local std::vector<uint8_t> sb;
                 const uint64_t n = std::min<uint64_t>(size, 4ull << 20);
                 sb.resize((size_t)n);
@@ -2529,10 +2597,22 @@ void probe_log(uint64_t f) {
     }
 }
 
+// (amd-fix, diagnosis) in a frame dump, the indirect mesh draws' arguments as the GPU has them: noted at the draw (inside
+// the pass, where no copy can be recorded) and copied out once the pass ends ("dump buffer ... mesh indirect")
+thread_local std::vector<std::pair<uint64_t, uint64_t>> dump_mesh_indirect;   // (program key, indirect address)
 void end_pass(VkCommandBuffer cmd) {
     if (!pass.open) return;
     vkCmdEndRendering(cmd);
     pass.open = false;
+    if (dump_on() && !dump_mesh_indirect.empty()) {
+        for (const auto& [key, addr] : dump_mesh_indirect) {
+            const BufferRef r = gpu_buffer_bind(addr, 16, false);
+            char what[80];
+            snprintf(what, sizeof what, "mesh indirect prog %016llx at %#llx", (unsigned long long)key, (unsigned long long)addr);
+            if (r.buffer) dump_buffer(cmd, r.buffer, r.offset, 16, what);
+        }
+        dump_mesh_indirect.clear();
+    }
     if (probe_on())
         for (int i = 0; i < pass.n; i++)
             if (pass.color[i] && pass.tex[i]) probe_image(cmd, pass.tex[i], pass.level[i], pass.layer[i], pass.prog, 'p', pass.draws);
@@ -2722,22 +2802,35 @@ void exposure_log_dump(const char* why) {
 // with no error. They are most of the game's vegetation: the forest's trees, ferns and grass (GPU culling writes their counts, so they can only
 // be moved on the GPU): each count is copied into this buffer of (count, 1, 1) just before its draw. The GPU runs the copies and draws in
 // order, so a slot used again is safe. A first other than 0 has no Vulkan counterpart.
-constexpr uint32_t kMeshArgs = 1u << 16;
+constexpr uint32_t kMeshArgs = 1u << 18;   // (a ring: entries are reused 262144 draws on, frames after the GPU read them)
 VkBuffer mesh_args_buffer = VK_NULL_HANDLE;
 VmaAllocation mesh_args_alloc = nullptr;
 uint32_t* mesh_args_words = nullptr;
+uint64_t mesh_args_address = 0;   // (its device address: a task program reads its draw's first workgroup at + 12, + 16 per draw)
+// (hookshot) Indirect mesh draws' arguments, 16 bytes each as Vulkan takes them with the first after: {count, 1, 1, first}. NVN's are
+// {count, 0, 0, first}: as they lay, every foliage draw had no workgroups in y and z and drew nothing. Entry 0 stays {0, 1, 1, 0}: the
+// first of draws that have none
 bool mesh_args_ready() {
     static const bool ok = [] {
         void* mapped = nullptr;
-        if (!create_buffer((uint64_t)kMeshArgs * 12, VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, true, mesh_args_buffer,
-                           mesh_args_alloc, &mapped) || !mapped)
+        if (!create_buffer((uint64_t)kMeshArgs * 16,
+                           VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, true,
+                           mesh_args_buffer, mesh_args_alloc, &mapped) || !mapped)
             return false;
         uint32_t* w = (uint32_t*)mapped;
         mesh_args_words = w;
-        for (uint32_t i = 0; i < kMeshArgs; i++) w[i * 3] = 0, w[i * 3 + 1] = 1, w[i * 3 + 2] = 1;
-        return true;
+        for (uint32_t i = 0; i < kMeshArgs; i++) w[i * 4] = 0, w[i * 4 + 1] = 1, w[i * 4 + 2] = 1, w[i * 4 + 3] = 0;
+        VkBufferDeviceAddressInfo da{VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO};
+        da.buffer = mesh_args_buffer;
+        mesh_args_address = vkGetBufferDeviceAddress(dev.device, &da);
+        return mesh_args_address != 0;
     }();
     return ok;
+}
+uint32_t mesh_args_take(uint32_t n) {   // (n entries of the ring, never entry 0)
+    static std::atomic<uint32_t> next{1};
+    const uint32_t at = next.fetch_add(n) % (kMeshArgs - n);
+    return at + 1;
 }
 
 void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
@@ -2789,27 +2882,39 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
         // sampling code and the cause is still open. It was taken off this list once after a few clean runs: it had not gone. 0 lost
         // of 8 first starts without it, against 7 of 14 with it)
         static const char* skip = !getenv("RX_VK_SKIP_PROG") ? "53509044401d78d2" : strcmp(getenv("RX_VK_SKIP_PROG"), "-") ? getenv("RX_VK_SKIP_PROG") : nullptr;
-        if (skip) {
-            char hex[24];
-            snprintf(hex, sizeof hex, "%016llx", (unsigned long long)cp->key);
-            for (const char* q = skip; *q;) {
+        // (the list parsed once into key prefixes: it was a snprintf and a string compare on every draw)
+        static const std::vector<std::pair<uint64_t, uint64_t>> skip_keys = [] {   // (value, mask) of each prefix
+            std::vector<std::pair<uint64_t, uint64_t>> v;
+            const char* list = !getenv("RX_VK_SKIP_PROG") ? "53509044401d78d2" : strcmp(getenv("RX_VK_SKIP_PROG"), "-") ? getenv("RX_VK_SKIP_PROG") : "";
+            for (const char* q = list; *q;) {
                 const char* e = q;
                 while (*e && *e != ',') e++;
-                if (e > q && !strncmp(hex, q, (size_t)(e - q))) {
-                    static std::atomic<int> told{0};
-                    if (told++ < 8) logf("vk: draws of program %s left out (RX_VK_SKIP_PROG); its code:%s", hex, program_code_keys(s).c_str());
-                    return;
+                const size_t n = std::min<size_t>((size_t)(e - q), 16);
+                if (n) {
+                    const uint64_t value = strtoull(std::string(q, n).c_str(), nullptr, 16) << (4 * (16 - n));
+                    const uint64_t mask = n == 16 ? ~0ull : ~(~0ull >> (4 * n));
+                    v.push_back({value, mask});
                 }
                 q = *e ? e + 1 : e;
             }
-        }
+            return v;
+        }();
+        for (const auto& [value, mask] : skip_keys)
+            if ((cp->key & mask) == value) {
+                static std::atomic<int> told{0};
+                if (told++ < 8) logf("vk: draws of program %016llx left out (RX_VK_SKIP_PROG); its code:%s", (unsigned long long)cp->key,
+                                     program_code_keys(s).c_str());
+                return;
+            }
     }
     // Not ready (translating, or its pipeline building): left out of the frame when its targets hold an earlier
     // frame's picture already, which shows for a frame without it; waited for otherwise (a pass drawn once, a target
     // made this frame), as totk-pc-recomp's TOTK_PIPE_SKIP rule. RX_VK_PIPE_WAIT=1: always waited for.
     // (waited for by default: a draw left out showed as missing geometry in races, where many programs are new;
     // RX_VK_PIPE_SKIP=1: left out when its targets hold an earlier frame's picture, as before)
-    static const bool always_wait = getenv("RX_VK_PIPE_SKIP") == nullptr;
+    // (hookshot: left out by default. Waiting, Ocarina froze 0.2-3 s at each area's first new programs, the most reported stutter;
+    // RX_VK_PIPE_SKIP=0: waited for, as mkw-recomp needs)
+    static const bool always_wait = getenv("RX_VK_PIPE_SKIP") && atoi(getenv("RX_VK_PIPE_SKIP")) == 0;
     const bool may_skip = !always_wait && targets_persistent(at);
     auto wait_for = [&](const std::atomic<bool>& ready) {
         const auto t0 = std::chrono::steady_clock::now();
@@ -2907,7 +3012,8 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
     const uint16_t writes = draw_hazards(cmd, p, s, at);
     BufferRef mesh_args{};
     uint32_t mesh_args_at = 0;
-    static const bool mesh_rewrite = getenv("RX_VK_MESH_ARGS") != nullptr;   // (off: the game's foliage culling writes zeros here, see below)
+    // (RX_VK_MESH_ARGS=1: rewritten {count, 1, 1, first}. Off: it did not bring the canopies back, and it ends the pass at each draw)
+    static const bool mesh_rewrite = getenv("RX_VK_MESH_ARGS") && atoi(getenv("RX_VK_MESH_ARGS")) != 0;
     if (mesh_rewrite && d.mesh && d.indirect) {   // (out of the pass: a copy cannot be made in one)
         const uint32_t n = (uint32_t)std::clamp(d.max, 1, (int)kMeshArgs), stride = d.stride ? (uint32_t)d.stride : 8u;
         BufferRef src = gpu_buffer_bind(d.indirect, (uint64_t)n * stride, false);
@@ -2918,23 +3024,24 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
             full_barrier(cmd);
             static thread_local std::vector<VkBufferCopy> copies;
             copies.clear();
-            static std::atomic<uint32_t> next{0};
-            mesh_args_at = next.fetch_add(n) % (kMeshArgs - n + 1);
+            mesh_args_at = mesh_args_take(n);
             static const bool show = getenv("RX_VK_LOG_MESH_INDIRECT") != nullptr;
             if (show && mesh_args_at > 4096 && (mesh_args_at & 4095) < n) {   // (the counts the GPU copied, of the last 4096)
                 uint32_t nonzero = 0, most = 0;
                 uint64_t sum = 0;
                 for (uint32_t i = mesh_args_at - 4096; i < mesh_args_at; i++) {
-                    const uint32_t v = mesh_args_words[i * 3];
+                    const uint32_t v = mesh_args_words[i * 4];
                     nonzero += v != 0, most = std::max(most, v), sum += v;
                 }
                 logf("vk: mesh counts: %u of 4096 not zero, largest %u, sum %llu", nonzero, most, (unsigned long long)sum);
             }
-            for (uint32_t i = 0; i < n; i++)
-                copies.push_back({src.offset + i * stride + word * 4, (VkDeviceSize)(mesh_args_at + i) * 12, 4});
+            for (uint32_t i = 0; i < n; i++) {
+                copies.push_back({src.offset + i * stride + word * 4, (VkDeviceSize)(mesh_args_at + i) * 16, 4});
+                if (stride >= 16) copies.push_back({src.offset + i * stride + 12, (VkDeviceSize)(mesh_args_at + i) * 16 + 12, 4});   // (first)
+            }
             vkCmdCopyBuffer(cmd, src.buffer, mesh_args_buffer, (uint32_t)copies.size(), copies.data());
             full_barrier(cmd);
-            mesh_args = {mesh_args_buffer, (VkDeviceSize)mesh_args_at * 12, (VkDeviceSize)n * 12, 0};
+            mesh_args = {mesh_args_buffer, (VkDeviceSize)mesh_args_at * 16, (VkDeviceSize)n * 16, 0};
         }
     }
     begin_pass(cmd, at);
@@ -3015,6 +3122,28 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
         }
     }
     if (d.mesh) {
+        {   // (amd-fix, diagnosis) RX_VK_LOG_MESH_PROGS=1: each mesh program's first draw and every 600th, with what its
+            // indirect arguments hold in guest memory (0 groups: the culling pass before it left nothing)
+            static const bool per_prog = getenv("RX_VK_LOG_MESH_PROGS") != nullptr;
+            if (dump_on() && d.indirect && dump_mesh_indirect.size() < 256) dump_mesh_indirect.push_back({p.key, d.indirect});
+            if (per_prog) {
+                static std::mutex mm;
+                static std::unordered_map<uint64_t, uint64_t> seen;
+                uint64_t n;
+                {
+                    std::lock_guard lk(mm);
+                    n = seen[p.key]++;
+                }
+                if (n % 600 == 0 && seen.size() < 400) {
+                    uint32_t w[3] = {(uint32_t)d.groups[0], (uint32_t)d.groups[1], (uint32_t)d.groups[2]}, draws = (uint32_t)std::max(d.max, 1);
+                    if (d.indirect) host->gpu_read(d.indirect, w, sizeof w);
+                    if (d.count_addr) host->gpu_read(d.count_addr, &draws, 4);
+                    logf("vk: mesh prog %016llx draw #%llu frame %llu: groups %u %u %u, %u draws (max %d), indirect %#llx count %#llx; codes%s",
+                         (unsigned long long)p.key, (unsigned long long)n, (unsigned long long)texture_frame_no(), w[0], w[1], w[2],
+                         draws, d.max, (unsigned long long)d.indirect, (unsigned long long)d.count_addr, program_code_keys(s).c_str());
+                }
+            }
+        }
         {   // (RX_VK_LOG_MESH_DRAWS=1: how large each is, the largest so far, 400 lines)
             static const bool log_sizes = getenv("RX_VK_LOG_MESH_DRAWS") != nullptr;
             if (log_sizes) {
@@ -3050,12 +3179,25 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
                 mesh_args = gpu_buffer_bind(d.indirect, (uint64_t)std::max(d.max, 1) * std::max(d.stride, 12), false);
                 if (!mesh_args) SKIP_HERE();
             }
-            const uint32_t step = mesh_rewrite ? 12u : (uint32_t)std::max(d.stride, 12);
+            const uint32_t step = mesh_args.buffer == mesh_args_buffer && mesh_args_buffer ? 16u : (uint32_t)std::max(d.stride, 12);
+            if (mesh_args.buffer == mesh_args_buffer && mesh_args_buffer) {   // (the task programs' firsts: this draw's entries)
+                const uint64_t firsts = mesh_args_address + mesh_args.offset + 12;
+                vkCmdPushConstants(cmd, p.layout, p.push_stages, Shader::Backend::SPIRV::MESH_FIRST_PUSH_OFFSET, 8, &firsts);
+            }
             if (cnt && vkCmdDrawMeshTasksIndirectCountEXT)
                 vkCmdDrawMeshTasksIndirectCountEXT(cmd, mesh_args.buffer, mesh_args.offset, cnt.buffer, cnt.offset, d.max, step);
             else
                 vkCmdDrawMeshTasksIndirectEXT(cmd, mesh_args.buffer, mesh_args.offset, (uint32_t)std::max(d.max, 1), step);
         } else {
+            if (mesh_args_ready()) {   // (a direct draw's first: in an entry of its own, or entry 0's 0)
+                uint32_t at = 0;
+                if (d.first_task) {
+                    at = mesh_args_take(1);
+                    mesh_args_words[at * 4 + 3] = (uint32_t)d.first_task;
+                }
+                const uint64_t firsts = mesh_args_address + (uint64_t)at * 16 + 12;
+                vkCmdPushConstants(cmd, p.layout, p.push_stages, Shader::Backend::SPIRV::MESH_FIRST_PUSH_OFFSET, 8, &firsts);
+            }
             vkCmdDrawMeshTasksEXT(cmd, (uint32_t)std::max(d.groups[0], 0), (uint32_t)std::max(d.groups[1], 1),
                                   (uint32_t)std::max(d.groups[2], 1));
         }
@@ -3709,6 +3851,10 @@ void dispatch(VkCommandBuffer cmd, NvnState& s, uint32_t x, uint32_t y, uint32_t
         ci.stage.pName = "main";
         pin_subgroup(ci.stage, p.workgroup[0]);
         ci.layout = p.layout;
+        {   // (local) RX_VK_NOOPT=1, as for graphics pipelines above
+            static const bool noopt = getenv("RX_VK_NOOPT") != nullptr;
+            if (noopt) ci.flags |= VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT;
+        }
         const auto t0 = std::chrono::steady_clock::now();
         if (const VkResult made = guarded_compute(pcache, &ci, &p.compute_pipeline); made != VK_SUCCESS) {
             static std::atomic<int> told{0};
@@ -3729,6 +3875,30 @@ void dispatch(VkCommandBuffer cmd, NvnState& s, uint32_t x, uint32_t y, uint32_t
     if (dump_on())
         logf("vk: dump-in %03d dispatch %ux%ux%u prog %016llx:%s", dump_seq(), x, y, z, (unsigned long long)p.key,
              dump_inputs.c_str());
+    if (dump_on()) {   // (amd-fix, diagnosis) what a dispatch can reach: its storage and uniform buffers, its pointer table
+        char line[1800];
+        int n = snprintf(line, sizeof line, "vk: dump-reach %03d prog %016llx%s:", dump_seq(), (unsigned long long)p.key,
+                         !p.stages.empty() && p.stages[0].info.stores_global_memory ? " (stores global)" : "");
+        for (int i = 0; i < 16 && n < 1700; i++)
+            if (s.ssbo[5][i].addr)
+                n += snprintf(line + n, sizeof line - n, " sb%d %#llx+%#llx", i, (unsigned long long)s.ssbo[5][i].addr,
+                              (unsigned long long)s.ssbo[5][i].size);
+        for (int i = 0; i < 16 && n < 1700; i++)
+            if (s.ubo[5][i].addr)
+                n += snprintf(line + n, sizeof line - n, " ub%d %#llx+%#llx", i, (unsigned long long)s.ubo[5][i].addr,
+                              (unsigned long long)s.ubo[5][i].size);
+        if (!p.stages.empty()) {   // the translated program's own storage bindings: which constant-buffer word names each
+            const auto& sd = p.stages[0].info.storage_buffers_descriptors;
+            for (size_t i = 0; i < sd.size() && n < 1700; i++) {
+                const uint32_t off = sd[i].cbuf_offset;
+                const uint64_t a = stage_cbuf_word(s, p.stages[0], sd[i].cbuf_index, off) |
+                                   (uint64_t)stage_cbuf_word(s, p.stages[0], sd[i].cbuf_index, off + 4) << 32;
+                n += snprintf(line + n, sizeof line - n, " ssbo%zu=c%u+%#x%s%s->%#llx", i, sd[i].cbuf_index, off,
+                              sd[i].is_written ? "w" : "", sd[i].count > 1 ? "[t]" : "", (unsigned long long)a);
+            }
+        }
+        logf("%s", line);
+    }
     // (dispatches after other work wait for it: the WebGPU renderer's dispatches were ordered the same way by
     // wgpu's own tracking, and MKW's compute chains read what the one before wrote)
     static const bool no_order = getenv("RX_VK_NO_DISPATCH_ORDER") != nullptr;

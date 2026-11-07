@@ -10,6 +10,11 @@
    x1.25, shown in the title bar, kept in <user>/mouse_sens.txt); HOS_MOUSE_SENS=<x> sets it, HOS_MOUSE_INVERT_Y=1
    flips up/down.
 
+   Controllers count only while the game's window is in front, like the keyboard, unless the Insert menu's "Controller in
+   background" is on (or HOS_INPUT_BACKGROUND=1; =0 keeps them to the window in front whatever the menu says): then a
+   game streamed from a screen of its own, or left running behind another window, still follows the pad. The keyboard
+   and mouse stay with the window in front either way.
+
    HOS_INPUT_SCRIPT (test runs): timed presses added to the input, "<seconds>:<button>[+<button>...][/<ms held>],..."
    with buttons A B X Y L R ZL ZR PLUS MINUS LS RS LEFT UP RIGHT DOWN and the stick directions LUP LDOWN LLEFT
    LRIGHT RUP RDOWN RLEFT RRIGHT; held 200 ms unless given. Example: "50:A,52:A,80:LUP/4000".
@@ -384,6 +389,12 @@ static void pads_read(uint64_t *buttons, int32_t stick[4]) {
     stick_max(stick, s);
 }
 
+/* Whether the controllers count while another window is in front: HOS_INPUT_BACKGROUND=1 or 0 decides when it is set,
+   otherwise the Insert menu's "Controller in background" row */
+static int pads_in_background(const char *env, int menu) {
+    return env ? atoi(env) != 0 : menu != 0;
+}
+
 static void read_input(uint64_t *buttons, int32_t stick[4]) {
     *buttons = 0;
     memset(stick, 0, 4 * sizeof *stick);
@@ -396,8 +407,15 @@ static void read_input(uint64_t *buttons, int32_t stick[4]) {
        the presses add to theirs. HOS_INPUT_EXCLUSIVE=1: the script alone until 5 s after its last press, as before */
     static int exclusive = -1;
     if (exclusive < 0) exclusive = getenv("HOS_INPUT_EXCLUSIVE") != NULL;
-    if ((exclusive && npresses > 0 && (hos_now_ns() - script_t0) / 1000000 < script_end_ms + 5000) || !game_in_front())
+    if (exclusive && npresses > 0 && (hos_now_ns() - script_t0) / 1000000 < script_end_ms + 5000)
         return;
+    if (!game_in_front()) {   /* (the pads alone, when the player asked for them behind other windows) */
+        static const char *env;
+        static int looked;
+        if (!looked) looked = 1, env = getenv("HOS_INPUT_BACKGROUND");
+        if (pads_in_background(env, rx_option(4, 0))) pads_read(buttons, stick);
+        return;
+    }
     pads_read(buttons, stick);
     /* (the keys of totk-pc-recomp's docs/controls.md, github.com/valentderah/totk-pc-recomp, MIT; plus Enter for
        Plus and IJKL as another camera) */

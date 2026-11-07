@@ -75,7 +75,8 @@ def run(cmd, env=None, on_line=None):
             on_line(line)
     if p.wait():
         why = [l for l in tail if "error:" in l.lower() and "CalledProcessError" not in l]
-        fail("%s stopped: %s" % (os.path.basename(cmd[2]), why[-1] if why else tail[-1] if tail else "no output"))
+        step = next((os.path.basename(c) for c in cmd[1:] if c.endswith(".py")), os.path.basename(cmd[-1]))   # (issue 154: not "-u")
+        fail("%s stopped: %s" % (step, why[-1] if why else tail[-1] if tail else "no output"))
 
 
 def build_id(main):
@@ -392,4 +393,20 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # (an error nobody foresaw is said in the window, not as "The game files could not be read" or "something went wrong" with the reason
+    # only in a console nobody sees: the traceback's last lines go to Show details, its last line to the message)
+    try:
+        for stream in (sys.stdout, sys.stderr):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")   # (-I ignores PYTHONIOENCODING: a path's letters crashed a print)
+            except (AttributeError, ValueError):
+                pass
+        main()
+    except SystemExit:
+        raise
+    except BaseException as e:
+        import traceback
+        print(traceback.format_exc(), flush=True)
+        say("error", "The builder stopped on an error it did not expect: %s: %s. Please send the text under Show details to the "
+            "Hookshot issues page." % (type(e).__name__, str(e)[:300]))
+        sys.exit(1)

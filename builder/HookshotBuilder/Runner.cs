@@ -6,6 +6,9 @@ namespace HookshotBuilder;
 /// Where nx2/make_game.py and its Python are: a "tools" folder beside the app when packaged, or the source tree it sits in.
 sealed record Tools(string Root, string Python)
 {
+    /// Which release these tools are (tools/version.txt, written when the release is packed); null from the source tree
+    public string? Version => File.Exists(Path.Combine(Root, "version.txt")) ? File.ReadAllText(Path.Combine(Root, "version.txt")).Trim() : null;
+
     public static Tools? Find()
     {
         var at = AppContext.BaseDirectory;
@@ -51,6 +54,8 @@ sealed class Runner
             RedirectStandardError = true,
         };
         si.Environment["PYTHONIOENCODING"] = "utf-8";
+        // (written into the game folder's hookshot_version.txt: the game starts this app again to update, host/hos_update.c)
+        if (Environment.ProcessPath != null) si.Environment["HOOKSHOT_BUILDER_EXE"] = Environment.ProcessPath;
         // (the folder's own compiler, headers and libraries, when it has them: nothing of the PC's but Windows' own)
         var sets = new[] { ("EMSDK", "emsdk"), ("RX_CPM", "cpm"), ("WGPU_NATIVE", "wgpu-native") };
         foreach (var (name, folder) in sets)

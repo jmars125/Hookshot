@@ -227,7 +227,7 @@ std::string DumpExpr(const Statement* stmt) {
 }
 
 void SanitizeNoBreaks(const Tree& tree) {
-    if (std::ranges::find(tree, StatementType::Break, &Statement::type) != tree.end()) {
+    if (std::find_if(tree.begin(), tree.end(), [](const Statement& s) { return s.type == StatementType::Break; }) != tree.end()) {
         throw NotImplementedException("Capturing statement with break nodes");
     }
 }

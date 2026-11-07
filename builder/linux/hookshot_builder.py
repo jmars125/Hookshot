@@ -59,6 +59,12 @@ def play(folder):
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
+def desktop_exec(path):
+    """One Exec argument. A % in the path is a field code, so "100% Games" is rejected and the menu entry does not run."""
+    escaped = path.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%")
+    return '"%s"' % escaped
+
+
 def add_to_menu(folder):
     """an entry in the applications menu that starts the game"""
     icon = os.path.join(folder, "hookshot.png")
@@ -69,7 +75,7 @@ def add_to_menu(folder):
     os.makedirs(apps, exist_ok=True)
     with open(os.path.join(apps, "hookshot.desktop"), "w", encoding="utf-8") as f:
         f.write("[Desktop Entry]\nType=Application\nName=Hookshot\nComment=The Legend of Zelda: Ocarina of Time, built from your copy\n"
-                "Exec=\"%s\"\nPath=%s\nIcon=%s\nCategories=Game;\nTerminal=false\n" % (os.path.join(folder, "hookshot"), folder, icon))
+                "Exec=%s\nPath=%s\nIcon=%s\nCategories=Game;\nTerminal=false\n" % (desktop_exec(os.path.join(folder, "hookshot")), folder, icon))
 
 
 def free_gb(path):
@@ -179,8 +185,12 @@ class Builder(tk.Tk):
         def run():
             r = subprocess.run([sys.executable, "-I", os.path.join(ROOT, "nx2", "make_game.py"), "--check"] + args,
                                capture_output=True, text=True, cwd=ROOT)
-            said = [l[2:] for l in r.stdout.splitlines() if l.startswith("@@check") or l.startswith("@@error")]
-            text = said[-1].split(" ", 2)[-1] if said else "The version could not be read."
+            said = []
+            for l in r.stdout.splitlines():
+                t = make_game.reported(l)
+                if t is not None:
+                    said.append(t)
+            text = said[-1] if said else "The version could not be read."
             self.lines.put(("check", text))
         threading.Thread(target=run, daemon=True).start()
 

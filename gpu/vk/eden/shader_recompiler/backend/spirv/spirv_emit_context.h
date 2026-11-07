@@ -306,6 +306,7 @@ public:
     u32 rescaling_downfactor_member_index{};
     u32 guest_pages_member_index{};   // (hookshot: GUEST_PAGES_PUSH_OFFSET's member, compute only)
     bool wants_guest_pages{};
+    Id probe_log{};   // (EvilOOT, RX_VK_BLOCK_PROBE: the miss log's U32 storage buffer, per-block entry counters at word 128+)
     u32 mesh_first_member_index{};    // (hookshot: MESH_FIRST_PUSH_OFFSET's member, task programs)
     bool wants_mesh_first{};
     Id mesh_first_block_pointer{};    // (a PhysicalStorageBuffer pointer to a block of one u32, and to its member)

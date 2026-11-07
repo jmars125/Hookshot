@@ -1262,14 +1262,17 @@ static void wave_pull(void *user, uint8_t *out, int len) {
 }
 MMRESULT waveOutOpen(HWAVEOUT *out, UINT device, const WAVEFORMATEX *f, DWORD_PTR cb, DWORD_PTR inst, DWORD flags) {
     (void)device, (void)cb, (void)inst, (void)flags;
-    void *sdl = LoadLibraryA("SDL2.dll");
-    if (!sdl) {
-        char p[PATH_MAX];
-        exe_path(p, sizeof p);
-        char *slash = strrchr(p, '/');
-        if (slash) snprintf(slash + 1, sizeof p - (size_t)(slash + 1 - p), "SDL2.dll");
+    /* the window and the controllers load the SDL beside the executable first (display_sdl.c, pad_sdl.c). Audio did
+       the opposite, so a system libSDL2 was used whenever one existed, a different copy from the window's. */
+    char p[PATH_MAX];
+    exe_path(p, sizeof p);
+    char *slash = strrchr(p, '/');
+    void *sdl = NULL;
+    if (slash) {
+        snprintf(slash + 1, sizeof p - (size_t)(slash + 1 - p), "SDL2.dll");
         sdl = LoadLibraryA(p);
     }
+    if (!sdl) sdl = LoadLibraryA("SDL2.dll");
     if (!sdl) return MMSYSERR_ERROR;
     int (*init)(uint32_t) = (int (*)(uint32_t))dlsym(sdl, "SDL_InitSubSystem");
     uint32_t (*open_dev)(const char *, int, const SdlAudioSpec *, SdlAudioSpec *, int) =
@@ -1288,6 +1291,7 @@ MMRESULT waveOutOpen(HWAVEOUT *out, UINT device, const WAVEFORMATEX *f, DWORD_PT
     want.userdata = w;
     w->dev = open_dev(NULL, 0, &want, &have, 0);   /* (no changes allowed: SDL converts to what the device wants) */
     if (!w->dev) {
+        pthread_mutex_destroy(&w->mu);
         free(w);
         return MMSYSERR_ERROR;
     }

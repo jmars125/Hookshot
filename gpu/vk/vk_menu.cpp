@@ -1,6 +1,8 @@
 // The Insert menu. Drawn on the CPU (GDI text into a bitmap) and copied over the window's image at the last step of a present,
 // so it costs nothing while closed and it never touches the game's picture, nor what frame interpolation sees. Keys: Insert
 // opens and closes it, Up and Down choose, Left and Right change, Esc closes; the game gets no keyboard input while it is open.
+// (hookshot) A gamepad's Home button, or Select and Start together, opens it too; the D-pad chooses and changes, the bottom
+// face button changes too, the right one closes. The game gets no gamepad input while it is open either.
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -256,7 +258,7 @@ void paint_menu(HDC dc, uint32_t w, uint32_t h, int s) {
     wrap_help(dc, rows[selected].help, (int)w - 32 * s, 16 * s, help_top + 4 * s, true);
     SelectObject(dc, body);
     SetTextColor(dc, RGB(140, 150, 144));
-    const char* hint = "Arrows change   Insert or F1 closes";
+    const char* hint = "Arrows change   Insert, F1 or Home closes";
     TextOutA(dc, 16 * s, help_top + 4 * s + help_px + 10 * s, hint, (int)strlen(hint));
     SelectObject(dc, old);
     DeleteObject(title);
@@ -436,17 +438,32 @@ bool fps_take(int64_t now, int64_t shown, int64_t game, int64_t* next, int64_t* 
 
 void menu_tick() {
     fullscreen_tick();
-    static bool held[7];
-    static const int keys[7] = {VK_INSERT, VK_UP, VK_DOWN, VK_LEFT, VK_RIGHT, VK_ESCAPE, VK_F1};   // (F1: for keyboards without Insert)
+    enum { K_N = 8 };
+    static bool held[K_N];
+    static const int keys[K_N] = {VK_INSERT, VK_UP, VK_DOWN, VK_LEFT, VK_RIGHT, VK_ESCAPE, VK_F1,   // (F1: for keyboards without Insert)
+                                  VK_RETURN};
     HWND fg = GetForegroundWindow();
     DWORD pid = 0;
     if (fg) GetWindowThreadProcessId(fg, &pid);
     const bool mine = pid == GetCurrentProcessId();
-    bool press[7] = {};
-    for (int i = 0; i < 7; i++) {
+    bool press[K_N] = {};
+    for (int i = 0; i < K_N; i++) {
         const bool down = mine && (GetAsyncKeyState(keys[i]) & 0x8000) != 0;
         press[i] = down && !held[i];
         held[i] = down;
+    }
+    // (hookshot) the gamepads, by position: Home, or Select and Start together, as Insert; the D-pad as the arrows,
+    // the bottom face button as Enter, the right one as Esc
+    static uint32_t pad_held = 0;
+    const uint32_t raw = mine && host && host->pad_raw ? host->pad_raw() : 0;
+    const uint32_t pad_press = raw & ~pad_held, chord = 1u << HOS_PAD_BACK | 1u << HOS_PAD_START;
+    const bool chord_now = (raw & chord) == chord && (pad_held & chord) != chord;
+    pad_held = raw;
+    auto pad = [&](int p) { return (pad_press >> p & 1) != 0; };
+    if (pad(HOS_PAD_GUIDE) || chord_now) press[0] = true;
+    if (open_now.load()) {
+        press[1] |= pad(HOS_PAD_UP), press[2] |= pad(HOS_PAD_DOWN), press[3] |= pad(HOS_PAD_LEFT);
+        press[4] |= pad(HOS_PAD_RIGHT), press[5] |= pad(HOS_PAD_EAST), press[7] |= pad(HOS_PAD_SOUTH);
     }
     const int scale = scale_of(dev.swap_extent.height);
     bool changed = scale != cur_scale || menu_refresh;
@@ -457,8 +474,9 @@ void menu_tick() {
         if (press[5]) open_now = false;
         if (press[1]) selected = (selected + kRows - 1) % kRows, changed = true;
         if (press[2]) selected = (selected + 1) % kRows, changed = true;
-        if (press[3] || press[4]) {
+        if (press[3] || press[4] || press[7]) {   // (Enter, or the bottom face button, as Right)
             Row& r = rows[selected];
+            if (press[7]) press[4] = true;
             int v = *r.value + (press[4] ? r.step : -r.step);
             if (r.value == &opts.framegen && v == 1) v = press[4] ? 2 : 0;   // (off, 2x ... 8x)
             *r.value = v > r.hi ? r.lo : v < r.lo ? r.hi : v;

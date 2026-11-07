@@ -1404,6 +1404,12 @@ void dump_input(char kind, uint32_t index, uint32_t handle, const Texture* tex) 
     dump_inputs += b;
 }
 
+/// A descriptor over 2 ms is logged, 40 times, and only while RX_VK_SLOW_DESC is set. Off, the clock is not read.
+bool slow_desc_timing() {
+    static const int on = getenv("RX_VK_SLOW_DESC") != nullptr;
+    return on;
+}
+
 /// (a descriptor that took over 2 ms to resolve: logged, 40 of them)
 void slow_descriptor(std::chrono::steady_clock::time_point t0, const char* what, uint64_t addr, uint64_t size) {
     const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
@@ -1512,9 +1518,9 @@ void build_descriptors(const NvnState& s, const Program& p) {
             VkWriteDescriptorSet w = write(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, d.count);
             const size_t first = dw.bufs.size();
             for (uint32_t k = 0; k < d.count; k++) {
-                const auto t0 = std::chrono::steady_clock::now();
+                const auto t0 = slow_desc_timing() ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
                 dw.bufs.push_back(uniform_range(s, st, d.index + k));
-                slow_descriptor(t0, "uniform buffer", d.index + k, dw.bufs.back().range);
+                if (slow_desc_timing()) slow_descriptor(t0, "uniform buffer", d.index + k, dw.bufs.back().range);
             }
             w.pBufferInfo = &dw.bufs[first];
             dw.writes.push_back(w);
@@ -1563,7 +1569,7 @@ void build_descriptors(const NvnState& s, const Program& p) {
                     if (wide && d.count == 1 && addr)
                         if (const uint64_t end = gpu_pool_end(base); end > base + n) wide_n = std::min(end - base, wide) & ~3ull;
                 }
-                const auto t0 = std::chrono::steady_clock::now();
+                const auto t0 = slow_desc_timing() ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
                 // (hookshot) a storage buffer table's entries (count > 1, Info::global_tables): the ones past the table's
                 // end are whatever the constant buffer holds there, bound only when they look like a buffer
                 const bool plausible = d.count == 1 || (size && size <= (256ull << 20) && host->gpu_guest(base));
@@ -1661,7 +1667,7 @@ void build_descriptors(const NvnState& s, const Program& p) {
                              (unsigned long long)addr, (unsigned long long)size, (void*)b.buffer,
                              (unsigned long long)b.offset, (unsigned long long)n, s.grid[0], s.grid[1], s.grid[2]);
                 }
-                slow_descriptor(t0, d.is_written ? "storage buffer (written)" : "storage buffer", base, n);
+                if (slow_desc_timing()) slow_descriptor(t0, d.is_written ? "storage buffer (written)" : "storage buffer", base, n);
                 if (dump_on() && dump_ssbo_wanted(p.key)) {   // (RX_VK_DUMP_SSBO: where it is, and what the CPU's memory holds)
                     std::vector<uint32_t> words((size_t)std::min<uint64_t>(n, 65536) / 4);
                     size_t nz = 0;
@@ -1712,10 +1718,10 @@ void build_descriptors(const NvnState& s, const Program& p) {
                     }
                 }
                 if (b && d.is_written) {
-                    const auto t1 = std::chrono::steady_clock::now();
+                    const auto t1 = slow_desc_timing() ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
                     const uint64_t guest = host->gpu_guest(base);
                     if (guest) { ParLock lk; memory_stamp_gpu(guest, n); }
-                    slow_descriptor(t1, "stamp", base, n);
+                    if (slow_desc_timing()) slow_descriptor(t1, "stamp", base, n);
                 }
             }
             w.pBufferInfo = &dw.bufs[first];

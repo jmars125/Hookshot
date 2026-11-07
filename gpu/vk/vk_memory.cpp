@@ -6,6 +6,7 @@
 // title and importing each is a buffer, a memory object and a device address (tens of seconds taken at one submit,
 // on the render thread, in the first frame). The table of pools is cheap to keep current (host->gpu_pools: two
 // numbers each) and is refreshed when its generation changes, at a submit.
+#include <cstring>
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -575,7 +576,7 @@ bool tex_spans_changed = false;
 uint64_t tex_merged_bytes = 0;
 
 bool in_tex_merged(uint64_t guest) {   // (shadow_mu held)
-    auto it = std::upper_bound(tex_merged.begin(), tex_merged.end(), std::make_pair(guest, ~0ull));
+    auto it = std::upper_bound(tex_merged.begin(), tex_merged.end(), std::make_pair(guest, ~uint64_t(0)));
     return it != tex_merged.begin() && guest < std::prev(it)->second;
 }
 void shadow_erase(uint32_t page) {   // (shadow_mu held)
@@ -739,6 +740,7 @@ void memory_drop_shadow(uint64_t guest, uint64_t size) {
 /// -fasync-exceptions clang catches a fault in a __try block only across a call, and a 4 KB memcpy inlined into the
 /// block (the per-page retry) faulted past the handler: the crash that kept the texture storage out of the capture.
 void* (*volatile guarded_memcpy)(void*, const void*, size_t) = std::memcpy;
+#ifdef _WIN32
 __declspec(noinline) bool guarded_copy(void* dst, const void* src, size_t n) {
     __try {
         guarded_memcpy(dst, src, n);
@@ -747,6 +749,13 @@ __declspec(noinline) bool guarded_copy(void* dst, const void* src, size_t n) {
     }
     return true;
 }
+#else
+// (linux: the guest window is one mapping that stays readable, decommitted pages read as zero: nothing to fault on)
+bool guarded_copy(void* dst, const void* src, size_t n) {
+    guarded_memcpy(dst, src, n);
+    return true;
+}
+#endif
 // ---- a capture's copies: on the submitting thread and two helpers (RX_VK_CAPTURE_THREADS=<n>, 0-4): ~9 MB of the
 // game's dynamic data a submit, four submits a frame, ~1.4 ms on the game's thread each with one ----
 // (a page written and then unmapped before the submit faulted a plain copy: ReadProcessMemory fails on it instead.
@@ -897,7 +906,7 @@ bool capture_owns(uint64_t guest) {
     std::lock_guard lk(cap_ranges_mu);
     refresh_pool_ranges_locked();   // (a pool made since the last capture: the next one takes its pages, not this)
     auto in = [guest](const std::vector<std::pair<uint64_t, uint64_t>>& v) {
-        auto it = std::upper_bound(v.begin(), v.end(), std::make_pair(guest, ~0ull));
+        auto it = std::upper_bound(v.begin(), v.end(), std::make_pair(guest, ~uint64_t(0)));
         return it != v.begin() && guest < std::prev(it)->second;
     };
     return in(cap_ranges) || in(tex_cap_ranges) || in(pool_cap_ranges);
@@ -1205,12 +1214,10 @@ uint64_t mirror_budget() {
         uint64_t vram = 0;
         for (uint32_t h = 0; h < dev.memory.memoryHeapCount; h++)
             if (dev.memory.memoryHeaps[h].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) vram = std::max(vram, (uint64_t)dev.memory.memoryHeaps[h].size);
-        // (hookshot: an eighth on cards of 8 GB or less. A 6 GB laptop's 1.5 GB of mirrors and its textures went past what the
-        // driver allows, it paged, and the GPU timed out: device lost, issues 96 and 132)
         // (cards of 6 GB or less only: on 8 GB ones, a 3070 or a 4060, the game's memory read over PCIe instead left the GPU at a few
         // percent and the frame stuttering)
         if (vram && vram <= (6ull << 30) + (512ull << 20)) return vram / 8;
-        return vram ? std::min<uint64_t>(vram / 4, 3072ull << 20) : 3072ull << 20;
+        return vram ? std::min<uint64_t>(vram / 4, 3072ull << 20) : (uint64_t)(3072ull << 20);
     }();
     return b;
 }

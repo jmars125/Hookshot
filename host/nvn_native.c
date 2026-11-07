@@ -215,8 +215,10 @@ NV(nvnDeviceSetWindowOriginMode) {
 }
 NV(nvnDeviceSetDepthMode) {
     ((nvn_dev *)P(0))->depth_mode = U32(1);
-    InterlockedExchange(&depth_minus_w, U32(1) == NVN_DEPTH_MODE_NEAR_IS_MINUS_W);
+    const LONG was = InterlockedExchange(&depth_minus_w, U32(1) == NVN_DEPTH_MODE_NEAR_IS_MINUS_W);
     hos_log("nvn: depth mode %s", U32(1) == NVN_DEPTH_MODE_NEAR_IS_MINUS_W ? "near = -w (GL)" : "near = 0");
+    if (was != (LONG)(depth_minus_w != 0))
+        hos_log("nvn: the depth mode is not the one the prepared shaders were made for: their vertex stages draw wrong");
 }
 NV(nvnDeviceFinalizeCommandHandle) {}
 /* (mkw-recomp) GPU time on the CPU's tick clock (31.25 MHz: 32 ns a tick), as on the console: MKW's frame pacer

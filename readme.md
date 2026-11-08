@@ -27,7 +27,7 @@ console's system software is reimplemented, and the Switch 2 graphics are rebuil
 **on your PC, from your own copy of the game**.
 <br>
 
-Discord: https://discord.gg/EajnD2AJD9 Please use the hookshot-discussion channel, as the main point of the discord is for webports, not my work
+Discord: https://discord.gg/DVQQJphbBf
 <br>
 
 > [!IMPORTANT]

@@ -16,6 +16,7 @@
 #include <mutex>
 #include <vector>
 #include <condition_variable>
+#include "vk_menu.h"
 #include <deque>
 #include <unordered_map>
 #include <thread>
@@ -1513,6 +1514,9 @@ uint64_t mirror_budget() {
         if (vram && vram <= (6ull << 30) + (512ull << 20)) return vram / 8;
         return vram ? std::min<uint64_t>(vram / 4, 3072ull << 20) : (uint64_t)(3072ull << 20);
     }();
+    // (the Insert menu's quality preset sets one, 256 MB at Minimum (4GB): it was never read, and an 8 GB card kept ~2 GB of
+    // mirrors with the 4GB preset on, 2026-11-08)
+    if (opts.mirror_mb > 0 && !getenv("RX_VK_MIRROR_MB")) return (uint64_t)opts.mirror_mb << 20;
     return b;
 }
 uint64_t mirror_bytes = 0, mirror_epoch = 0;

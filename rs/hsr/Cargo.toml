@@ -16,4 +16,4 @@ cranelift-module = "0.137"
 cranelift-jit = "0.137"
 cranelift-native = "0.137"
 cranelift-object = "0.137"
-windows-sys = { version = "0.59", features = ["Win32_System_Memory"] }
+windows-sys = { version = "0.59", features = ["Win32_System_Memory", "Win32_System_LibraryLoader"] }

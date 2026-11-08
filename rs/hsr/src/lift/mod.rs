@@ -3,6 +3,7 @@
 
 pub mod a64;
 pub mod ctx;
+pub mod rt;
 
 use a64::{Em, Regs, Unsupported};
 use cranelift_codegen::ir::{types, AbiParam, InstBuilder, MemFlagsData, Value};
@@ -52,8 +53,10 @@ pub fn store_all(b: &mut FunctionBuilder, r: &Regs, c: Value) {
 /// The guest page the test cases address (rs/tests/difftest.py PAGE)
 pub const TEST_PAGE: u64 = 0x10000;
 const TEST_PAGE_SIZE: usize = 0x1000;
-/// One case: u32 word, u32 nzcv (bits 31:28), u64 pc, 32 x u64 (x31 = SP), the page
-const CASE_SIZE: usize = 4 + 4 + 8 + 32 * 8 + TEST_PAGE_SIZE;
+/// One case: u32 word, u32 nzcv (bits 31:28), u64 pc, 32 x u64 (x31 = SP), u32 fpcr, u32 fpsr, 32 x 16-byte V
+/// registers, the page
+const REGS_SIZE: usize = 4 + 4 + 8 + 32 * 8 + 8 + 32 * 16;
+const CASE_SIZE: usize = REGS_SIZE + TEST_PAGE_SIZE;
 
 fn map_test_page() -> *mut u8 {
     use windows_sys::Win32::System::Memory::{VirtualAlloc, MEM_COMMIT, MEM_RESERVE, PAGE_READWRITE};
@@ -68,7 +71,9 @@ fn map_test_page() -> *mut u8 {
 /// case's layout
 pub fn difftest(input: &[u8]) -> anyhow::Result<(Vec<u8>, usize, usize)> {
     let cases: Vec<&[u8]> = input.chunks_exact(CASE_SIZE).collect();
-    let mut module = JITModule::new(JITBuilder::with_isa(isa(), default_libcall_names()));
+    let mut jb = JITBuilder::with_isa(isa(), default_libcall_names());
+    jb.symbol_lookup_fn(helper_lookup());
+    let mut module = JITModule::new(jb);
     let mut cx = module.make_context();
     let mut fbc = FunctionBuilderContext::new();
     let mut ids = Vec::with_capacity(cases.len());
@@ -85,7 +90,7 @@ pub fn difftest(input: &[u8]) -> anyhow::Result<(Vec<u8>, usize, usize)> {
             let c = b.block_params(entry)[0];
             let regs = Regs::declare(&mut b);
             load_all(&mut b, &regs, c);
-            let r = Em { b: &mut b, r: &regs, ctx: c, pc }.emit(word);
+            let r = Em { b: &mut b, r: &regs, ctx: c, pc, m: &mut module }.emit(word);
             store_all(&mut b, &regs, c);
             b.ins().return_(&[]);
             b.finalize(module.isa().frontend_config());
@@ -122,7 +127,15 @@ pub fn difftest(input: &[u8]) -> anyhow::Result<(Vec<u8>, usize, usize)> {
         }
         // SAFETY: the page is mapped read-write above and is TEST_PAGE_SIZE long
         let mem = unsafe { std::slice::from_raw_parts_mut(page, TEST_PAGE_SIZE) };
-        mem.copy_from_slice(&case[16 + 256..]);
+        c.fpcr = u32::from_le_bytes(case[272..276].try_into().unwrap()) as u64;
+        c.fpsr = u32::from_le_bytes(case[276..280].try_into().unwrap()) as u64;
+        for i in 0..32 {
+            for h in 0..2 {
+                let o = 280 + 16 * i + 8 * h;
+                c.vreg[i][h] = u64::from_le_bytes(case[o..o + 8].try_into().unwrap());
+            }
+        }
+        mem.copy_from_slice(&case[REGS_SIZE..]);
         let f: extern "C" fn(*mut ctx::Ctx) = unsafe { std::mem::transmute(module.get_finalized_function(*id)) };
         f(&mut c);
         run += 1;
@@ -133,6 +146,12 @@ pub fn difftest(input: &[u8]) -> anyhow::Result<(Vec<u8>, usize, usize)> {
         out.extend_from_slice(&case[8..16]);
         for x in c.x {
             out.extend_from_slice(&x.to_le_bytes());
+        }
+        out.extend_from_slice(&(c.fpcr as u32).to_le_bytes());
+        out.extend_from_slice(&(c.fpsr as u32).to_le_bytes());
+        for v in c.vreg {
+            out.extend_from_slice(&v[0].to_le_bytes());
+            out.extend_from_slice(&v[1].to_le_bytes());
         }
         out.extend_from_slice(mem);
     }
@@ -167,8 +186,8 @@ pub fn control_kind(w: u32) -> Option<&'static str> {
 }
 
 /// Distinct words and whether each translates: (translated, untranslated) counts weighted by occurrences, and the
-/// untranslated ones by encoding group (bits 28:25 and the top byte)
-pub fn coverage(words: &[u32]) -> (u64, u64, Vec<(u32, u64)>) {
+/// untranslated ones by group (the top 11 bits), and every untranslated word with its count, most common first
+pub fn coverage(words: &[u32]) -> (u64, u64, Vec<(u32, u64)>, Vec<(u32, u64)>) {
     use std::collections::HashMap;
     let mut count: HashMap<u32, u64> = HashMap::new();
     for &w in words {
@@ -180,6 +199,7 @@ pub fn coverage(words: &[u32]) -> (u64, u64, Vec<(u32, u64)>) {
     let mut fbc = FunctionBuilderContext::new();
     let (mut ok, mut bad) = (0u64, 0u64);
     let mut by: HashMap<u32, u64> = HashMap::new();
+    let mut missing = Vec::new();
     for (&w, &n) in &count {
         let mut func = cranelift_codegen::ir::Function::new();
         func.signature.params.push(AbiParam::new(types::I64));
@@ -191,7 +211,7 @@ pub fn coverage(words: &[u32]) -> (u64, u64, Vec<(u32, u64)>) {
         let c = b.block_params(entry)[0];
         let regs = Regs::declare(&mut b);
         load_all(&mut b, &regs, c);
-        let r = Em { b: &mut b, r: &regs, ctx: c, pc: 0x8000_0000 }.emit(w);
+        let r = Em { b: &mut b, r: &regs, ctx: c, pc: 0x8000_0000, m: &mut a64::NoImports }.emit(w);
         b.ins().return_(&[]);
         b.finalize(isa.frontend_config());
         if r.is_ok() {
@@ -199,9 +219,34 @@ pub fn coverage(words: &[u32]) -> (u64, u64, Vec<(u32, u64)>) {
         } else {
             bad += n;
             *by.entry(w >> 21).or_default() += n;
+            missing.push((w, n));
         }
     }
     let mut by: Vec<(u32, u64)> = by.into_iter().collect();
     by.sort_by_key(|&(_, n)| std::cmp::Reverse(n));
-    (ok, bad, by)
+    missing.sort_by_key(|&(w, n)| (std::cmp::Reverse(n), w));
+    (ok, bad, by, missing)
+}
+
+/// Resolves the helpers lifted code calls: rt.rs's, then the C runtime's exact FP bodies from the DLL named by
+/// HSR_A64RT (a64_suyu.c built with `-shared -Wl,--export-all-symbols`), when set
+fn helper_lookup() -> Box<dyn Fn(&str) -> Option<*const u8> + Send> {
+    use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryA};
+    let dll = std::env::var("HSR_A64RT").ok().map(|p| {
+        let p = std::ffi::CString::new(p).unwrap();
+        // SAFETY: a NUL-terminated path; the library stays loaded for the process
+        let h = unsafe { LoadLibraryA(p.as_ptr() as *const u8) };
+        assert!(!h.is_null(), "could not load HSR_A64RT");
+        h as usize
+    });
+    let own: Vec<(&str, usize)> = rt::symbols().into_iter().map(|(n, p)| (n, p as usize)).collect();
+    Box::new(move |name| {
+        if let Some(&(_, p)) = own.iter().find(|(n, _)| *n == name) {
+            return Some(p as *const u8);
+        }
+        let h = dll?;
+        let n = std::ffi::CString::new(name).ok()?;
+        // SAFETY: h is the module loaded above
+        unsafe { GetProcAddress(h as _, n.as_ptr() as *const u8) }.map(|f| f as *const u8)
+    })
 }

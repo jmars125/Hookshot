@@ -125,12 +125,14 @@ fn cmd_cover(args: &[String]) -> Result<()> {
     let raw = std::fs::read(path)?;
     let words: Vec<u32> = raw.chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
     let t0 = Instant::now();
-    let (ok, bad, by) = lift::coverage(&words);
+    let (ok, bad, by, missing) = lift::coverage(&words);
     let control = words.iter().filter(|&&w| lift::control_kind(w).is_some()).count();
     println!("{} words: {control} control flow, {ok} translated, {bad} not ({:.1}% of the rest), {:.1} s",
              words.len(), 100.0 * ok as f64 / (ok + bad).max(1) as f64, t0.elapsed().as_secs_f64());
     for (top, n) in by.iter().take(25) {
-        println!("  {:03x}xxxxx  {n}", top << 1);
+        let eg: Vec<String> =
+            missing.iter().filter(|(w, _)| w >> 21 == *top).take(5).map(|(w, n)| format!("{w:08x}x{n}")).collect();
+        println!("  {:03x}xxxxx  {n:7}  {}", top << 1, eg.join(" "));
     }
     Ok(())
 }

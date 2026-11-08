@@ -8,7 +8,9 @@
 
 use super::ctx;
 use cranelift_codegen::ir::condcodes::IntCC;
-use cranelift_codegen::ir::{types, InstBuilder, MemFlagsData, Type, Value};
+use cranelift_codegen::ir::{types, FuncRef, Function, InstBuilder, MemFlagsData, Signature, Type, Value};
+
+mod fp;
 use cranelift_frontend::{FunctionBuilder, Variable};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,11 +38,40 @@ impl Regs {
     }
 }
 
+/// Resolves the runtime helpers lifted code calls (the exact FP bodies, for one): a FuncRef in the function being built
+pub trait Imports {
+    fn func(&mut self, name: &str, sig: &Signature, f: &mut Function) -> FuncRef;
+}
+
+impl<M: cranelift_module::Module> Imports for M {
+    fn func(&mut self, name: &str, sig: &Signature, f: &mut Function) -> FuncRef {
+        let id = self.declare_function(name, cranelift_module::Linkage::Import, sig).expect("helper declaration");
+        self.declare_func_in_func(id, f)
+    }
+}
+
+/// For translating without a module (coverage): every helper is a placeholder external name
+pub struct NoImports;
+
+impl Imports for NoImports {
+    fn func(&mut self, _name: &str, sig: &Signature, f: &mut Function) -> FuncRef {
+        let sig = f.import_signature(sig.clone());
+        let name = f.declare_imported_user_function(cranelift_codegen::ir::UserExternalName::new(0, 0));
+        f.import_function(cranelift_codegen::ir::ExtFuncData {
+            name: cranelift_codegen::ir::ExternalName::user(name),
+            signature: sig,
+            colocated: false,
+            patchable: false,
+        })
+    }
+}
+
 pub struct Em<'a, 'b> {
     pub b: &'a mut FunctionBuilder<'b>,
     pub r: &'a Regs,
     pub ctx: Value,
     pub pc: u64,
+    pub m: &'a mut dyn Imports,
 }
 
 fn bits(w: u32, hi: u32, lo: u32) -> u32 {
@@ -334,6 +365,7 @@ impl Em<'_, '_> {
             0b0101 | 0b1101 => self.dp_reg(w),
             0b0100 | 0b0110 | 0b1100 | 0b1110 => self.ldst(w),
             0b1010 | 0b1011 => self.system(w),
+            0b0111 | 0b1111 => self.fp_scalar(w),
             _ => Err(Unsupported),
         }
     }
@@ -624,6 +656,30 @@ impl Em<'_, '_> {
                 0b001001 => self.b.ins().ushr(a, b),
                 0b001010 => self.b.ins().sshr(a, b),
                 0b001011 => self.b.ins().rotr(a, b),
+                op @ 0b010000..=0b010111 => {
+                    // CRC32{B,H,W,X} / CRC32C*: the reflected CRC of the low 8 << sz bits of Rm into Wn, bit by bit
+                    let sz = op & 3;
+                    if (sz == 3) != sf {
+                        return Err(Unsupported);
+                    }
+                    let poly: i64 = if op & 4 != 0 { 0x82F6_3B78 } else { 0xEDB8_8320 };
+                    let acc = self.x(rn, false);
+                    let acc = self.b.ins().uextend(types::I64, acc);
+                    let data = self.x(rm, true);
+                    let data = if sz == 3 { data } else { self.band_k(data, ones(8 << sz)) };
+                    let mut t = self.b.ins().bxor(acc, data);
+                    let p = self.k(types::I64, poly as u64);
+                    for _ in 0..(8 << sz) {
+                        let lsb = self.b.ins().band_imm_u(t, 1);
+                        let mask = self.b.ins().ineg(lsb);
+                        let m = self.b.ins().band(mask, p);
+                        let s = self.b.ins().ushr_imm_u(t, 1);
+                        t = self.b.ins().bxor(s, m);
+                    }
+                    let r = self.b.ins().ireduce(types::I32, t);
+                    self.set(rd, r);
+                    return Ok(());
+                }
                 _ => return Err(Unsupported),
             };
             self.set(rd, r);
@@ -721,7 +777,7 @@ impl Em<'_, '_> {
             return self.atomic(w);
         }
         if bits(w, 26, 26) != 0 {
-            return Err(Unsupported); // SIMD&FP registers
+            return self.ldst_simd(w);
         }
         let (rt, rn) = (bits(w, 4, 0), bits(w, 9, 5));
         if w & 0x3B00_0000 == 0x1800_0000 {
@@ -912,6 +968,14 @@ impl Em<'_, '_> {
         }
         let (size, rs, o3, opc) = (bits(w, 31, 30), bits(w, 20, 16), bits(w, 15, 15), bits(w, 14, 12));
         let (rt, rn) = (bits(w, 4, 0), bits(w, 9, 5));
+        if (o3, opc, rs, bits(w, 23, 22)) == (1, 4, 31, 2) {
+            // LDAPR{B,H,}: a load-acquire (RCpc ordering is weaker than LDAR's, so LDAR's lowering is correct for it)
+            let h = self.host_addr(rn);
+            let v = self.b.ins().atomic_load(Self::ity(size), MemFlagsData::new(), h);
+            let v = self.widen(v);
+            self.set(rt, v);
+            return Ok(());
+        }
         let op = match (o3, opc) {
             (0, 0) => Op::Add,
             (0, 1) => Op::And, // LDCLR: AND with the complement

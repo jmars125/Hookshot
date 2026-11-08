@@ -120,6 +120,7 @@ static inline int localtime_s(struct tm *out, const time_t *t) { return localtim
 #define ERROR_FILE_EXISTS 80L
 #define ERROR_INVALID_PARAMETER 87L
 #define ERROR_ALREADY_EXISTS 183L
+#define ERROR_COMMITMENT_LIMIT 1455L
 #define ERROR_NOT_ALL_ASSIGNED 1300L
 #define ERROR_TIMEOUT 1460L
 #define ERROR_DEVICE_NOT_CONNECTED 1167L
@@ -546,6 +547,12 @@ int MessageBoxA(HWND w, LPCSTR text, LPCSTR caption, UINT type);
 #define MB_OK 0
 #define MB_ICONERROR 0x10
 #define MessageBox MessageBoxA
+#ifndef MB_TOPMOST
+#define MB_TOPMOST 0x00040000L
+#endif
+#ifndef MB_ICONWARNING
+#define MB_ICONWARNING 0x00000030L
+#endif
 
 /* ---- GDI: the Insert menu's text into a 32-bit bitmap (gdi_posix.c) ---- */
 #define BI_RGB 0

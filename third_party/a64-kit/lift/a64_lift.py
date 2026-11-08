@@ -705,6 +705,9 @@ class Lifter:
         self.hooks = dict(img.hooks)
         self.names = getattr(img, "names", {}) or {}
         self.comments = comments
+        # (hookshot) C emitted right after the instruction at a guest address ({pc: text}): a game patch that adds to an
+        # instruction instead of replacing a function (nx2/oot_wide.py). Only after plain instructions (kind "op")
+        self.after = {}
         self.funcs = {}       # entry -> (body {pc: kind}, labels set)
         self.jt = {}          # br pc -> [targets]
         self.jt_missing = {}      # br pc -> its register, for BRs whose table address was not found
@@ -1388,6 +1391,9 @@ class Lifter:
                         text = drop_flag_stores(text, dead[pc])
                         self.stats["dead_flag_stores"] += bin(dead[pc]).count("1")
                     out.append(text.rstrip("\n"))
+                    if pc in self.after:
+                        out.append(self.after[pc])
+                        self.stats["after_patches"] = self.stats.get("after_patches", 0) + 1
             elif kind == "b":
                 out.append(self.transfer(pc, k[1], labels, body))
                 falls = False

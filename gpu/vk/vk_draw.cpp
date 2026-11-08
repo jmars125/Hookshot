@@ -1059,6 +1059,25 @@ VkPipeline build_graphics(const Program& p, const NvnState& s, const Targets& at
         // (-13 here) or takes minutes on some Ocarina shaders it builds in seconds unoptimized (Lichii #200, #210).
         static const bool noopt = getenv("RX_VK_NOOPT") != nullptr;
         if (noopt) ci.flags |= VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT;
+        // (from PR 430, YunaraDebugs: on AMD the task and mesh programs (OoT's foliage culling, following pointers through its
+        // tables) hung the GPU when the driver's optimizer built them: a device lost one to four minutes into Kokiri, each time with
+        // another of them first (RX 6600, issues 461 and 484); never in runs where they were built without it. They are built
+        // without it on AMD. RX_VK_MESH_OPT=1: with it, as the others)
+        static const bool amd = [] {
+            VkPhysicalDeviceProperties pr{};
+            vkGetPhysicalDeviceProperties(dev.physical, &pr);
+            return pr.vendorID == 0x1002;
+        }();
+        static const bool mesh_opt = getenv("RX_VK_MESH_OPT") != nullptr;
+        if (amd && !mesh_opt) {
+            bool mesh = false;
+            for (const Stage& st : p.stages) mesh |= (st.vk_stage & (VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_MESH_BIT_EXT)) != 0;
+            if (mesh) {
+                ci.flags |= VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT;
+                static std::atomic<int> told{0};
+                if (told++ < 1) logf("vk: task and mesh programs built without the driver's optimizer (AMD; RX_VK_MESH_OPT=1: with it)");
+            }
+        }
     }
     const VkResult r = guarded_graphics(part >= 0 ? VK_NULL_HANDLE : pcache, &ci, &pl);
     if (part >= 0) {
@@ -4789,6 +4808,7 @@ void prepare_run(void (*progress)(size_t done, size_t total)) {
     }
     auto blank = std::make_unique<NvnState>();
     blank->nvattr = 16;
+    pcache_init();   // (once, here: the workers below build compute pipelines into it)
     std::atomic<size_t> next{0}, done{0}, made{0}, libs{0};
     const auto worker = [&] {
         // (below normal, and half the CPUs, below: on all of them at High the driver's compiles froze the whole PC)
@@ -4811,9 +4831,12 @@ void prepare_run(void (*progress)(size_t done, size_t total)) {
                     ci.layout = p->layout;
                     if (getenv("RX_VK_NOOPT")) ci.flags |= VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT;
                     VkPipeline pl = VK_NULL_HANDLE;
-                    if (guarded_compute(VK_NULL_HANDLE, &ci, &pl) == VK_SUCCESS && pl) {
+                    // (into the app's pipeline cache, saved to mkw_vk_pipelines.bin: without it the next start compiled them again in play
+                    // where the driver's own cache missed them, AMD's 15 s culling compiles each time)
+                    if (guarded_compute(pcache, &ci, &pl) == VK_SUCCESS && pl) {
                         vkDestroyPipeline(dev.device, pl, nullptr);
                         libs++;
+                        pcache_built_since_save++;
                     }
                 }
                 if (!p->failed && warm && !p->compute) {
@@ -4855,15 +4878,22 @@ void precompile_run(void (*progress)(size_t done, size_t total)) {
     const auto t0 = std::chrono::steady_clock::now();
     // (a start that dies in here would die in here every time, the notes being what it builds from: a player saw the console reach
     // 542 of 543 and the game close. The file says this step began and did not end: the next start lets the notes go and plays)
+    // (two starts in a row, not one: closing the window while it ran counted as a crash, and the next start then skipped the
+    // precompile and compiled everything in play: "stuck at 99%, then fine on the second start", 2026-11-08)
     const std::string running = pipe_notes_path() + ".running";
+    int ended_inside = 0;
     if (FILE* f = fopen(running.c_str(), "rb")) {
+        if (fscanf(f, "%d", &ended_inside) != 1) ended_inside = 1;
         fclose(f);
-        remove(running.c_str());
-        remove(pipe_notes_path().c_str());
-        logf("vk: the last start did not get through the precompile: its notes are dropped");
-        return;
+        if (ended_inside >= 2) {
+            remove(running.c_str());
+            remove(pipe_notes_path().c_str());
+            logf("vk: the last two starts did not get through the precompile: its notes are dropped");
+            return;
+        }
+        logf("vk: the last start did not get through the precompile (closed, or it crashed there): trying it once more");
     }
-    if (FILE* f = fopen(running.c_str(), "wb")) fclose(f);
+    if (FILE* f = fopen(running.c_str(), "wb")) fprintf(f, "%d\n", ended_inside + 1), fclose(f);
     struct Done { const std::string& path; ~Done() { remove(path.c_str()); } } done_marker{running};
     pcache_init();
     std::vector<std::unique_ptr<PipeNote>> notes;
@@ -5035,8 +5065,61 @@ void dispatch(VkCommandBuffer cmd, NvnState& s, uint32_t x, uint32_t y, uint32_t
         }
     }
     Program& p = const_cast<Program&>(*cp);
-    ParLock plk(!p.layout || !p.compute_pipeline);
-    ensure_layout(p);
+    if (!p.layout) {
+        ParLock lk;
+        ensure_layout(p);
+    }
+    // (the compute pipeline is compiled on a worker, not here with the recording lock held: AMD's compiler took 15-23 s on the
+    // culling programs, every recording thread stopped behind it and the screen stayed black after the opening (6950 XT, RX 6600,
+    // 2026-11-08). The dispatch waits up to 50 ms for it, which covers NVIDIA's compiles; one still compiling after that is left
+    // out until it is ready, as graphics draws are. RX_VK_COMPUTE_WAIT=1: waited for, as before)
+    static const bool compute_wait = getenv("RX_VK_COMPUTE_WAIT") != nullptr;
+    if (!compute_wait && !p.compute_pipeline && !taau_key(p.key) && p.compute_state.load(std::memory_order_acquire) != 2) {
+        int none = 0;
+        if (p.compute_state.compare_exchange_strong(none, 1)) {
+            { ParLock lk; pcache_init(); }
+            const Program* job = &p;
+            jobs_push([job] {
+                Program& q = const_cast<Program&>(*job);
+                VkComputePipelineCreateInfo ci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+                ci.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+                ci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+                ci.stage.module = q.stages[0].module;
+                ci.stage.pName = "main";
+                pin_subgroup(ci.stage, q.workgroup[0]);
+                ci.layout = q.layout;
+                static const bool noopt = getenv("RX_VK_NOOPT") != nullptr;
+                if (noopt) ci.flags |= VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT;
+                const auto t0 = std::chrono::steady_clock::now();
+                VkPipeline made = VK_NULL_HANDLE;
+                if (const VkResult r = guarded_compute(pcache, &ci, &made); r != VK_SUCCESS || !made) {
+                    static std::atomic<int> told{0};
+                    if (told++ < 20) logf("vk: compute pipeline of %016llx not made (%d)", (unsigned long long)q.key, (int)r);
+                    q.failed = true;
+                } else {
+                    q.compute_pipeline = made;
+                }
+                const int64_t ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+                if (ms >= 200) logf("vk: compute pipeline of %016llx: SLOW compile, %lld ms (on a worker)", (unsigned long long)q.key, (long long)ms);
+                st_pipeline_us += ms * 1000;
+                st_pipelines++;
+                pcache_built_since_save++;
+                q.compute_state.store(2, std::memory_order_release);
+            }, true);
+        }
+        const auto t0 = std::chrono::steady_clock::now();
+        while (p.compute_state.load(std::memory_order_acquire) != 2 &&
+               std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(50))
+            std::this_thread::sleep_for(std::chrono::microseconds(200));
+        if (p.compute_state.load(std::memory_order_acquire) != 2) {
+            static std::atomic<int> told{0};
+            if (told++ < 40) logf("vk: dispatch of %016llx left out: its compute pipeline is still compiling", (unsigned long long)p.key);
+            st_pending_skips++;
+            return;
+        }
+        if (p.failed || !p.compute_pipeline) SKIP_HERE();
+    }
+    ParLock plk(!p.compute_pipeline);
     if (!p.compute_pipeline && !taau_key(p.key)) {   // (a stood-in network is never compiled)
         pcache_init();
         VkComputePipelineCreateInfo ci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};

@@ -299,6 +299,9 @@ static void load_hookshot_env(void) {
 }
 
 float hos_aspect_ratio = 0;   /* (the window's default shape: host/display.c) */
+/* (nx2/oot_wide.py) read by the widescreen patches in the game's code; 0: the game's own 16:9 */
+volatile uint64_t hos_wide_out, hos_wide_scene;
+volatile float hos_wide_ratio, hos_wide_squeeze, hos_wide_margin;
 #ifdef _WIN32
 /* (hookshot) On laptops with two GPUs, the drivers run a program on the dedicated one when it exports these (NVIDIA Optimus, AMD
    PowerXpress): without them a laptop could put the game on its integrated GPU, 5 fps (issue 176) */
@@ -424,14 +427,13 @@ static int game_main(int argc, char **argv) {
         return 1;
     }
     hos_mem_init(hos_image_end);
-    {   /* (hookshot) HOS_ASPECT=<ratio> (2.3889 for 3440x1440): the one 16:9 constant in the game's data, read by the camera and the
-           scene setup, at the window's shape. The picture stays 16:9 and is stretched to the window, so the 3D keeps its proportions
-           and the HUD stretches with it. */
+    {   /* (hookshot) Widescreen and ultrawide (nx2/oot_wide.py): HOS_ASPECT=<ratio> (2.3889 for 3440x1440), else the Insert menu's
+           Ultrawide (off unless it says 1) takes the main monitor's shape. The game's picture takes that shape at its own height (Hor+:
+           the world wider at the sides), its 16:9 cameras the picture's ratio, the HUD, menus and movies the middle 16:9. Until now the
+           one 16:9 constant in the game's data was changed and the 16:9 picture stretched to the window. */
         const char *e = getenv("HOS_ASPECT");
-        uint8_t *at = (uint8_t *)A64_MEM + 0x83e6131cull;
-        float was, want = e ? (float)atof(e) : 0.0f;
-        memcpy(&was, at, 4);
-        if (!e) {   /* (the Insert menu's Ultrawide, off unless it says 1: the main monitor's shape) */
+        float want = e ? (float)atof(e) : 0.0f;
+        if (!e) {
             int on = 0;
             char path[MAX_PATH];
             const DWORD len = GetModuleFileNameA(NULL, path, MAX_PATH);
@@ -447,14 +449,25 @@ static int game_main(int argc, char **argv) {
                 }
             }
             const int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);
-            if (on && sh > 0 && (float)sw / (float)sh > 1.8f) want = (float)sw / (float)sh;
+            if (on && sh > 0) want = (float)sw / (float)sh;
         }
-        if (want > 1.0f && was > 1.777f && was < 1.778f) {
-            memcpy(at, &want, 4);
-            hos_aspect_ratio = want;
-            hos_log("boot: aspect ratio %.4f in place of %.4f", want, was);
+        extern volatile uint64_t hos_wide_out, hos_wide_scene;
+        extern volatile float hos_wide_ratio, hos_wide_squeeze, hos_wide_margin;
+        const double game = 16.0 / 9.0;
+        if (want > game * 1.01) {
+            double r = want > 32.0 / 9.0 ? 32.0 / 9.0 : want;
+            const unsigned oh = 1440, ow = (unsigned)(oh * r / 8 + 0.5) * 8;   /* (whole multiples of 8 pixels) */
+            const unsigned sh = 1080, sw = (unsigned)(ow * 0.75 / 8 + 0.5) * 8;   /* (the scene, 3/4 of the picture as shipped) */
+            hos_wide_out = (uint64_t)oh << 32 | ow;
+            hos_wide_scene = (uint64_t)sh << 32 | sw;
+            hos_wide_ratio = (float)ow / (float)oh;
+            hos_wide_squeeze = (float)(game / ((double)ow / oh));
+            hos_wide_margin = (1.0f - hos_wide_squeeze) / 2.0f;
+            hos_aspect_ratio = hos_wide_ratio;
+            hos_log("boot: widescreen: picture %ux%u, scene %ux%u, camera ratio %.4f, HUD and movies in the middle %.1f%%", ow, oh, sw, sh,
+                    (double)hos_wide_ratio, hos_wide_squeeze * 100.0);
         } else if (want > 1.0f) {
-            hos_log("boot: aspect: the constant reads %.4f here: left alone", was);
+            hos_log("boot: widescreen: a %.4f screen is not wider than 16:9: the game's own picture", (double)want);
         }
     }
     hos_log("boot: image %zu MB at %#llx, %llu MB of memory for the game", n >> 20, IMAGE_BASE,

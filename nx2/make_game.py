@@ -650,15 +650,20 @@ def main():
     staged = [(os.path.join(built, n), os.path.join(out, n)) for n in BESIDE if os.path.exists(os.path.join(built, n))]
     staged.append((os.path.join(work, "sa", "image", "image.bin"), os.path.join(out, "image.bin")))
     for src, dst in staged:
-        if os.path.exists(dst + ".new"):
-            os.remove(dst + ".new")
-        shutil.copy2(src, dst + ".new")
+        try:
+            if os.path.exists(dst + ".new"):
+                os.remove(dst + ".new")
+            shutil.copy2(src, dst + ".new")
+        except PermissionError:
+            fail("Could not stage the new build at %s. Check that %s is readable and the staged file and output folder are writable, "
+                 "close any program using that file, then retry. No installed files were replaced; the compiled source is still available."
+                 % (dst + ".new", src))
     for src, dst in staged:
         try:
             os.replace(dst + ".new", dst)   # (linux: a running copy keeps its own file; windows: a running exe cannot be replaced)
         except PermissionError:
-            fail("Close Hookshot first: the game is running from %s, so its files cannot be replaced. The new build is ready beside it; "
-                 "build again once the game is closed." % out)
+            fail("Could not replace %s. Close any running copy of Hookshot and check that the file and folder are writable, then retry. "
+                 "Staged replacements remain beside the installed files; the compiled source remains at %s." % (dst, src))
     # every shader of the game, for its first start to translate (gpu/vk/vk_shader.cpp seed_open). Without it the game still runs, compiling them
     # as it meets them: not worth stopping a finished build for
     if subprocess.call(shader_census_cmd(romfs, os.path.join(out, "hookshot_shaders.bin")), stdout=sys.stderr):

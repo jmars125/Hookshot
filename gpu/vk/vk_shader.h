@@ -43,7 +43,9 @@ struct Program {
     VkPipelineLayout layout = VK_NULL_HANDLE;
     std::vector<VkDescriptorType> binding_types;   // by binding (what each descriptor write is)
     VkPipeline compute_pipeline = VK_NULL_HANDLE;
-    bool push = false;              // its set is pushed (VK_KHR_push_descriptor)
+    // (the compute pipeline's build: 0 not started, 1 on a worker, 2 done (compute_pipeline made, or failed): vk_draw.cpp dispatch)
+    std::atomic<int> compute_state{0};
+    bool push = false;             // its set is pushed (VK_KHR_push_descriptor)
     VkShaderStageFlags push_stages = 0;
     bool uses_render_area = false;
     bool uses_push = true;   // (a stage reads the push constants: render area or rescaling)

@@ -16,6 +16,7 @@
 #include <mutex>
 #include <vector>
 #include <condition_variable>
+#include "vk_menu.h"
 #include <deque>
 #include <unordered_map>
 #include <thread>
@@ -1513,6 +1514,9 @@ uint64_t mirror_budget() {
         if (vram && vram <= (6ull << 30) + (512ull << 20)) return vram / 8;
         return vram ? std::min<uint64_t>(vram / 4, 3072ull << 20) : (uint64_t)(3072ull << 20);
     }();
+    // (the Insert menu's quality preset sets one, 256 MB at Minimum (4GB): it was never read, and an 8 GB card kept ~2 GB of
+    // mirrors with the 4GB preset on, 2026-11-08)
+    if (opts.mirror_mb > 0 && !getenv("RX_VK_MIRROR_MB")) return (uint64_t)opts.mirror_mb << 20;
     return b;
 }
 uint64_t mirror_bytes = 0, mirror_epoch = 0;
@@ -1681,6 +1685,51 @@ void mirror_sync(Pool& p) {
 
 } // namespace
 
+// ---- (from PR 430, YunaraDebugs) Readback pages: GPU results the CPU reads (invalidate) and then writes, as OoT's exposure meter (a
+// sum the GPU adds into each frame; the CPU reads it and stores 0 back). On the console the GPU adds into that memory as it is when
+// its work runs, the CPU's 0 included. Here it adds into the pool's mirror, which takes the CPU's 0 only at a mirror sync of a submit
+// made after it: one made just before (the game's threads overlap) added onto the old sum, the CPU read 2x the next frame and 0 the
+// one after, and the exposure stepped (the light dimming or flaring for a frame in Kokiri). So each submission first copies those
+// pages from guest memory into the mirror, on the GPU as its work starts, last of the uploads: what the CPU wrote by then is what the
+// GPU adds to. RX_VK_NO_RB_REFRESH=1: off ----
+namespace {
+std::unordered_map<uint32_t, uint64_t> rb_pages;   // (guest page -> mirror_epoch it was last read at)
+std::atomic<int64_t> st_rb_refresh{0};
+}
+void memory_note_readback(uint64_t guest, uint64_t size) {
+    static const bool off = getenv("RX_VK_NO_RB_REFRESH") != nullptr;
+    if (off || !size || size > 0x4000) return;   // (small results only: meters and counters)
+    std::lock_guard lk(pools_mu);
+    for (uint64_t pg = guest >> kPageShift; pg <= (guest + size - 1) >> kPageShift; pg++) rb_pages[(uint32_t)pg] = mirror_epoch;
+}
+/// Records the refresh copies into the submission's upload command buffer; true when it recorded any
+bool memory_rb_refresh(VkCommandBuffer up) {
+    std::lock_guard lk(pools_mu);
+    if (rb_pages.empty() || !up) return false;
+    std::map<Pool*, std::vector<VkBufferCopy>> by_pool;
+    for (auto it = rb_pages.begin(); it != rb_pages.end();) {
+        if (it->second + 600 < mirror_epoch) { it = rb_pages.erase(it); continue; }   // (not read for a while)
+        const uint64_t g = (uint64_t)it->first << kPageShift;
+        ++it;
+        auto pit = imported.upper_bound(g);
+        if (pit == imported.begin()) continue;
+        --pit;
+        Pool& p = pit->second;
+        if (g < p.lo || g >= p.hi || p.mstate != Pool::MIRROR_ON || !p.mirror) continue;
+        const uint64_t a = g - p.lo, b = std::min(g + 4096, p.hi) - p.lo;
+        by_pool[&p].push_back({a, a, b - a});
+    }
+    if (by_pool.empty()) return false;
+    full_barrier(up);   // (after the older submissions' write-backs into guest memory and this one's other uploads)
+    for (auto& [pp, rs] : by_pool) {
+        vkCmdCopyBuffer(up, pp->buffer, pp->mirror, (uint32_t)rs.size(), rs.data());
+        st_rb_refresh += (int64_t)rs.size();
+    }
+    static std::atomic<int64_t> n{0};
+    if (++n % 3000 == 1) logf("vk: readback pages refreshed from guest memory: %lld pages so far", (long long)st_rb_refresh.load());
+    return true;
+}
+
 BufferRef gpu_buffer(uint64_t gpu, uint64_t size) {
     uint64_t avail = 0;
     if (!host->gpu_ptr(gpu, &avail) || avail < size) return {};
@@ -1714,7 +1763,7 @@ int memory_guest_imported(uint64_t lo, uint64_t hi) {
         if (it->second.hi + (1ull << 30) < lo) break;   // (imports are at most 1 GB: none further down reaches lo)
     }
     for (const auto& nh : retired_pools)
-        if (nh.mapped().lo < hi && lo < nh.mapped().hi) return 1;
+        if (nh.mapped().memory && nh.mapped().lo < hi && lo < nh.mapped().hi) return 1;
     return 0;
 }
 
@@ -1907,6 +1956,15 @@ uint64_t st_mirror_bytes_freed = 0;
 // issues 132 and 195, AMD after a scene change). The table goes back to guest memory at once, as before
 struct DeadMirror { VkBuffer buffer; VmaAllocation alloc; uint64_t value; };
 std::deque<DeadMirror> dead_mirrors;
+// A retired pool's import, given back the same way. Each import is a userptr buffer object to amdgpu, and RADV lists every
+// buffer object in every submission (buffer device addresses): the kernel checks every page of every userptr object at each
+// DRM_IOCTL_AMDGPU_CS. Retired pools were never given back, so the pages it checked only grew with each pool merge: in Kokiri
+// Forest ~1.3 GB of imports, 15-45 ms a submission (3-4 fps on an RX 7800 XT with 11 ms of GPU time; issues 312, 413). Its
+// table entries went at its retirement, and its mirror goes before (mstate), so once the GPU is past retired_value nothing
+// reaches it. The node stays (pointers to it are kept elsewhere); only its buffer and memory go. RX_VK_KEEP_RETIRED=1: kept
+struct DeadImport { VkBuffer buffer; VkDeviceMemory memory; uint64_t value; uint64_t bytes; };
+std::deque<DeadImport> dead_imports;
+uint64_t st_retired_imports_freed = 0, st_retired_import_bytes_freed = 0;
 void reap_mirrors() {   // (pools_mu held)
     while (!dead_mirrors.empty() && dead_mirrors.front().value <= mem_completed) {
         if (getenv("RX_VK_LOG_ADDR")) {
@@ -1917,6 +1975,37 @@ void reap_mirrors() {   // (pools_mu held)
         }
         destroy_buffer(dead_mirrors.front().buffer, dead_mirrors.front().alloc);
         dead_mirrors.pop_front();
+    }
+    while (!dead_imports.empty() && dead_imports.front().value <= mem_completed) {
+        vkDestroyBuffer(dev.device, dead_imports.front().buffer, nullptr);
+        vkFreeMemory(dev.device, dead_imports.front().memory, nullptr);
+        st_retired_imports_freed++, st_retired_import_bytes_freed += dead_imports.front().bytes;
+        dead_imports.pop_front();
+    }
+}
+void retired_imports_give_back() {   // (pools_mu held)
+    static const bool keep = getenv("RX_VK_KEEP_RETIRED") != nullptr;
+    uint64_t live_bytes = 0, retired_bytes = 0;
+    size_t retired_alive = 0;
+    for (auto& [lo, p] : imported) live_bytes += p.hi - p.lo;
+    for (auto& nh : retired_pools) {
+        Pool& p = nh.mapped();
+        if (!p.memory) continue;
+        if (!keep && p.mstate == Pool::MIRROR_NONE && !p.inherit_pending && p.retired_value <= mem_completed &&
+            p.last_value <= mem_completed) {
+            dead_imports.push_back({p.buffer, p.memory, std::max(mem_rec_value, p.last_value), p.hi - p.lo});
+            p.buffer = VK_NULL_HANDLE, p.memory = VK_NULL_HANDLE, p.address = 0;
+            pools_gen++;
+            continue;
+        }
+        retired_alive++, retired_bytes += p.hi - p.lo;
+    }
+    static uint64_t logged_epoch;
+    if (mirror_epoch - logged_epoch >= 1200) {
+        logged_epoch = mirror_epoch;
+        logf("vk: imports: %zu live (%llu MB), %zu retired still imported (%llu MB), %llu retired given back (%llu MB)",
+             imported.size(), (unsigned long long)(live_bytes >> 20), retired_alive, (unsigned long long)(retired_bytes >> 20),
+             (unsigned long long)st_retired_imports_freed, (unsigned long long)(st_retired_import_bytes_freed >> 20));
     }
 }
 void mirror_free(Pool& p) {
@@ -1961,6 +2050,7 @@ void mirrors_give_back(uint64_t want_bytes) {   // (pools_mu held)
 void memory_begin_submission() {
     std::lock_guard lk(pools_mu);
     reap_mirrors();
+    retired_imports_give_back();
     mirror_epoch++;
     mirror_upload = true;
     mirror_synced.clear();

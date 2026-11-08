@@ -305,6 +305,20 @@ def free_memory_gb():
     return None
 
 
+def requested_jobs(value):
+    """The builder's explicit worker override, or None to keep its automatic selection."""
+    if value is None or value == "":
+        return None
+    error = "HOOKSHOT_JOBS must be a whole number: use 1 or more, or 0 for automatic."
+    try:
+        jobs = int(value)
+    except ValueError:
+        raise ValueError(error) from None
+    if jobs < 0:
+        raise ValueError(error)
+    return jobs or None
+
+
 def default_jobs():
     """(issue 418) One compiler per CPU thread, as many as the free memory holds (a piece of the game takes ~2-3 GB to
     compile): half the threads left 16-thread PCs at 8 and 4-thread ones at 2. HOOKSHOT_JOBS or --jobs choose"""

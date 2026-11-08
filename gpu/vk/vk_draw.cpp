@@ -2386,6 +2386,24 @@ void dynamic_state(VkCommandBuffer cmd, const NvnState& s, const Targets& at, Vk
             d.bias[0] += units, d.bias[2] += slope;
             d.bias_en = true;
         }
+        // (amd-fix, 11-07) the sun's shadow cascades (square, depth only, past 768): RX_VK_CASCADE_BIAS=<units>,<slope> added;
+        // RX_VK_LOG_CASCADE_BIAS=1: what the game asks for them
+        if (at.n == 0 && at.width == at.height && at.width > 768 && at.depth) {
+            static float cu = 0, cs = 0;
+            static const bool parsed = [] {
+                if (const char* e = getenv("RX_VK_CASCADE_BIAS")) sscanf(e, "%f,%f", &cu, &cs);
+                return true;
+            }();
+            (void)parsed;
+            static const bool log_on = getenv("RX_VK_LOG_CASCADE_BIAS") != nullptr;
+            static int logged;
+            if (log_on && logged < 40) {
+                logged++;
+                logf("vk: cascade %ux%u bias: enabled %d units %g clamp %g slope %g", at.width, at.height, (int)d.bias_en,
+                     d.bias[0], d.bias[1], d.bias[2]);
+            }
+            if (cu != 0 || cs != 0) d.bias[0] += cu, d.bias[2] += cs, d.bias_en = true;
+        }
     }
     d.cull = sw().no_cull ? VK_CULL_MODE_NONE
            : s.poly.cull == NVN_FACE_FRONT ? VK_CULL_MODE_FRONT_BIT
@@ -3801,7 +3819,9 @@ bool mesh_indirect_convert(VkCommandBuffer cmd, const DrawArgs& d) {
     mesh_conv_buf = VK_NULL_HANDLE;
     static const bool raw = getenv("RX_VK_MESH_IND_RAW") && atoi(getenv("RX_VK_MESH_IND_RAW")) != 0;
     static const uint32_t word = getenv("RX_VK_MESH_IND_COUNT_WORD") ? (uint32_t)atoi(getenv("RX_VK_MESH_IND_COUNT_WORD")) & 3 : 0;
-    if (raw || !d.mesh || !d.indirect) return false;
+    // (amd-fix: the rewrite with the firsts in the draw does it, RX_VK_MESH_ARGS; this one drew every draw from its first 0)
+    static const bool rewrite = getenv("RX_VK_MESH_ARGS") && atoi(getenv("RX_VK_MESH_ARGS")) != 0;   // (sharkiix version: off, as upstream)
+    if (raw || rewrite || !d.mesh || !d.indirect) return false;
     const uint32_t n = (uint32_t)std::clamp(d.max, 1, 4096);
     const uint32_t stride = d.stride > 0 ? (uint32_t)d.stride : 8;
     const BufferRef args = gpu_buffer_bind(d.indirect, (uint64_t)(n - 1) * stride + 4 * (word + 1), false);
@@ -4071,9 +4091,11 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
     BufferRef mesh_args{};
     uint32_t mesh_args_at = 0;
     // (RX_VK_MESH_ARGS=1: rewritten {count, 1, 1, first}. Off: it did not bring the canopies back, and it ends the pass at each draw)
-    static const bool mesh_rewrite = getenv("RX_VK_MESH_ARGS") && atoi(getenv("RX_VK_MESH_ARGS")) != 0;
+    // (amd-fix, 11-07: on by default with the firsts (RX_VK_MESH_FIRST), the canopies back; RX_VK_MESH_ARGS=0: off. A single indirect
+    // draw has no stride of its own: its entry is NVN's 16 bytes, taken as 8 the first was never copied)
+    static const bool mesh_rewrite = getenv("RX_VK_MESH_ARGS") && atoi(getenv("RX_VK_MESH_ARGS")) != 0;   // (sharkiix version: off, as upstream)
     if (mesh_rewrite && d.mesh && d.indirect) {   // (out of the pass: a copy cannot be made in one)
-        const uint32_t n = (uint32_t)std::clamp(d.max, 1, (int)kMeshArgs), stride = d.stride ? (uint32_t)d.stride : 8u;
+        const uint32_t n = (uint32_t)std::clamp(d.max, 1, (int)kMeshArgs), stride = d.stride ? (uint32_t)d.stride : 16u;
         BufferRef src = gpu_buffer_bind(d.indirect, (uint64_t)n * stride, false);
         if (!src) SKIP_HERE();
         if (mesh_args_ready()) {
@@ -4093,9 +4115,37 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
                 }
                 logf("vk: mesh counts: %u of 4096 not zero, largest %u, sum %llu", nonzero, most, (unsigned long long)sum);
             }
+            {   // (amd-fix, RX_VK_LOG_MESH_PERPROG=1, diagnosis: per mesh program, the counts and firsts the GPU wrote, 4096 to 8192 entries ago)
+                static const bool per_prog = getenv("RX_VK_LOG_MESH_PERPROG") != nullptr;
+                if (per_prog) {
+                    static std::vector<uint64_t> prog_at(kMeshArgs);
+                    static uint32_t last_window = 0;
+                    static int windows_told = 0;
+                    const uint32_t window = mesh_args_at / 4096;
+                    if (window != last_window && mesh_args_at >= 8192 && windows_told < 40) {
+                        last_window = window;
+                        windows_told++;
+                        struct Agg { uint32_t entries = 0, nonzero = 0, most = 0, first_most = 0; uint64_t sum = 0; };
+                        std::map<uint64_t, Agg> agg;
+                        for (uint32_t i = mesh_args_at - 8192; i < mesh_args_at - 4096; i++) {
+                            Agg& a = agg[prog_at[i]];
+                            const uint32_t v = mesh_args_words[i * 4];
+                            a.entries++, a.nonzero += v != 0, a.most = std::max(a.most, v), a.sum += v;
+                            a.first_most = std::max(a.first_most, mesh_args_words[i * 4 + 3]);
+                        }
+                        for (const auto& [k, a] : agg)
+                            logf("vk: mesh perprog window %u prog %016llx: %u entries, %u not zero, largest %u, sum %llu, largest first %u", window,
+                                 (unsigned long long)k, a.entries, a.nonzero, a.most, (unsigned long long)a.sum, a.first_most);
+                    }
+                    for (uint32_t i = 0; i < n; i++) prog_at[(mesh_args_at + i) % kMeshArgs] = p.key;
+                }
+            }
             for (uint32_t i = 0; i < n; i++) {
                 copies.push_back({src.offset + i * stride + word * 4, (VkDeviceSize)(mesh_args_at + i) * 16, 4});
-                if (stride >= 16) copies.push_back({src.offset + i * stride + 12, (VkDeviceSize)(mesh_args_at + i) * 16 + 12, 4});   // (first)
+                // (the first: NVN2's entry is {count, first}. Word 3 is the culling pass's own (an atomic max, read back as "70 0 0 70",
+                // "60 0 0 950"): taken as the first, it sent the draws past the records. RX_VK_MESH_FIRST_WORD=<n>)
+                static const uint32_t first_word = getenv("RX_VK_MESH_FIRST_WORD") ? (uint32_t)atoi(getenv("RX_VK_MESH_FIRST_WORD")) : 1u;
+                if (stride >= 8) copies.push_back({src.offset + i * stride + first_word * 4, (VkDeviceSize)(mesh_args_at + i) * 16 + 12, 4});
             }
             vkCmdCopyBuffer(cmd, src.buffer, mesh_args_buffer, (uint32_t)copies.size(), copies.data());
             full_barrier(cmd);
@@ -5125,6 +5175,12 @@ void dispatch(VkCommandBuffer cmd, NvnState& s, uint32_t x, uint32_t y, uint32_t
             BufferRef args = gpu_buffer_bind(indirect, 12, false);
             if (!args) SKIP_HERE();
             checkpoint(cmd, p, 'i');   // (a device lost's report names it: a grid read from GPU memory)
+            if (dump_on() && dump_ssbo_wanted(p.key)) {   // (RX_VK_DUMP_SSBO: the grid as the GPU holds it, and where)
+                char what[128];
+                snprintf(what, sizeof what, "%03d prog %016llx indirect grid at %#llx", dump_seq(), (unsigned long long)p.key,
+                         (unsigned long long)indirect);
+                dump_buffer(cmd, args.buffer, args.offset, 12, what);
+            }
             vkCmdDispatchIndirect(cmd, args.buffer, args.offset);
         } else {
             vkCmdDispatch(cmd, x, y, z);

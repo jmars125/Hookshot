@@ -92,6 +92,8 @@ struct RuntimeInfo {
 
     bool convert_depth_mode{};
     bool force_early_z{};
+    /// (hookshot) a mesh stage with no task stage before it: its workgroups start at the draw's first, as a task stage's do
+    bool mesh_without_task{};
 
     TessPrimitive tess_primitive{};
     TessSpacing tess_spacing{};

@@ -208,6 +208,7 @@ and changes, the bottom face button changes too, and the right one closes the me
 | FPS counter | Off, On |
 
 With Game speed on Per frame, the game runs slower whenever it is below 60 fps. Real time keeps it at normal speed.
+Upscaling and Sharpness also work when Frame generation is Off.
 
 ### Controls
 
@@ -272,8 +273,6 @@ looks like.
 Hookshot exists thanks to the work of many people:
 
 - **NotRexed**: Hookshot, BlueShell (Mario Kart World), Skybound (Tears of the Kingdom) and the a64-kit tools.
-- **EvilBoyce** (Discord: evilmfkr, [fork](https://github.com/evilmfkr/Hookshot)): Ocarina of Time's foliage culling, ambient
-  light, water and fog fixes, the freeze after Load, the exposure flashes, and the rendering diagnostics tools.
 - **[Eden](https://git.eden-emu.dev/eden-emu/eden)** and **Eglantine**: the shader recompiler and Switch 2 shader work.
 - **suyu**: the graphics decoders and the AArch64 translator.
 - **[seedds/nxnative](https://github.com/seedds/nxnative)**: reference for how task and mesh shaders work.

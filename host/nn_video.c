@@ -16,6 +16,9 @@
 #include <string.h>
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#ifdef _WIN32
+#include <shellapi.h>
+#endif
 #include <libavcodec/avcodec.h>
 #include <libswscale/swscale.h>
 
@@ -51,6 +54,18 @@ typedef struct { uint32_t magic; uint16_t w, h; uint32_t format, tiling; } Pref;
 typedef struct { uint8_t *rgba, *nv12; int w, h; int64_t pts; int last; } Picture;
 /* a submission waiting to be decoded (pkt NULL: the stream's end) */
 typedef struct Pending { AVPacket *pkt; struct Pending *next; } Pending;
+#ifdef _WIN32
+/* (hookshot, issue 380) once, when Windows has no AV1 decoder: OoT's movies are AV1, and Windows decodes it only with
+   Microsoft's free "AV1 Video Extension" (preinstalled on most PCs, not all). Yes opens its Store page */
+static DWORD WINAPI av1_notice(LPVOID unused) {
+    (void)unused;
+    if (MessageBoxA(NULL, "The game's movies need Microsoft's free \"AV1 Video Extension\", which this PC doesn't have, so they "
+                          "show black (the sound plays).\n\nOpen its page in the Microsoft Store now? Install it, then start the game again.",
+                    "Hookshot", MB_YESNO | MB_ICONINFORMATION | MB_SETFOREGROUND) == IDYES)
+        ShellExecuteA(NULL, "open", "ms-windows-store://pdp/?ProductId=9MVZQVXJBQ9V", NULL, NULL, SW_SHOWNORMAL);
+    return 0;
+}
+#endif
 /* (hookshot) host/mf_av1.c: AV1 on Media Foundation, as the static FFmpeg has no AV1 decoder */
 typedef void (*mf_av1_picture_fn)(void *user, const uint8_t *y, const uint8_t *uv, int w, int h, int stride, int64_t pts);
 void *mf_av1_open(int w, int h);
@@ -228,6 +243,16 @@ static void dec_init_sized(Ctx *c, enum AVCodecID id, const char *what, int w, i
         if (avcodec_open2(d->ctx, codec, NULL) < 0) avcodec_free_context(&d->ctx);
     }
     if (!d->ctx && id == AV_CODEC_ID_AV1) d->mf = mf_av1_open(w, h);
+#ifdef _WIN32
+    if (!d->ctx && !d->mf && id == AV_CODEC_ID_AV1) {   /* (issue 380: no AV1 decoder in Windows: the movies were black, with sound) */
+        static volatile LONG told;
+        if (!InterlockedExchange(&told, 1)) {
+            hos_log("video: no AV1 decoder: install Microsoft's free AV1 Video Extension for the movies");
+            if (!getenv("HOS_HEADLESS") && !getenv("HOOKSHOT_NO_AV1_NOTICE"))
+                CreateThread(NULL, 0, av1_notice, NULL, 0, NULL);
+        }
+    }
+#endif
     d->pkt = av_packet_alloc();
     d->frame = av_frame_alloc();
     set_host(ARG(0), DEC_MAGIC, d);

@@ -44,6 +44,7 @@ on:
       - tests/test_shader_census_cmd.py
       - gpu/vk/vk_shader.cpp
       - tests/test_same_draw.py
+      - tests/test_pass_hazard.py
       - nx2/version.py
       - nx2/test_version.py
       - host/nn_audio.c
@@ -114,6 +115,7 @@ on:
       - tests/test_shader_census_cmd.py
       - gpu/vk/vk_shader.cpp
       - tests/test_same_draw.py
+      - tests/test_pass_hazard.py
       - nx2/version.py
       - nx2/test_version.py
       - host/nn_audio.c
@@ -218,6 +220,9 @@ jobs:
       - name: Check a repeated uniform word is not read again
         if: runner.os == 'Linux'
         run: python -I -B tests/test_ub_memo.py
+      - name: Check a pass hazard skips textures that are not targets
+        if: runner.os == 'Linux'
+        run: python -I -B tests/test_pass_hazard.py
       - name: Check a repeated read bind is not looked up again
         if: runner.os == 'Linux'
         run: python -I -B tests/test_bind_memo.py

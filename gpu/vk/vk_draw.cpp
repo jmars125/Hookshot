@@ -2114,6 +2114,7 @@ struct Pass {
     uint64_t first_prog = 0;
     VkFormat format0 = VK_FORMAT_UNDEFINED;
     std::vector<const Texture*> sampled;   // (rendered textures its draws sampled: a target among them is a hazard)
+    uint16_t sampled_targets = 0;          // (colour i bit i, depth bit 8: targets earlier draws sampled)
     uint16_t written = 0;                  // (its targets written so far: colour i bit i, depth bit 8)
 };
 thread_local Pass pass;
@@ -2247,7 +2248,7 @@ void begin_pass(VkCommandBuffer cmd, const Targets& at) {
     pass.draws = 0, pass.format0 = at.n ? at.color_format[0] : at.depth_format;
     pass.wm_or = 0, pass.wm_n = 0;
     pass.clears = 0, pass.first_prog = 0;
-    pass.sampled.clear(), pass.written = 0;
+    pass.sampled.clear(), pass.sampled_targets = 0, pass.written = 0;
     vkCmdBeginRendering(cmd, &ri);
     pass.open = true;
     st_passes++;
@@ -2617,6 +2618,9 @@ void clear_after_draws(VkCommandBuffer cmd) {
 }
 
 int64_t st_pass_hazards;
+bool writes_sampled_target(uint16_t writes, uint16_t sampled_targets) {
+    return (writes & sampled_targets) != 0;
+}
 /// A draw that samples a target this pass already wrote, or writes a target an earlier draw of this pass sampled: in
 /// a pass of its own, after a full barrier (begin_pass makes it), as for the clears above: in one pass the GPU orders
 /// the targets' writes with each other only, not with the draws' texture reads of them. (A draw that samples a target
@@ -2641,11 +2645,8 @@ uint16_t draw_hazards(VkCommandBuffer cmd, const Program& p, const NvnState& s, 
         const int k = slot_of(t);
         if (k >= 0 && (pass.written >> k & 1) && !(writes >> k & 1)) { kind = "samples a target the pass wrote"; break; }
     }
-    if (!kind)
-        for (const Texture* t : pass.sampled) {
-            const int k = slot_of(t);
-            if (k >= 0 && (writes >> k & 1)) { kind = "writes a target an earlier draw sampled"; break; }
-        }
+    if (!kind && writes_sampled_target(writes, pass.sampled_targets))
+        kind = "writes a target an earlier draw sampled";
     if (!kind) return writes;
     static int logged;
     if (logged++ < 8)
@@ -4104,8 +4105,15 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
     probe_draw(s, p, pass.draws);   // (hookshot: RX_VK_PROBE)
     pass.prog = p.key;
     if (!pass.first_prog) pass.first_prog = p.key;
-    for (const Texture* t : gfx_sampled)
-        if (std::find(pass.sampled.begin(), pass.sampled.end(), t) == pass.sampled.end()) pass.sampled.push_back(t);
+    for (const Texture* t : gfx_sampled) {
+        if (std::find(pass.sampled.begin(), pass.sampled.end(), t) != pass.sampled.end()) continue;
+        pass.sampled.push_back(t);
+        int slot = -1;
+        for (int i = 0; i < at.n; i++)
+            if (at.color[i] == t) { slot = i; break; }
+        if (slot < 0 && at.depth == t) slot = 8;
+        if (slot >= 0) pass.sampled_targets |= (uint16_t)(1u << slot);
+    }
     pass.written |= writes;
     if (pl != last_pipeline) vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pl), last_pipeline = pl;
     if (!same_desc) {

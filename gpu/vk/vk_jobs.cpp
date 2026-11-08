@@ -53,6 +53,36 @@ void jobs_push(std::function<void()> fn, bool urgent) {
     else queue.push_back(std::move(fn));
     work_cv.notify_one();
 }
+// (issue 496) Intel A750: four of the game's big compute pipelines built at once by Intel's compiler (up to 58 s each) froze
+// the whole PC. One thread builds them one at a time there, below normal priority, beside the shared workers
+void jobs_push_serial(std::function<void()> fn) {
+    static std::mutex smu;
+    static std::condition_variable scv;
+    static std::deque<std::function<void()>> sq;
+    static bool sstarted = false;
+    std::lock_guard lk(smu);
+    if (!sstarted) {
+        sstarted = true;
+        std::thread([] {
+            SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+            SetThreadDescription(GetCurrentThread(), L"mkw_vk serial builds");
+            for (;;) {
+                std::function<void()> fn;
+                {
+                    std::unique_lock lk(smu);
+                    scv.wait(lk, [] { return !sq.empty(); });
+                    fn = std::move(sq.front());
+                    sq.pop_front();
+                }
+                fn();
+                jobs_notify();
+            }
+        }).detach();
+        logf("vk: compute pipelines are built one at a time");
+    }
+    sq.push_back(std::move(fn));
+    scv.notify_one();
+}
 void jobs_notify() {
     std::lock_guard lk(mu);
     done_cv.notify_all();

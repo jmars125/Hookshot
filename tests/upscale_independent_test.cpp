@@ -49,7 +49,7 @@ struct {
 } fg;
 bool vkCmdPushDescriptorSetKHR = true;
 int pipe_calls = 0, sampler_calls = 0, image_calls = 0, dispatches = 0, blits = 0, logs = 0;
-int destroyed_pipes = 0, destroyed_layouts = 0, destroyed_sets = 0, waits = 0;
+int destroyed_pipes = 0, destroyed_layouts = 0, destroyed_sets = 0, waits = 0, flushes = 0;
 bool pipe_fail = false, sampler_fail = false, image_fail = false;
 uint64_t next_handle = 100;
 uint32_t made_w = 0, made_h = 0, dispatched_w = 0, dispatched_h = 0;
@@ -69,8 +69,10 @@ int vkCreateSampler(int, const VkSamplerCreateInfo* s, void*, VkSampler* out) {
 void vkDestroyPipeline(int, uint64_t, void*) { ++destroyed_pipes; }
 void vkDestroyPipelineLayout(int, uint64_t, void*) { ++destroyed_layouts; }
 void vkDestroyDescriptorSetLayout(int, uint64_t, void*) { ++destroyed_sets; }
+void queue_flush_locked() { CHECK(dev.present_mu.held); ++flushes; }
 void vkDeviceWaitIdle(int) {
     CHECK(dev.present_mu.held); // the real scaler must take the submit lock before waiting
+    CHECK(flushes > waits); // upstream batching must be drained before waiting for idle
     ++waits;
 }
 void drop_img(Img& i) { i = {}; }
@@ -99,7 +101,7 @@ void logf(const char*, ...) { CHECK(dispatches > 0); ++logs; }
 // PRODUCTION_FUNCTIONS
 void reset() {
     scale = {}; fg = {}; opts = {}; dev.push_descriptor = true; vkCmdPushDescriptorSetKHR = true;
-    pipe_calls = sampler_calls = image_calls = dispatches = blits = waits = 0;
+    pipe_calls = sampler_calls = image_calls = dispatches = blits = waits = flushes = 0;
     destroyed_pipes = destroyed_layouts = destroyed_sets = 0;
     pipe_fail = sampler_fail = image_fail = false;
 }

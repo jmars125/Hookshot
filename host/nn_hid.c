@@ -191,8 +191,8 @@ static int game_in_front(void) {
     if (front != was_front) {
         char cls[64] = "";
         if (w) GetClassNameA(w, cls, sizeof cls);
-        hos_log("hid: input %s (foreground window: process %lu, class \"%s\")", front ? "back" : "paused: the game "
-                "window is not in front", (unsigned long)pid, cls);
+        hos_log("hid: game window %s (foreground window: process %lu, class \"%s\")", front ? "in front" : "not in front",
+                (unsigned long)pid, cls);
         was_front = front;
     }
 #endif

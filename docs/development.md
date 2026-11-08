@@ -35,6 +35,16 @@ Run everything with `python -I` from this folder.
 
 The dump can also come from `OOT_DUMP` (its folder) or `OOT_EXEFS`; `OOT_WORK` moves the work folder.
 
+Scripted test input (`HOS_INPUT_SCRIPT` and `HOS_INPUT_LIVE`) is applied before the window-focus check. A log saying
+the game window is not in front does not mean those presses were discarded. `HOS_HEADLESS` and
+`HOS_WINDOW_NOACTIVATE` change window creation, not this input routing. The game must still reach a state that reads
+and responds to the supplied controller input.
+
+Physical keyboard and mouse input stays with the foreground window. Physical controllers can also play in the
+background when the existing "Controller in background" option or `HOS_INPUT_BACKGROUND=1` enables them;
+`HOS_INPUT_BACKGROUND=0` overrides that option. `HOS_INPUT_EXCLUSIVE=1` controls merging the player's devices while
+the script's existing exclusive interval is active; it is not a focus override.
+
 ## Layout
 
 | Path | What |

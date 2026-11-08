@@ -47,6 +47,8 @@ on:
       - tests/test_pass_hazard.py
       - nx2/version.py
       - nx2/test_version.py
+      - scripts/changelog.py
+      - tests/test_changelog.py
       - host/nn_audio.c
       - tests/test_audio_deadline.py
       - host/pad_sdl.c
@@ -118,6 +120,8 @@ on:
       - tests/test_pass_hazard.py
       - nx2/version.py
       - nx2/test_version.py
+      - scripts/changelog.py
+      - tests/test_changelog.py
       - host/nn_audio.c
       - tests/test_audio_deadline.py
       - host/pad_sdl.c
@@ -230,6 +234,8 @@ jobs:
         run: python -I -B tests/test_shader_census_cmd.py
       - name: Check the build's version stamp
         run: python -I -B nx2/test_version.py
+      - name: Check the release changelog entry
+        run: python -I -B tests/test_changelog.py
       - name: Check a repeated draw keeps its program and pipeline
         if: runner.os == 'Linux'
         run: python -I -B tests/test_same_draw.py

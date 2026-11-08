@@ -84,3 +84,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: build-linux/*.AppImage
+          generate_release_notes: true
+          # (a release candidate, v0.2.0-rc.1, is a prerelease and never "latest")
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          make_latest: ${{ !contains(github.ref_name, '-') }}

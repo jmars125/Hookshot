@@ -1,0 +1,39 @@
+{
+  "branches": [
+    "main",
+    {
+      "name": "next",
+      "prerelease": "rc"
+    }
+  ],
+  "tagFormat": "v${version}",
+  "plugins": [
+    [
+      "@semantic-release/commit-analyzer",
+      {
+        "preset": "conventionalcommits"
+      }
+    ],
+    [
+      "@semantic-release/release-notes-generator",
+      {
+        "preset": "conventionalcommits"
+      }
+    ],
+    [
+      "@semantic-release/exec",
+      {
+        "prepareCmd": "python3 scripts/changelog.py ${nextRelease.version} ${lastRelease.gitTag}"
+      }
+    ],
+    [
+      "@semantic-release/git",
+      {
+        "assets": [
+          "changelog.txt"
+        ],
+        "message": "chore(release): ${nextRelease.version} [skip ci] [skip release]\n\n${nextRelease.notes}"
+      }
+    ]
+  ]
+}

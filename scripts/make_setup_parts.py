@@ -7,7 +7,8 @@ in every release, the .NET runtime, Python, emsdk, the CPM packages and third_pa
 its official release. Each zip is deterministic (sorted names, fixed dates and attributes): a part whose files did not change
 has the same SHA-256 in the next release, and the setup takes it from its download cache instead of downloading it again.
 
-Writes <out>/hookshot-setup.txt and one HookshotBuilder-<part>.zip per part. Scripts the build does not use (.ps1, .bat, .js,
+Writes <out>/hookshot-setup.txt and one HookshotBuilder-<part>-<sha256 prefix>.zip per part (upload the ones the builder-parts
+release lacks). Scripts the build does not use (.ps1, .bat, .js,
 .html: antivirus machine-learning guesses fire on them) are left out.
 """
 import argparse
@@ -56,12 +57,14 @@ def main():
     p.add_argument("package")
     p.add_argument("tag")
     p.add_argument("out")
-    p.add_argument("--base", help="where the parts are served from (default: this repository's release <tag>)")
+    p.add_argument("--base", help="where the parts are served from (default: this repository's builder-parts release)")
     a = p.parse_args()
     root = os.path.abspath(a.package)
     if not os.path.isfile(os.path.join(root, "HookshotBuilder.exe")):
         sys.exit("not a Hookshot Builder package folder: %s" % root)
-    base = (a.base or "https://github.com/NotRexed/Hookshot/releases/download/%s" % a.tag).rstrip("/")
+    # (the parts live in one release of their own, named by their checksum: a part that did not change is not uploaded again, and a
+    # release itself holds only HookshotBuilder.exe (the setup) and the list it reads)
+    base = (a.base or "https://github.com/NotRexed/Hookshot/releases/download/builder-parts").rstrip("/")
     os.makedirs(a.out, exist_ok=True)
     with open(os.path.join(root, "tools", "version.txt"), "w", newline="\n") as f:
         f.write(a.tag + "\n")
@@ -86,6 +89,9 @@ def main():
             continue
         zp = os.path.join(a.out, "HookshotBuilder-%s.zip" % name)
         sha, size = write_zip(zp, root, parts[name])
+        named = os.path.join(a.out, "HookshotBuilder-%s-%s.zip" % (name, sha[:12]))
+        os.replace(zp, named)
+        zp = named
         lines.append("part %s %d . - - %s/%s" % (sha, size, base, os.path.basename(zp)))
         print("%-12s %5d files %5d MB  %s" % (name, len(parts[name]), size >> 20, sha[:16]), flush=True)
     lines.append("part %s %d HookshotBuilder/tools %s llvm-mingw %s" % LLVM)

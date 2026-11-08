@@ -63,7 +63,7 @@ static void fail(const wchar_t *fmt, ...) {
 /* ---- HTTPS GET into a sink, following redirects (GitHub's release links go to its download host) ---- */
 typedef int (*Sink)(void *user, const void *data, DWORD n);
 
-static int http_get(const char *url8, Sink sink, void *user, unsigned long long expect) {
+static int http_get(const char *url8, Sink sink, void *user, unsigned long long expect, const wchar_t *accept) {
     wchar_t url[1024];
     MultiByteToWideChar(CP_UTF8, 0, url8, -1, url, 1024);
     URL_COMPONENTS uc = {sizeof uc};
@@ -76,8 +76,11 @@ static int http_get(const char *url8, Sink sink, void *user, unsigned long long 
     if (!s) return 0;
     /* (a stalled download fails after a minute without data, with the message, instead of waiting forever: a GitHub 504 hour) */
     WinHttpSetTimeouts(s, 30000, 30000, 30000, 60000);
+    DWORD policy = WINHTTP_OPTION_REDIRECT_POLICY_DISALLOW_HTTPS_TO_HTTP;   /* (a redirect never drops to clear text) */
+    WinHttpSetOption(s, WINHTTP_OPTION_REDIRECT_POLICY, &policy, sizeof policy);
     HINTERNET c = WinHttpConnect(s, host, uc.nPort, 0);
-    HINTERNET r = c ? WinHttpOpenRequest(c, L"GET", path, NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
+    LPCWSTR types[2] = {accept, NULL};
+    HINTERNET r = c ? WinHttpOpenRequest(c, L"GET", path, NULL, WINHTTP_NO_REFERER, accept ? types : WINHTTP_DEFAULT_ACCEPT_TYPES,
                                          uc.nScheme == INTERNET_SCHEME_HTTPS ? WINHTTP_FLAG_SECURE : 0)
                     : NULL;
     int ok = 0;
@@ -257,6 +260,74 @@ static void prune(const wchar_t *versions, const wchar_t *downloads, const char 
 static void w(const char *s8, wchar_t *out, int n) { MultiByteToWideChar(CP_UTF8, 0, s8, -1, out, n); }
 
 /* (HOOKSHOT_SETUP_LIST=<url>: another list, for testing a release before it is the latest) */
+/* ---- The GitHub API's link for a release file (after PR 546 by nicholasgower, issue 544). GitHub answered the release
+   page's cached link (releases/latest/download/...) with 504 for hours on 2026-11-08 while its API still answered: the API
+   gives the file's own asset link, which redirects to a fresh download. Used when the release link fails. ---- */
+static int json_space(char c) { return c == 32 || c == 9 || c == 10 || c == 13; }
+
+static int json_string_after(const char *p, const char *end, char *out, int n) {
+    while (p < end && json_space(*p)) p++;
+    if (p >= end || *p != ':') return 0;
+    for (p++; p < end && json_space(*p); p++) {}
+    if (p >= end || *p != '"') return 0;
+    int i = 0;
+    for (p++; p < end && *p != '"'; p++) {
+        if (*p == '\\' && p + 1 < end) p++;
+        if (i + 1 < n) out[i++] = *p;
+    }
+    if (p >= end) return 0;
+    out[i] = 0;
+    return 1;
+}
+
+/* The API link of the asset called name in a release's JSON (in an asset object its own "url" comes before its "name") */
+static int asset_from_json(const char *json, size_t len, const char *name, char *out, int n) {
+    const char *end = json + len, *at = NULL;
+    char v[600];
+    for (const char *p = json; (p = strstr(p, "\"name\"")) && p < end; p += 6)
+        if (json_string_after(p + 6, end, v, sizeof v) && !strcmp(v, name)) { at = p; break; }
+    if (!at) return 0;
+    const char *url = NULL;
+    for (const char *p = json; p + 5 <= at; p++)
+        if (!strncmp(p, "\"url\"", 5)) url = p;
+    return url && json_string_after(url + 5, end, out, n) && !strncmp(out, "https://api.github.com/", 23);
+}
+
+/* repo "owner/name", tag NULL for the latest release */
+static int api_asset_url(const char *repo, const char *tag, const char *name, char *out, int n) {
+    char api[1024];
+    if (tag) snprintf(api, sizeof api, "https://api.github.com/repos/%s/releases/tags/%s", repo, tag);
+    else snprintf(api, sizeof api, "https://api.github.com/repos/%s/releases/latest", repo);
+    Mem m = {0};
+    const int found = http_get(api, mem_sink, &m, 0, L"application/vnd.github+json") && m.p && asset_from_json(m.p, m.n, name, out, n);
+    free(m.p);
+    return found;
+}
+
+/* https://github.com/<owner>/<repo>/releases/download/<tag>/<name> or .../releases/latest/download/<name> -> its API link */
+static int api_link_for(const char *url, char *out, int n) {
+    static const char pre[] = "https://github.com/";
+    char repo[256], tag[256], name[260];
+    if (strncmp(url, pre, sizeof pre - 1)) return 0;
+    const char *p = url + sizeof pre - 1, *slash = strchr(p, '/');
+    if (!slash || !(slash = strchr(slash + 1, '/'))) return 0;
+    if ((size_t)(slash - p) >= sizeof repo) return 0;
+    memcpy(repo, p, slash - p), repo[slash - p] = 0;
+    const char *t;
+    int latest = 0;
+    if (!strncmp(slash, "/releases/latest/download/", 26)) latest = 1, t = slash + 26;
+    else if (!strncmp(slash, "/releases/download/", 19)) {
+        t = slash + 19;
+        const char *e = strchr(t, '/');
+        if (!e || (size_t)(e - t) >= sizeof tag) return 0;
+        memcpy(tag, t, e - t), tag[e - t] = 0;
+        t = e + 1;
+    } else return 0;
+    if (!*t || strlen(t) >= sizeof name || strpbrk(t, "/?#")) return 0;
+    strcpy(name, t);
+    return api_asset_url(repo, latest ? NULL : tag, name, out, n);
+}
+
 static const char *manifest_url(void) {
     static char u[1024];
     const char *e = getenv("HOOKSHOT_SETUP_LIST");
@@ -296,7 +367,15 @@ static DWORD WINAPI work(LPVOID unused) {
         free(man.p);
         man = (Mem){0};
         g_http_status = 0;
-        ok = http_get(manifest_url(), mem_sink, &man, 0) && man.p;
+        ok = http_get(manifest_url(), mem_sink, &man, 0, NULL) && man.p;
+        const DWORD first = g_http_status;
+        char api[1024];
+        if (!ok && (!first || first >= 500) && api_link_for(manifest_url(), api, sizeof api)) {   /* (the API's link instead) */
+            free(man.p);
+            man = (Mem){0};
+            ok = http_get(api, mem_sink, &man, 0, L"application/octet-stream") && man.p;
+            if (!ok) g_http_status = first;
+        }
         if (!ok && g_http_status && g_http_status < 500) break;   /* (404 and the like: trying again changes nothing) */
     }
     if (!ok)
@@ -359,7 +438,12 @@ static DWORD WINAPI work(LPVOID unused) {
                     BCryptOpenAlgorithmProvider(&a, BCRYPT_SHA256_ALGORITHM, NULL, 0);
                     BCryptCreateHash(a, &fs.h, NULL, 0, NULL, 0, 0);
                     g_http_status = 0;
-                    got = http_get(p->url, file_sink, &fs, p->size);
+                    /* (after a failed try the API's link to the same file, every other try) */
+                    char api[1024];
+                    if (attempt % 2 == 1 && api_link_for(p->url, api, sizeof api))
+                        got = http_get(api, file_sink, &fs, p->size, L"application/octet-stream");
+                    else
+                        got = http_get(p->url, file_sink, &fs, p->size, NULL);
                     CloseHandle(fs.f);
                     unsigned char d[32];
                     BCryptFinishHash(fs.h, d, 32, 0);

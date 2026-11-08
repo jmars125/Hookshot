@@ -213,6 +213,7 @@ bool ensure_size(VkCommandBuffer cmd, uint32_t w, uint32_t h) {
         std::unique_lock lk(fg.mu);
         fg.cv.wait(lk, [] { return fg.jobs.empty() && !fg.sets[0].busy && !fg.sets[1].busy && !fg.sets[2].busy; });
     }
+    queue_flush();
     vkDeviceWaitIdle(dev.device);
     for (int i = 0; i < 2; i++) {
         drop_img(fg.frames[i]), drop_img(fg.lumas[i]), drop_img(fg.flows[i]);
@@ -358,6 +359,7 @@ VkImage framegen_scale(VkCommandBuffer cmd, VkImageView src, VkImage image, uint
         if (scale.cropped_w != cw || scale.cropped_h != ch) {
             {
                 std::lock_guard qk(dev.present_mu);
+                queue_flush_locked();
                 vkDeviceWaitIdle(dev.device);
             }
             drop_img(scale.cropped);
@@ -381,6 +383,7 @@ VkImage framegen_scale(VkCommandBuffer cmd, VkImageView src, VkImage image, uint
     if (scale.scaled_w != dw || scale.scaled_h != dh) {
         {
             std::lock_guard qk(dev.present_mu);   // (the queue is idle only while nothing else submits to it)
+            queue_flush_locked();
             vkDeviceWaitIdle(dev.device);
         }
         drop_img(scale.scaled);

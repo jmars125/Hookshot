@@ -26,6 +26,8 @@ namespace mkwvk {
 
 extern const MkwVkHost* host;
 void logf(const char* fmt, ...);
+void queue_flush_locked();   // (vk_replay.cpp, RX_VK_BATCH: held submits out; dev.present_mu held)
+void queue_flush();          // (the same, taking dev.present_mu)
 
 struct Device {
     VkInstance instance = VK_NULL_HANDLE;

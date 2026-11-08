@@ -16,6 +16,9 @@
 #include <string.h>
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#ifdef _WIN32
+#include <shellapi.h>
+#endif
 #include <libavcodec/avcodec.h>
 #include <libswscale/swscale.h>
 
@@ -51,6 +54,18 @@ typedef struct { uint32_t magic; uint16_t w, h; uint32_t format, tiling; } Pref;
 typedef struct { uint8_t *rgba, *nv12; int w, h; int64_t pts; int last; } Picture;
 /* a submission waiting to be decoded (pkt NULL: the stream's end) */
 typedef struct Pending { AVPacket *pkt; struct Pending *next; } Pending;
+#ifdef _WIN32
+/* (hookshot, issue 380) once, when Windows has no AV1 decoder: OoT's movies are AV1, and Windows decodes it only with
+   Microsoft's free "AV1 Video Extension" (preinstalled on most PCs, not all). Yes opens its Store page */
+static DWORD WINAPI av1_notice(LPVOID unused) {
+    (void)unused;
+    if (MessageBoxA(NULL, "The game's movies need Microsoft's free \"AV1 Video Extension\", which this PC doesn't have, so they "
+                          "show black (the sound plays).\n\nOpen its page in the Microsoft Store now? Install it, then start the game again.",
+                    "Hookshot", MB_YESNO | MB_ICONINFORMATION | MB_SETFOREGROUND) == IDYES)
+        ShellExecuteA(NULL, "open", "ms-windows-store://pdp/?ProductId=9MVZQVXJBQ9V", NULL, NULL, SW_SHOWNORMAL);
+    return 0;
+}
+#endif
 /* (hookshot) host/mf_av1.c: AV1 on Media Foundation, as the static FFmpeg has no AV1 decoder */
 typedef void (*mf_av1_picture_fn)(void *user, const uint8_t *y, const uint8_t *uv, int w, int h, int stride, int64_t pts);
 void *mf_av1_open(int w, int h);
@@ -122,6 +137,7 @@ HLE(_ZN2nn5codec26InitializeDecoderImagePoolEPNS0_25VideoDecoderImagePoolTypeEPv
     o->format = p->magic == PREF_MAGIC ? (int)p->format : 2;
     o->count = (int)ARG(4) > 0 ? (int)ARG(4) : 1;
     o->rgba = (uint8_t *)calloc((size_t)o->count, (size_t)o->w * o->h * 4);
+    /* (hookshot, issue 342: an allocation that failed went on as a NULL picture, and the movie thread read address 0) */
     o->nv12 = (uint8_t *)calloc((size_t)o->count, (size_t)o->w * o->h * 3 / 2);
     o->mem = ARG(1), o->mem_size = ARG(2);
     if (video_log())
@@ -142,7 +158,7 @@ HLE(_ZN2nn5codec24FinalizeDecoderImagePoolEPNS0_25VideoDecoderImagePoolTypeE) {
 static SRWLOCK pool_rgba_lock = SRWLOCK_INIT;
 static void pool_rgba(Pool *o) {
     AcquireSRWLockExclusive(&pool_rgba_lock);
-    if (o->rgba_stale) {
+    if (o->rgba_stale && o->rgba && o->nv12) {
         if (!o->sws)
             o->sws = sws_getContext(o->w, o->h, AV_PIX_FMT_NV12, o->w, o->h, AV_PIX_FMT_RGBA, SWS_BILINEAR, NULL, NULL, NULL);
         const uint8_t *src[4] = {o->nv12, o->nv12 + (size_t)o->w * o->h, NULL, NULL};
@@ -165,7 +181,7 @@ HLE(_ZN2nn5codec26ReadDecoderOutputImageRgbaEPKNS0_25VideoDecoderImagePoolTypeEj
             hos_log("video: ReadDecoderOutputImageRgba(pool %s, index %u, %u,%u %ux%u, dst %#llx stride %llu)",
                     o ? "ok" : "unknown", i, x, y, w, h, (unsigned long long)dst, (unsigned long long)stride);
     }
-    if (!o || i >= (uint32_t)o->count || !dst || x >= (uint32_t)o->w) { RET(0); return; }
+    if (!o || !o->rgba || i >= (uint32_t)o->count || !dst || x >= (uint32_t)o->w) { RET(0); return; }
     o->read_by_api = 1;
     if (i == 0 && o->rgba_stale) pool_rgba(o);
     const uint8_t *src = o->rgba + (size_t)i * o->w * o->h * 4;
@@ -227,6 +243,16 @@ static void dec_init_sized(Ctx *c, enum AVCodecID id, const char *what, int w, i
         if (avcodec_open2(d->ctx, codec, NULL) < 0) avcodec_free_context(&d->ctx);
     }
     if (!d->ctx && id == AV_CODEC_ID_AV1) d->mf = mf_av1_open(w, h);
+#ifdef _WIN32
+    if (!d->ctx && !d->mf && id == AV_CODEC_ID_AV1) {   /* (issue 380: no AV1 decoder in Windows: the movies were black, with sound) */
+        static volatile LONG told;
+        if (!InterlockedExchange(&told, 1)) {
+            hos_log("video: no AV1 decoder: install Microsoft's free AV1 Video Extension for the movies");
+            if (!getenv("HOS_HEADLESS") && !getenv("HOOKSHOT_NO_AV1_NOTICE"))
+                CreateThread(NULL, 0, av1_notice, NULL, 0, NULL);
+        }
+    }
+#endif
     d->pkt = av_packet_alloc();
     d->frame = av_frame_alloc();
     set_host(ARG(0), DEC_MAGIC, d);
@@ -276,6 +302,12 @@ static void queue_frame(Dec *d, const AVFrame *f) {
     const int nv12 = f->format == AV_PIX_FMT_NV12;   /* (hookshot: Media Foundation's pictures, kept as NV12 alone) */
     p.rgba = nv12 ? NULL : (uint8_t *)malloc((size_t)w * h * 4);
     p.nv12 = nv12 ? (uint8_t *)malloc((size_t)w * h * 3 / 2) : (uint8_t *)calloc(1, (size_t)w * h * 3 / 2);
+    if (!p.nv12 || (!nv12 && !p.rgba)) {   /* (out of memory: this frame is dropped, not written through NULL; issue 342) */
+        static volatile LONG told;
+        if (InterlockedIncrement(&told) <= 4) hos_log("video: no memory for a %dx%d frame: dropped", w, h);
+        free(p.rgba), free(p.nv12);
+        return;
+    }
     uint8_t *dst[4] = {p.rgba, NULL, NULL, NULL};
     int dst_stride[4] = {w * 4, 0, 0, 0};
     if (d->sws && p.rgba) sws_scale(d->sws, (const uint8_t *const *)f->data, f->linesize, 0, h, dst, dst_stride);
@@ -552,9 +584,10 @@ static void dec_acquire(Ctx *c) {
     Picture *p = &d->queue[d->qhead];
     Pool *o = (Pool *)host_of(d->slots[slot], POOL_MAGIC);
     /* (the picture at the pool's size: rows and columns past either are left out) */
-    const int w = p->w < o->w ? p->w : o->w, h = p->h < o->h ? p->h : o->h;
+    const int ok = o->nv12 != NULL && p->nv12 != NULL;   /* (an allocation that failed: nothing copied; issue 342) */
+    const int w = !ok ? 0 : p->w < o->w ? p->w : o->w, h = !ok ? 0 : p->h < o->h ? p->h : o->h;
     for (int y = 0; y < h; y++) {
-        if (p->rgba) memcpy(o->rgba + (size_t)y * o->w * 4, p->rgba + (size_t)y * p->w * 4, (size_t)w * 4);
+        if (p->rgba && o->rgba) memcpy(o->rgba + (size_t)y * o->w * 4, p->rgba + (size_t)y * p->w * 4, (size_t)w * 4);
         memcpy(o->nv12 + (size_t)y * o->w, p->nv12 + (size_t)y * p->w, (size_t)w);
     }
     for (int y = 0; y < h / 2; y++)
@@ -569,7 +602,7 @@ static void dec_acquire(Ctx *c) {
         const size_t nv12_size = (size_t)o->w * o->h * 3 / 2, rgba_size = (size_t)o->w * o->h * 4;
         const int rgba = o->format != 0 && o->mem_size >= rgba_size;   /* (VideoDecoderOutputFormat 0: NV12) */
         const size_t need = rgba ? rgba_size : nv12_size;
-        if (o->mem_size >= need) {
+        if (o->mem_size >= need && ok && (rgba ? o->rgba != NULL : 1)) {
             if (rgba && o->rgba_stale) pool_rgba(o);
             memcpy(GP(o->mem), rgba ? o->rgba : o->nv12, need);
             HOS_WRITTEN(GP(o->mem), need);

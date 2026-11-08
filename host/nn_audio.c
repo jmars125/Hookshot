@@ -572,6 +572,13 @@ static int fill_block, fill_frames;
 static FILE *dump;
 static uint32_t dump_bytes;
 
+static void output_error(const char *operation, MMRESULT result) {
+    static unsigned logged;
+    if (logged < 8) {
+        logged++;
+        hos_log("audio: %s failed (MMRESULT %u)", operation, (unsigned)result);
+    }
+}
 static void output_open(void) {
     const char *d = getenv("HOS_AUDIO_DUMP");
     if (d && (dump = fopen(d, "wb")) != NULL) {
@@ -586,8 +593,9 @@ static void output_open(void) {
     f.wBitsPerSample = 16;
     f.nBlockAlign = 4;
     f.nAvgBytesPerSec = RATE * 4;
-    if (waveOutOpen(&wout, WAVE_MAPPER, &f, 0, 0, CALLBACK_NULL) != MMSYSERR_NOERROR) {
-        hos_log("audio: no output device");
+    const MMRESULT result = waveOutOpen(&wout, WAVE_MAPPER, &f, 0, 0, CALLBACK_NULL);
+    if (result != MMSYSERR_NOERROR) {
+        output_error("waveOutOpen", result);
         wout = NULL;
         return;
     }
@@ -633,13 +641,29 @@ static void output_frame(const int16_t *pcm) {
     WAVEHDR *h = &hdr[fill_block];
     if (fill_frames == 0) {
         if (!(h->dwFlags & WHDR_DONE)) return;   /* the device is behind: this frame is dropped */
-        if (h->dwFlags & WHDR_PREPARED) waveOutUnprepareHeader(wout, h, sizeof *h);
+        if (h->dwFlags & WHDR_PREPARED) {
+            const MMRESULT result = waveOutUnprepareHeader(wout, h, sizeof *h);
+            if (result != MMSYSERR_NOERROR) {
+                output_error("waveOutUnprepareHeader", result);
+                return;   /* the driver has not released the header: do not change its samples or flags */
+            }
+        }
     }
     memcpy(blocks[fill_block] + fill_frames * FRAME * 2, pcm, FRAME * 4);
     if (++fill_frames == 2) {
         h->dwFlags = 0;
-        waveOutPrepareHeader(wout, h, sizeof *h);
-        waveOutWrite(wout, h, sizeof *h);
+        const char *operation = "waveOutPrepareHeader";
+        MMRESULT result = waveOutPrepareHeader(wout, h, sizeof *h);
+        if (result == MMSYSERR_NOERROR) {
+            operation = "waveOutWrite";
+            result = waveOutWrite(wout, h, sizeof *h);
+        }
+        if (result != MMSYSERR_NOERROR) {
+            output_error(operation, result);
+            /* A failed submission has no completion to set DONE. Reuse only a host-owned block; a prepared header
+               is unprepared on its next turn. Without this, returning to this slot drops every later audio frame. */
+            if (!(h->dwFlags & WHDR_INQUEUE)) h->dwFlags |= WHDR_DONE;
+        }
         fill_frames = 0;
         fill_block = (fill_block + 1) % NBLOCKS;
     }

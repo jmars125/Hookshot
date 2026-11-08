@@ -145,10 +145,11 @@ def vk_sources():
 
 
 def cpm_dirs():
-    """Eden's CPM package caches, read only: RX_CPM, this project's work/eg clone, mkw-recomp's, the shared
-    Eglantine checkout's (Vulkan and SPIR-V headers, VMA, FFmpeg)"""
+    """CPM packages: RX_CPM, packaged tools/cpm, then legacy project caches.
+    The packages provide Vulkan and SPIR-V headers, VMA and FFmpeg."""
     eden_ns2 = os.path.dirname(kit.ROOT)
-    return [d for d in (os.environ.get("RX_CPM"), os.path.join(kit.WORK, "eg", ".cache", "cpm"),
+    return [d for d in (os.environ.get("RX_CPM"), os.path.join(kit.ROOT, "cpm"),
+                        os.path.join(kit.WORK, "eg", ".cache", "cpm"),
                         os.path.join(eden_ns2, "mkw-recomp", "work", "eg", ".cache", "cpm"),
                         os.path.join(eden_ns2, "Eglantine", ".cache", "cpm")) if d and os.path.isdir(d)]
 
@@ -231,7 +232,31 @@ WRITE_TRACK = [] if os.environ.get("RX_SOFT_WRITE_WATCH") == "0" else ["-DA64_WR
 # MOVBE; Haswell and Zen 1 on). With FMA the FPX1 fast paths cover double-precision FMA (RECOMP_FPX_FMA64; it took
 # the exact software body on baseline x86-64) and the bit counts are single instructions. No contraction, so a C
 # expression is rounded as written (the exact bodies and FPX1's proofs assume it). RX_MARCH=x86-64: the old baseline
-CPU = ["-march=" + os.environ.get("RX_MARCH", "x86-64-v3"), "-ffp-contract=off"]
+# (issue 363: a Xeon E5-2667 v2 (Ivy Bridge, no AVX2) built the game and then stopped at its first AVX2 instruction,
+# 0xc000001d. The game is built on the PC it runs on: a CPU without x86-64-v3's features gets x86-64-v2, or x86-64)
+def host_march():
+    want = ("avx2", "fma", "bmi2", "movbe")
+    try:
+        if os.name == "nt":
+            import ctypes
+            pf = ctypes.windll.kernel32.IsProcessorFeaturePresent
+            # (PF_AVX2_INSTRUCTIONS_AVAILABLE 40; PF_SSE4_2_INSTRUCTIONS_AVAILABLE 38. Windows reports no FMA/BMI2 bit, but
+            # every AVX2 CPU has them, as x86-64-v3 counts them together)
+            if pf(40):
+                return "x86-64-v3"
+            return "x86-64-v2" if pf(38) else "x86-64"
+        flags = open("/proc/cpuinfo").read().split("flags", 1)[1].split(chr(10), 1)[0].split()
+        if all(f in flags for f in want):
+            return "x86-64-v3"
+        return "x86-64-v2" if all(f in flags for f in ("sse4_2", "popcnt", "ssse3")) else "x86-64"
+    except Exception:
+        return "x86-64-v3"
+
+
+MARCH = os.environ.get("RX_MARCH") or host_march()
+if MARCH != "x86-64-v3":
+    print("build: this CPU has no AVX2: the game is built for %s (a little slower)" % MARCH, flush=True)
+CPU = ["-march=" + MARCH, "-ffp-contract=off"]
 
 
 def flags(gen, rt64, opt, polls):
@@ -488,7 +513,7 @@ def main():
     vk_objs = {j[2] for j in vk_jobs}
     objs = [j[2] for j in jobs if j[2] not in vk_objs]
     rsp = os.path.join(out, "objs.rsp")
-    open(rsp, "w").write("\n".join('"%s"' % o.replace("\\", "/") for o in objs))
+    open(rsp, "w", encoding="utf-8").write("\n".join('"%s"' % o.replace("\\", "/") for o in objs))
     if a.lib:
         lib = os.path.join(out, "hookshot_game.lib")
         subprocess.run([toolchain.lld_link(), "/lib", "/out:" + lib, "@" + rsp], check=True)
@@ -542,13 +567,20 @@ def main():
         if os.path.exists(sdl) and (not os.path.exists(sdl_dst) or os.path.getsize(sdl_dst) != os.path.getsize(sdl)):
             import shutil
             shutil.copyfile(sdl, sdl_dst)
+        # (SDL2.dll is sdl2-compat: the SDL2 calls on SDL3, whose controller support is current (a Steam Controller user's
+        # report). It loads SDL3.dll from beside it)
+        sdl3 = os.path.join(kit.HERE, "..", "third_party", "sdl2", "SDL3.dll")
+        sdl3_dst = os.path.join(out, "SDL3.dll")
+        if os.path.exists(sdl3) and (not os.path.exists(sdl3_dst) or os.path.getsize(sdl3_dst) != os.path.getsize(sdl3)):
+            import shutil
+            shutil.copyfile(sdl3, sdl3_dst)
     if vk_prebuilt and a.standalone and not a.only:
         import shutil
         shutil.copyfile(vk_prebuilt, os.path.join(out, VK_LIB))
     if vk_jobs:   # (hookshot_vk.dll beside the exe: loaded by host/rx_backend.c with RX_BACKEND=vulkan)
         vdll = os.path.join(out, VK_LIB)
         vrsp = os.path.join(out, "vk_objs.rsp")
-        open(vrsp, "w").write("\n".join('"%s"' % j[2].replace("\\", "/") for j in vk_jobs))
+        open(vrsp, "w", encoding="utf-8").write("\n".join('"%s"' % j[2].replace("\\", "/") for j in vk_jobs))
         t = time.time()
         if LINUX:   # (its C++ runtime inside: the game folder runs where the AppImage's sysroot is older than the system)
             link = [toolchain.need(toolchain.find("clang++"))] + target() + [

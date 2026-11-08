@@ -28,7 +28,7 @@ struct NvnState {
     NVNbufferRange vbuf[16]{};
     nvn_p_set_rt rt{};
     uint64_t rt_serial = 0;      // bumped at each NOP_SET_RT (the draw path resolves the targets once per change)
-    uint64_t bind_gen = 0;       // bumped by every binding the descriptors read (program, buffers, handles, pools)
+    uint64_t bind_gen = 0;       // bumped when a binding the descriptors read changes (a rebind of the same values does not)
     float viewport[16][4]{};
     float depth_near = 0.0f, depth_far = 1.0f;
     int32_t scissor[4]{0, 0, 0, 0};

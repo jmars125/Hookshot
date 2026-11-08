@@ -183,7 +183,6 @@ void hos_commit_init(void) {
 }
 
 /* ---- stand-ins --------------------------------------------------------------------------------------------- */
-void hos_mods_init(const char *image_path) { (void)image_path; } /* (mods.c) */
 /* HOS_PROFILE=<seconds> (in place of TOTKPort's hos_prof.c): every interval, the process's busiest threads and their
    share of a core (guest threads by their guest names, host threads by their descriptions): which one a frame rate
    waits for */
@@ -615,9 +614,6 @@ int hos_blank_cached_icon(const char *guest, const char *host) { (void)guest, (v
 int hos_ultrawide_redirect(const char *guest, char *out, size_t cap) { (void)guest, (void)out, (void)cap; return 0; }
 uint64_t hos_title_input(uint64_t buttons) { return buttons; }   /* (totk_title.c) */
 uint64_t hos_frame_step_buttons(uint64_t buttons) { return buttons; }   /* (nn_vi.c) */
-int hos_mods_dir_extras(const char *rel, const char *base_dir, void (*fn)(void *, const char *, int, uint64_t),
-                        void *arg) { (void)rel, (void)base_dir, (void)fn, (void)arg; return 0; }   /* (mods.c) */
-int hos_mods_romfs(const char *rel, char *out, size_t cap) { (void)rel, (void)out, (void)cap; return 0; }
 /* (hookshot) hos_sdl_pads, hos_sdl_rumble: host/pad_sdl.c (from TOTKPort; SDL2.dll beside the exe) */
 
 /* TOTK's emulated GPU (gpu.c, its Maxwell command processor), which nvdrv.c and the debug commands call into: MKW

@@ -2189,7 +2189,10 @@ NV(nvnWindowGetPresentInterval) { RET((uint32_t)((const nvn_win *)P(0))->interva
 /* the game picks its interval from its frame time; in real-time mode (nn_vi.c) frames are paced by our limiter */
 NV(nvnWindowSetPresentInterval) {
     nvn_win *o = (nvn_win *)P(0);
-    if (o->interval != I(1)) hos_log("nvn: the game sets present interval %d -> %d", o->interval, I(1)), hos_backtrace();
+    {   /* (OoT changes it several times a second: logged with a backtrace only the first times, it was a syscall-heavy cost) */
+        static int told;
+        if (o->interval != I(1) && told++ < 6) hos_log("nvn: the game sets present interval %d -> %d", o->interval, I(1)), hos_backtrace();
+    }
     extern volatile uint64_t hos_mkw_pacer;   /* (nn_vi.c: its frame pacer, which calls this from 0x806bce24) */
     if (hos_game_is_mkw() && c->x[30] == 0x806bce28) hos_mkw_pacer = c->x[19];
     int hos_vi_native_interval(Ctx *c, int requested);

@@ -123,14 +123,29 @@ bool pick_device() {
     vkEnumeratePhysicalDevices(dev.instance, &n, nullptr);
     std::vector<VkPhysicalDevice> all(n);
     vkEnumeratePhysicalDevices(dev.instance, &n, all.data());
+    // (AMD laptops) With AMD graphics in the processor and an AMD card, Windows has two AMD drivers installed, one an
+    // adapter, and each one's Vulkan driver lists every AMD GPU: the card shows up twice. It came first through the
+    // processor graphics' driver, which the card's own update leaves as it was: on an RX 7700S that older driver
+    // (amdvlk64.dll 32.0.11036.4002) crashed in its shader compiler (0xc0000409) on the game's compute pipelines while
+    // the card's 32.0.32015.7029 built them. The same kind of GPU twice: the one with the newer driver wins.
+    // RX_VK_DEVICE=<n>: that device, as listed in the log
     int best = -1, best_score = -1;
+    uint32_t best_driver = 0;
+    const char* want = getenv("RX_VK_DEVICE");
     for (uint32_t i = 0; i < n; i++) {
         VkPhysicalDeviceProperties p;
         vkGetPhysicalDeviceProperties(all[i], &p);
+        logf("vk: device %u: %s, Vulkan %u.%u, driver %#x, type %d", i, p.deviceName, VK_API_VERSION_MAJOR(p.apiVersion),
+             VK_API_VERSION_MINOR(p.apiVersion), p.driverVersion, (int)p.deviceType);
         if (p.apiVersion < VK_API_VERSION_1_3) continue;
+        if (want && *want) {
+            if ((uint32_t)atoi(want) == i) best = (int)i, best_score = 3;
+            continue;
+        }
         const int score = p.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU ? 2 :
                           p.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU ? 1 : 0;
-        if (score > best_score) best = (int)i, best_score = score;
+        if (score > best_score || (score == best_score && p.driverVersion > best_driver))
+            best = (int)i, best_score = score, best_driver = p.driverVersion;
     }
     if (best < 0) {
         logf("vk: no Vulkan 1.3 GPU");
@@ -229,7 +244,8 @@ bool create_device() {
     vkGetPhysicalDeviceFeatures2(dev.physical, &f);
     dev.view_2d_of_3d = dev.view_2d_of_3d && v2d3d.sampler2DViewOf3D;
     coop.cooperativeMatrixRobustBufferAccess = VK_FALSE;
-    dev.coop_matrix = dev.coop_matrix && coop.cooperativeMatrix;
+    dev.coop_matrix = dev.coop_matrix && coop.cooperativeMatrix &&
+                      f12.vulkanMemoryModel && f12.vulkanMemoryModelDeviceScope;
     // (bounds-checked buffer access: an out-of-range access dropped instead of faulting the device. On by default now: the GPU
     // culling pass 53caac5f faulted the device while a save loaded, about one start in three, and the scene's lighting read garbage
     // for single frames (the black flashes); with it, neither in A/B runs at the same GPU time. Lichii's OoT branch keeps it on too.
@@ -368,9 +384,44 @@ bool create_swapchain(uint32_t width, uint32_t height) {
 namespace {
 
 HWND main_window = nullptr;
+// (hookshot) hookshot --prepare-shaders (a builder, after a build): the same work with no game, its progress as
+// "@@progress" lines on stdout. A skip there leaves hookshot_prepare_skipped beside the game: its own starts then
+// leave the work out too (what was not prepared is built when first drawn), until a --prepare-shaders run ends it
+bool prepare_only() { return getenv("HOOKSHOT_PREPARE_ONLY") != nullptr; }
+std::string skipped_path() {
+    char exe[MAX_PATH];
+    const DWORD n = GetModuleFileNameA(nullptr, exe, MAX_PATH);
+    std::string path(exe, n);
+    return path.substr(0, path.find_last_of("\\/") + 1) + "hookshot_prepare_skipped";
+}
 bool started_up() {
     if (const char* e = getenv("RX_VK_START_DELAY")) Sleep((DWORD)atoi(e) * 1000);   // (diagnosis: a long start, as the first one is)
     if (!replay_start()) return false;
+    if (prepare_only()) {
+        static int part;   // (two parts: the programs, then the pipelines the notes name; most of the time is the first)
+        const auto progress = [](size_t done, size_t total) {
+            static size_t last = ~(size_t)0;
+            if (!total) return;
+            const size_t at = (part ? 900 : 0) + done * (part ? 100 : 900) / total;
+            if (at == last) return;
+            last = at;
+            printf("@@progress %.3f\n", at / 1000.0);
+            fflush(stdout);
+        };
+        printf("@@stage shaders Preparing shaders\n");
+        fflush(stdout);
+        part = 0;
+        prepare_run(progress);
+        part = 1;
+        precompile_run(progress);
+        remove(skipped_path().c_str());
+        return true;
+    }
+    if (FILE* f = fopen(skipped_path().c_str(), "rb")) {
+        fclose(f);
+        logf("vk: the shaders' preparation was skipped at the build: left to when each is first drawn");
+        return true;
+    }
     if (precompile_wanted()) {   // (a release build, before the game: nothing to build during play)
         // (a console while it lasts: there is no window yet, and a long wait with nothing on screen looks like a hang)
         static HANDLE console = nullptr;
@@ -380,6 +431,17 @@ bool started_up() {
             if (!tried) {
                 tried = true;
                 if (AllocConsole()) {
+#ifdef _WIN32
+                    // This console is ours. Selection must not block preparation's progress writes.
+                    const HANDLE input = CreateFileA("CONIN$", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                                     nullptr, OPEN_EXISTING, 0, nullptr);
+                    if (input != INVALID_HANDLE_VALUE) {
+                        DWORD mode;
+                        if (GetConsoleMode(input, &mode))
+                            SetConsoleMode(input, (mode & ~ENABLE_QUICK_EDIT_MODE) | ENABLE_EXTENDED_FLAGS);
+                        CloseHandle(input);
+                    }
+#endif
                     SetConsoleTitleA("Hookshot");
                     console = CreateFileA("CONOUT$", GENERIC_WRITE, FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
                     if (console == INVALID_HANDLE_VALUE) console = nullptr;

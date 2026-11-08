@@ -1,6 +1,8 @@
 /* nn::hid: one Pro Controller (FullKey style) on Npad No.1, from every XInput gamepad and the keyboard and mouse at
    once. Buttons map by position (the Xbox bottom face button is the Switch's bottom one, B).
 
+   (hookshot) What presses each button, on a gamepad and on the keyboard, is the player's: the Insert menu's Controls
+   page (gpu/vk/vk_menu.cpp) changes it, kept in hookshot_options.ini (binds_load). The defaults:
    Keyboard (totk-pc-recomp's layout): WASD left stick, arrows or IJKL right stick (camera), Space X (jump), E A
    (action), Shift B (run/cancel), Q L (abilities), R R, Z ZL, X or F ZR (bow), Ctrl left-stick click (crouch), C
    right-stick click (first person), Tab or Enter Plus, M Minus (map), 1 2 3 4 d-pad left, up, right, down. Only
@@ -9,6 +11,11 @@
    mouse_stick), left button Y (attack), right button ZL (shield, lock on). - and = change its sensitivity (x0.8 /
    x1.25, shown in the title bar, kept in <user>/mouse_sens.txt); HOS_MOUSE_SENS=<x> sets it, HOS_MOUSE_INVERT_Y=1
    flips up/down.
+
+   Controllers count only while the game's window is in front, like the keyboard, unless the Insert menu's "Controller in
+   background" is on (or HOS_INPUT_BACKGROUND=1; =0 keeps them to the window in front whatever the menu says): then a
+   game streamed from a screen of its own, or left running behind another window, still follows the pad. The keyboard
+   and mouse stay with the window in front either way.
 
    HOS_INPUT_SCRIPT (test runs): timed presses added to the input, "<seconds>:<button>[+<button>...][/<ms held>],..."
    with buttons A B X Y L R ZL ZR PLUS MINUS LS RS LEFT UP RIGHT DOWN and the stick directions LUP LDOWN LLEFT
@@ -24,6 +31,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <xinput.h>
+#include "../gpu/vk/vk_api.h"   /* (the controls' names: HOS_SW_*, HOS_PAD_*) */
 
 enum { B_A = 0, B_B, B_X, B_Y, B_LS, B_RS, B_L, B_R, B_ZL, B_ZR, B_PLUS, B_MINUS, B_LEFT, B_UP, B_RIGHT, B_DOWN };
 #define STATE_SIZE 0x28
@@ -314,6 +322,104 @@ static void stick_max(int32_t stick[4], const int32_t v[4]) {
         if ((v[i] < 0 ? -v[i] : v[i]) > (stick[i] < 0 ? -stick[i] : stick[i])) stick[i] = v[i];
 }
 
+/* ---- (hookshot) the controls: the gamepad input (by position) and the keys that press each Switch button, from
+   hookshot_options.ini beside the executable when it has them: pad_<button>=<HOS_PAD_* position, -1 none> and
+   key_<button>=<key code>,<key code> (Windows key codes, 0 none), <button> one of bind_names. Read once, at the
+   first use; what the file leaves out keeps its default ---- */
+static const char *const bind_names[HOS_SW_N] = {"a", "b", "x", "y", "ls", "rs", "l", "r", "zl", "zr", "plus",
+                                                 "minus", "left", "up", "right", "down"};
+static const signed char pad_default[HOS_SW_N] = {
+    HOS_PAD_EAST, HOS_PAD_SOUTH, HOS_PAD_NORTH, HOS_PAD_WEST, HOS_PAD_LSTICK, HOS_PAD_RSTICK, HOS_PAD_LSHOULDER,
+    HOS_PAD_RSHOULDER, HOS_PAD_LTRIGGER, HOS_PAD_RTRIGGER, HOS_PAD_START, HOS_PAD_BACK, HOS_PAD_LEFT, HOS_PAD_UP,
+    HOS_PAD_RIGHT, HOS_PAD_DOWN};
+/* (the keys of totk-pc-recomp's docs/controls.md, github.com/valentderah/totk-pc-recomp, MIT; plus Enter for Plus) */
+static const unsigned char key_default[HOS_SW_N][2] = {
+    {'E'}, {VK_SHIFT}, {VK_SPACE}, {0}, {VK_CONTROL}, {'C'}, {'Q'}, {'R'}, {'Z'}, {'X', 'F'}, {VK_TAB, VK_RETURN},
+    {'M'}, {'1'}, {'2'}, {'3'}, {'4'}};
+static volatile LONG pad_bind[HOS_SW_N], key_bind[HOS_SW_N][2];   /* (the menu changes them as the game reads them) */
+
+static void binds_default(void) {
+    for (int i = 0; i < HOS_SW_N; i++) {
+        InterlockedExchange(&pad_bind[i], pad_default[i]);
+        for (int k = 0; k < 2; k++) InterlockedExchange(&key_bind[i][k], key_default[i][k]);
+    }
+}
+
+static void binds_load(void) {
+    static volatile LONG state;   /* 0 not read, 1 being read, 2 read */
+    if (state == 2) return;
+    if (InterlockedCompareExchange(&state, 1, 0) != 0) {
+        while (state != 2) Sleep(0);
+        return;
+    }
+    binds_default();
+    char path[MAX_PATH];
+    const DWORD len = GetModuleFileNameA(NULL, path, MAX_PATH);
+    char *slash = len ? (strrchr(path, 92) ? strrchr(path, 92) : strrchr(path, 47)) : NULL;   /* (linux: '/') */
+    FILE *f = NULL;
+    if (slash) {
+        snprintf(slash + 1, (size_t)(path + MAX_PATH - slash - 1), "hookshot_options.ini");
+        f = fopen(path, "r");
+    }
+    int changed = 0;
+    if (f) {
+        char line[80];
+        while (fgets(line, sizeof line, f)) {
+            char *eq = strchr(line, '=');
+            if (!eq) continue;
+            *eq = 0;
+            const int pad = !strncmp(line, "pad_", 4), keys = !strncmp(line, "key_", 4);
+            for (int i = 0; (pad || keys) && i < HOS_SW_N; i++) {
+                if (strcmp(line + 4, bind_names[i])) continue;
+                changed++;
+                if (pad) {
+                    const int v = atoi(eq + 1);
+                    pad_bind[i] = v >= 0 && v < HOS_PAD_N ? v : -1;
+                } else {
+                    const char *comma = strchr(eq + 1, ',');
+                    const int a = atoi(eq + 1), b = comma ? atoi(comma + 1) : 0;
+                    key_bind[i][0] = a > 0 && a < 256 ? a : 0;
+                    key_bind[i][1] = b > 0 && b < 256 ? b : 0;
+                }
+            }
+        }
+        fclose(f);
+    }
+    if (changed) hos_log("hid: %d controls from hookshot_options.ini", changed);
+    InterlockedExchange(&state, 2);
+}
+int hos_binding(int set, int button, int slot) {
+    binds_load();
+    if (button < 0 || button >= HOS_SW_N || slot < 0 || slot > 1) return set == HOS_BIND_PAD ? -1 : 0;
+    return set == HOS_BIND_PAD ? (slot ? -1 : (int)pad_bind[button]) : (int)key_bind[button][slot];
+}
+/* A gamepad input moved to another button gives that one this button's old input (one button an input, none left
+   without); a key moved to it is taken from the others */
+void hos_bind(int set, int button, int slot, int code) {
+    binds_load();
+    if (button < 0) {
+        binds_default();
+        return;
+    }
+    if (button >= HOS_SW_N || slot < 0 || slot > 1) return;
+    if (set == HOS_BIND_PAD) {
+        if (slot || code < -1 || code >= HOS_PAD_N) return;
+        const LONG old = pad_bind[button];
+        for (int i = 0; i < HOS_SW_N; i++)
+            if (i != button && code >= 0 && pad_bind[i] == code) InterlockedExchange(&pad_bind[i], old);
+        InterlockedExchange(&pad_bind[button], code);
+    } else {
+        if (code < 0 || code > 255) return;
+        for (int i = 0; i < HOS_SW_N; i++)
+            for (int k = 0; k < 2; k++)
+                if (code && key_bind[i][k] == code) InterlockedExchange(&key_bind[i][k], 0);
+        InterlockedExchange(&key_bind[button][slot], code);
+    }
+}
+
+static volatile LONG pad_raw_now;   /* the gamepads' inputs at the last read, 1 << HOS_PAD_* */
+uint32_t hos_pad_raw(void) { return (uint32_t)pad_raw_now; }
+
 static void pads_read(uint64_t *buttons, int32_t stick[4]) {
     static int64_t next_read, retry[XUSER_MAX_COUNT];
     static int was_connected[XUSER_MAX_COUNT];
@@ -326,12 +432,12 @@ static void pads_read(uint64_t *buttons, int32_t stick[4]) {
         return;
     }
     next_read = now + 2000000;
-    uint64_t b = 0;
+    uint64_t raw = 0;   /* (by position: 1 << HOS_PAD_*) */
     int32_t s[4] = {0};
     {   /* every controller SDL knows (DualSense, DualShock 4, Switch Pro, ...: hos/pad_sdl.c) */
         int hos_sdl_pads(uint64_t *buttons, int32_t stick[4]);
         static int was;
-        const int n = hos_sdl_pads(&b, s);
+        const int n = hos_sdl_pads(&raw, s);
         if (n != was) hos_log("hid: %d controller%s through SDL", n, n == 1 ? "" : "s");
         was = n;
     }
@@ -348,12 +454,13 @@ static void pads_read(uint64_t *buttons, int32_t stick[4]) {
         }
     }
     static const struct { WORD x; int b; } map[] = {
-        {XINPUT_GAMEPAD_A, B_B}, {XINPUT_GAMEPAD_B, B_A}, {XINPUT_GAMEPAD_X, B_Y}, {XINPUT_GAMEPAD_Y, B_X},
-        {XINPUT_GAMEPAD_LEFT_THUMB, B_LS}, {XINPUT_GAMEPAD_RIGHT_THUMB, B_RS},
-        {XINPUT_GAMEPAD_LEFT_SHOULDER, B_L}, {XINPUT_GAMEPAD_RIGHT_SHOULDER, B_R},
-        {XINPUT_GAMEPAD_START, B_PLUS}, {XINPUT_GAMEPAD_BACK, B_MINUS},
-        {XINPUT_GAMEPAD_DPAD_LEFT, B_LEFT}, {XINPUT_GAMEPAD_DPAD_UP, B_UP},
-        {XINPUT_GAMEPAD_DPAD_RIGHT, B_RIGHT}, {XINPUT_GAMEPAD_DPAD_DOWN, B_DOWN}};
+        {XINPUT_GAMEPAD_A, HOS_PAD_SOUTH}, {XINPUT_GAMEPAD_B, HOS_PAD_EAST}, {XINPUT_GAMEPAD_X, HOS_PAD_WEST},
+        {XINPUT_GAMEPAD_Y, HOS_PAD_NORTH}, {XINPUT_GAMEPAD_LEFT_THUMB, HOS_PAD_LSTICK},
+        {XINPUT_GAMEPAD_RIGHT_THUMB, HOS_PAD_RSTICK}, {XINPUT_GAMEPAD_LEFT_SHOULDER, HOS_PAD_LSHOULDER},
+        {XINPUT_GAMEPAD_RIGHT_SHOULDER, HOS_PAD_RSHOULDER}, {XINPUT_GAMEPAD_START, HOS_PAD_START},
+        {XINPUT_GAMEPAD_BACK, HOS_PAD_BACK}, {XINPUT_GAMEPAD_DPAD_LEFT, HOS_PAD_LEFT},
+        {XINPUT_GAMEPAD_DPAD_UP, HOS_PAD_UP}, {XINPUT_GAMEPAD_DPAD_RIGHT, HOS_PAD_RIGHT},
+        {XINPUT_GAMEPAD_DPAD_DOWN, HOS_PAD_DOWN}};
     for (int p = 0; p < XUSER_MAX_COUNT && xinput_get; p++) {
         if (now < retry[p]) continue;
         XINPUT_STATE xs;
@@ -367,21 +474,36 @@ static void pads_read(uint64_t *buttons, int32_t stick[4]) {
         was_connected[p] = 1;
         const WORD w = xs.Gamepad.wButtons;
         for (unsigned i = 0; i < sizeof map / sizeof *map; i++)
-            if (w & map[i].x) b |= 1ULL << map[i].b;
-        if (xs.Gamepad.bLeftTrigger > 64) b |= 1ULL << B_ZL;
-        if (xs.Gamepad.bRightTrigger > 64) b |= 1ULL << B_ZR;
-        const int16_t raw[4] = {xs.Gamepad.sThumbLX, xs.Gamepad.sThumbLY, xs.Gamepad.sThumbRX, xs.Gamepad.sThumbRY};
+            if (w & map[i].x) raw |= 1ULL << map[i].b;
+        if (xs.Gamepad.bLeftTrigger > 64) raw |= 1ULL << HOS_PAD_LTRIGGER;
+        if (xs.Gamepad.bRightTrigger > 64) raw |= 1ULL << HOS_PAD_RTRIGGER;
+        const int16_t thumb[4] = {xs.Gamepad.sThumbLX, xs.Gamepad.sThumbLY, xs.Gamepad.sThumbRX, xs.Gamepad.sThumbRY};
         int32_t v[4];
         for (int i = 0; i < 4; i++) {
-            const int a = raw[i] < -32767 ? -32767 : raw[i];
+            const int a = thumb[i] < -32767 ? -32767 : thumb[i];
             v[i] = (a > 7849 || a < -7849) ? a : 0;
         }
         stick_max(s, v);
     }
+    InterlockedExchange(&pad_raw_now, (LONG)raw);
+    /* Back and Start together open the Insert menu (gpu/vk/vk_menu.cpp, for pads whose Home button the system
+       keeps): they reach the game only one at a time */
+    const uint64_t chord = 1ULL << HOS_PAD_BACK | 1ULL << HOS_PAD_START;
+    if ((raw & chord) == chord) raw &= ~chord;
+    binds_load();
+    uint64_t b = 0;
+    for (int i = 0; i < HOS_SW_N; i++)
+        if (pad_bind[i] >= 0 && (raw >> pad_bind[i] & 1)) b |= 1ULL << i;
     cached_buttons = b;
     memcpy(cached_stick, s, sizeof s);
     *buttons |= b;
     stick_max(stick, s);
+}
+
+/* Whether the controllers count while another window is in front: HOS_INPUT_BACKGROUND=1 or 0 decides when it is set,
+   otherwise the Insert menu's "Controller in background" row */
+static int pads_in_background(const char *env, int menu) {
+    return env ? atoi(env) != 0 : menu != 0;
 }
 
 static void read_input(uint64_t *buttons, int32_t stick[4]) {
@@ -396,17 +518,32 @@ static void read_input(uint64_t *buttons, int32_t stick[4]) {
        the presses add to theirs. HOS_INPUT_EXCLUSIVE=1: the script alone until 5 s after its last press, as before */
     static int exclusive = -1;
     if (exclusive < 0) exclusive = getenv("HOS_INPUT_EXCLUSIVE") != NULL;
-    if ((exclusive && npresses > 0 && (hos_now_ns() - script_t0) / 1000000 < script_end_ms + 5000) || !game_in_front())
+    if (exclusive && npresses > 0 && (hos_now_ns() - script_t0) / 1000000 < script_end_ms + 5000)
         return;
-    pads_read(buttons, stick);
-    /* (the keys of totk-pc-recomp's docs/controls.md, github.com/valentderah/totk-pc-recomp, MIT; plus Enter for
-       Plus and IJKL as another camera) */
-    struct { int vk; int b; } kmap[] = {
-        {VK_SPACE, B_X}, {'E', B_A}, {VK_SHIFT, B_B}, {'Q', B_L}, {'R', B_R}, {'Z', B_ZL}, {'X', B_ZR}, {'F', B_ZR},
-        {VK_CONTROL, B_LS}, {'C', B_RS}, {VK_TAB, B_PLUS}, {VK_RETURN, B_PLUS}, {'M', B_MINUS}, {'1', B_LEFT},
-        {'2', B_UP}, {'3', B_RIGHT}, {'4', B_DOWN}};
-    for (unsigned i = 0; i < sizeof kmap / sizeof *kmap; i++)
-        if (key(kmap[i].vk)) *buttons |= 1ULL << kmap[i].b;
+    if (!game_in_front()) {   /* (the pads alone, when the player asked for them behind other windows) */
+        static const char *env;
+        static int looked;
+        if (!looked) looked = 1, env = getenv("HOS_INPUT_BACKGROUND");
+        if (pads_in_background(env, rx_option(4, 0))) pads_read(buttons, stick);
+        return;
+    }
+    {   /* (hookshot) while the Insert menu is open the pads are its own, as the keyboard is (key()), and after it
+           closed until they are let go (the press that closed it never reaches the game) */
+        uint64_t pb = 0;
+        int32_t ps[4] = {0};
+        pads_read(&pb, ps);
+        static int after_menu;
+        if (rx_option(1, 0)) after_menu = 1;
+        else if (after_menu && !pad_raw_now) after_menu = 0;
+        if (!after_menu) {
+            *buttons |= pb;
+            stick_max(stick, ps);
+        }
+    }
+    binds_load();   /* (the keys: key_default's, or hookshot_options.ini's) */
+    for (int i = 0; i < HOS_SW_N; i++)
+        for (int k = 0; k < 2; k++)
+            if (key_bind[i][k] && key(key_bind[i][k])) *buttons |= 1ULL << i;
     int32_t mouse[4] = {0};
     /* left button Y (attack), right button ZL (shield, lock on), while the mouse is captured; a button held when
        the capture began counts only after it was let go (the click that captures never reaches the game) */
@@ -421,6 +558,7 @@ static void read_input(uint64_t *buttons, int32_t stick[4]) {
     } else {
         armed[0] = armed[1] = 0;
     }
+    /* (WASD the left stick; the arrows or IJKL the camera) */
     const int cx = (key(VK_RIGHT) || key('L')) - (key(VK_LEFT) || key('J')),
               cy = (key(VK_UP) || key('I')) - (key(VK_DOWN) || key('K'));
     const int32_t keys[4] = {(key('D') - key('A')) * 32767, (key('W') - key('S')) * 32767, cx * 32767, cy * 32767};

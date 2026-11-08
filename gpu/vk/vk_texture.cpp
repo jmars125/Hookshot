@@ -28,6 +28,7 @@
 #include <vector>
 
 #include "vk_texture.h"
+#include "vk_menu.h"
 #include "vk_draw.h"
 #include "vk_dump.h"
 
@@ -156,6 +157,23 @@ std::unordered_map<Key, std::unique_ptr<Texture>, KeyHash> textures;
 std::unordered_multimap<uint64_t, Texture*> by_gpu;
 uint64_t frame_no = 1;
 uint64_t total_bytes = 0;
+
+// (RX_VK_LOG_REMADE=1) Textures evicted and made again within 600 frames, and those of them that were then sampled
+// empty (storage the GPU rendered, not uploaded): what the eviction's minimum age below is measured by
+struct Evicted {
+    uint64_t frame;
+    bool rendered;
+};
+std::mutex evicted_mu;
+std::unordered_map<uint64_t, Evicted> evicted_at;   // (storage, size and format -> when it went)
+std::unordered_map<const Texture*, uint64_t> remade;   // (made again: how many frames after it went)
+uint64_t evicted_key(uint64_t gpu, uint32_t w, uint32_t h, uint32_t fmt) {
+    return gpu ^ ((uint64_t)w << 48) ^ ((uint64_t)h << 32) ^ ((uint64_t)fmt << 20);
+}
+bool remade_log_on() {
+    static const bool on = getenv("RX_VK_LOG_REMADE") && atoi(getenv("RX_VK_LOG_REMADE")) != 0;
+    return on;
+}
 
 struct Dead {
     uint64_t value;
@@ -1483,6 +1501,22 @@ Texture* create(const Key& key, const nvn_tex* t, VkFormat vf, bool astc, int bw
     textures.emplace(key, std::move(tex));
     by_gpu.emplace(p->gpu, p);
     watch_tex(p, "made");
+    if (remade_log_on()) {   // (one evicted not long ago, made again)
+        std::lock_guard lk(evicted_mu);
+        auto ev = evicted_at.find(evicted_key(p->gpu, p->width, p->height, p->nvn_format));
+        if (ev != evicted_at.end()) {
+            const uint64_t ago = frame_no - ev->second.frame;
+            if (ago < 600) {
+                remade[p] = ago;
+                static int told;
+                if (told++ < 300)
+                    logf("vk: texture #%u %#llx %ux%u NVN %#x made again %llu frames after it was evicted (%s then)", p->id,
+                         (unsigned long long)p->gpu, p->width, p->height, p->nvn_format, (unsigned long long)ago,
+                         ev->second.rendered ? "rendered" : "not rendered");
+            }
+            evicted_at.erase(ev);
+        }
+    }
     static int logged;
     if (logged++ < 40 || textures.size() % 500 == 0 || p->bytes > (64ull << 20))
         logf("vk: texture %#llx %ux%ux%u x%u levels %u NVN %#x -> vk %d%s (%zu textures, %llu MB)",
@@ -1509,11 +1543,13 @@ void texture_begin_recording(VkCommandBuffer upload, uint64_t value) {
     if (value != rec_value) epoch++;   // (a submission's parts check a texture's memory once: nothing is collected between)
     rec_value = value;
     up_used = false;
+    memory_table_begin();
 }
 VkCommandBuffer upload_command_buffer() {
     return upload_cmd();
 }
 bool texture_uploads_recorded() {
+    memory_table_flush();   // (vk_memory.cpp: the page table's changes, after this recording's mirror copies)
     if (up_used) full_barrier(up_cmd);   // (before the recording that reads them)
     return up_used;
 }
@@ -1676,6 +1712,19 @@ Texture* texture_touch(Texture* tex, bool for_sampling) {
         tex->upload_gen = gen;
         st_never_written++;
         watch_tex(tex, "NOT uploaded (over storage the GPU rendered)");
+        if (remade_log_on()) {   // (made again after its eviction, and sampled empty)
+            std::lock_guard lk(evicted_mu);
+            auto r = remade.find(tex);
+            if (r != remade.end()) {
+                static int told;
+                if (told++ < 300)
+                    logf("vk: texture #%u %#llx %ux%u NVN %#x, made again %llu frames after its eviction, sampled EMPTY "
+                         "(storage the GPU rendered, not uploaded) at frame %llu", tex->id, (unsigned long long)tex->gpu,
+                         tex->width, tex->height, tex->nvn_format, (unsigned long long)r->second,
+                         (unsigned long long)frame_no);
+                remade.erase(r);
+            }
+        }
         return tex;
     }
     if (partial && getenv("RX_VK_LOG_PARTIAL")) {
@@ -2547,7 +2596,11 @@ void texture_frame(uint64_t completed) {
               : known                ? std::min<uint64_t>(allowed / 10 * 7, 6144ull << 20)   // (hookshot: at most 6 GB. A 16 GB
                                                                                              // card's 10.8 GB filled up, read as a leak: 105, 106)
                                      : 4096ull << 20;
-    uint64_t budget = own;
+    uint64_t budget = (opts.vram_mb > 0) ? ((uint64_t)opts.vram_mb << 20) : own;
+    if (opts.vram_mb > 0 && known) {
+        // Safety clamp: do not exceed 75% of driver-allowed memory on constrained VRAM (prevents VK_ERROR_DEVICE_LOST)
+        budget = std::min(budget, (allowed / 4) * 3);
+    }
     // (near what the driver allows, the budget shrinks by the excess. The excess of what the process holds less the
     // free space in VMA's blocks, which new images take before VMA makes a block: measured by the blocks alone, the
     // textures evicted freed space inside them that the driver still counted, so 10 frames later the budget shrank
@@ -2648,8 +2701,16 @@ void texture_frame(uint64_t completed) {
     for (auto& kv : textures) order.push_back({kv.second->last_frame, kv.second.get()});
     std::sort(order.begin(), order.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
     std::vector<Texture*> gone;
+    // (over the budget, what goes has gone unused for RX_VK_EVICT_MIN_UNUSED frames, 60 by default; it was 8. On an
+    // 8 GB laptop card the VRAM sits at the driver's limit, the budget shrinks and this runs every 10 frames: with 8,
+    // ~300 textures in a few minutes of Kokiri Forest were evicted and made again, all of them within 60 frames (200
+    // within 10), uploaded and decoded again each time; and a 260 x 260 one the GPU renders and the game samples every
+    // 40 frames came back empty each time (22 times; the lit ground black for a frame, a tiled pattern over the ground).
+    // With 60: 2. The textures that are really done with still go, 52 frames later)
+    static const uint64_t min_unused =
+        getenv("RX_VK_EVICT_MIN_UNUSED") ? (uint64_t)std::max(1, atoi(getenv("RX_VK_EVICT_MIN_UNUSED"))) : 60;
     for (auto& [last, tex] : order) {
-        if ((!sweep && total_bytes <= budget / 8 * 7) || frame_no - last < (sweep ? 120u : 8u)) break;
+        if ((!sweep && total_bytes <= budget / 8 * 7) || frame_no - last < (sweep ? std::max<uint64_t>(120, min_unused) : min_unused)) break;
         if (tex->last_value > completed) continue;
         // (nor what the GPU wrote and the game still has: the image is its only copy, and one made again over that
         // storage started empty or from stale memory: a sky or course texture drawn once, garbage from then on.
@@ -2686,6 +2747,12 @@ void texture_frame(uint64_t completed) {
         const bool baked = tex->first_written && tex->first_written == tex->last_written && tex->bytes <= (4ull << 20);
         if (!overwritten && tex->gpu_written && !tex->released && !evict_rendered && baked) continue;
         watch_tex(tex, "evicted");
+        if (remade_log_on()) {
+            std::lock_guard lk(evicted_mu);
+            if (evicted_at.size() > 20000) evicted_at.clear();   // (a bound: only the recent ones matter)
+            evicted_at[evicted_key(tex->gpu, tex->width, tex->height, tex->nvn_format)] = {frame_no, tex->gpu_written};
+            remade.erase(tex);
+        }
         destroy_later(*tex);
         forget_gpu(tex);
         gone.push_back(tex);

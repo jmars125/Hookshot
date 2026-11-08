@@ -75,12 +75,17 @@ struct BufferRef {
     }
 };
 bool memory_init();                                   // vk_memory.cpp
+void memory_cpu_owned(uint64_t guest, uint64_t size);   // (hookshot: words the replay writes on the CPU, left out of write-backs)
+void memory_table_begin();                         // (hookshot: a recording's page table changes held back for its upload commands)
+bool memory_table_flush();
 uint64_t memory_guest_pages();                        // (hookshot: the device address of guest memory's page table, 0: none)
 void memory_sync();                                   // (at each submit: pools the game made or let go)
 BufferRef gpu_buffer(uint64_t gpu, uint64_t size);   // (empty when no pool holds the range)
 /// A range as a binding of the replay sees it: the pool's VRAM mirror when it has one (vk_memory.cpp), else the
 /// imported pool. written: the GPU may write it (copied back to guest memory at the submission's end).
 BufferRef gpu_buffer_bind(uint64_t gpu, uint64_t size, bool written);
+/// Changes when a read binding remembered earlier must be looked up again (a pool left, a mirror was made, a new submission)
+uint64_t gpu_bind_stamp();
 /// Around each submission's recording: mirrors wanted since the last one are made (begin), what the GPU wrote into
 /// mirrors goes back to guest memory (end, outside any pass, before the closing barrier)
 void memory_begin_submission();

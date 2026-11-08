@@ -50,6 +50,9 @@ int hos_gpu_pools(uint64_t (*out)[2], int max);
 uint32_t hos_gpu_maps_generation(void);
 uint32_t nvn_vmap_generation(void);
 uint64_t hos_reserved_cpus(void);   /* hos_thread.c */
+uint32_t hos_pad_raw(void);         /* nn_hid.c: the gamepads and the controls, for the Insert menu */
+int hos_binding(int set, int button, int slot);
+void hos_bind(int set, int button, int slot, int code);
 #if defined(A64_WRITE_TRACK) && !defined(__EMSCRIPTEN__)
 void hos_mark_written(const void *p, size_t n);
 #endif
@@ -135,7 +138,7 @@ static const MkwVkHost vk_host = {
     nvn_gpu_write, host_collect, host_free_pages, host_mark_written, hos_ticks, hos_now_ns, nvn_tex_layout,
     nvn_tex_level_offset, nvn_fmt_bpb, nvn_tex_level_tiles, nvn_tex_linear_stride, nvn_depth_minus_w, hos_gpu_pools,
     hos_gpu_maps_generation, nvn_vmap_generation, hos_reserved_cpus, host_collect_in, host_guest_alloc,
-    host_watch_guest_writes,
+    host_watch_guest_writes, hos_pad_raw, hos_binding, hos_bind,
 };
 
 static const MkwVkRenderer *vk;   /* the Vulkan back end, when it was chosen and started */
@@ -222,6 +225,12 @@ int rx_start(void *hwnd) {
     const int ok = wgr_start(hwnd);
     flush_early();
     return ok;
+}
+/* (hookshot) hookshot --prepare-shaders: the Vulkan back end started with no window and no game, which prepares
+   every shader in its start (gpu/vk/vk_main.cpp started_up) and is then let go. 0 when there is no usable Vulkan */
+int rx_prepare_shaders(void) {
+    const MkwVkRenderer *r = load_vulkan("hookshot_vk.dll");
+    return r && r->start(NULL);
 }
 void rx_resize(int width, int height) { vk ? vk->resize(width, height) : wgr_resize(width, height); }
 const char *rx_describe(void) { return vk ? vk->describe() : wgr_describe(); }

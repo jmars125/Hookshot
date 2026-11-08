@@ -68,7 +68,9 @@ std::vector<uint32_t> build_shader(const std::function<void(TestShader&)>& body)
     m.AddCapability(spv::Capability::Float16);
     m.AddCapability(spv::Capability::CooperativeMatrixKHR);
     m.AddExtension("SPV_KHR_cooperative_matrix");
-    m.SetMemoryModel(spv::AddressingModel::Logical, spv::MemoryModel::GLSL450);
+    m.AddCapability(spv::Capability::VulkanMemoryModel);
+    m.AddExtension("SPV_KHR_vulkan_memory_model");
+    m.SetMemoryModel(spv::AddressingModel::Logical, spv::MemoryModel::VulkanKHR);
     const Id void_t = m.TypeVoid();
     s.u32 = m.TypeUInt(32);
     const Id uvec3 = m.TypeVector(s.u32, 3);

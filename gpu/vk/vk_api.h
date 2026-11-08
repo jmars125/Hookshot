@@ -15,7 +15,17 @@
 extern "C" {
 #endif
 
-#define MKWVK_API_VERSION 1
+#define MKWVK_API_VERSION 3
+
+/* (hookshot) the controls' names (host/nn_hid.c, host/pad_sdl.c, the pad_ and key_ lines of hookshot_options.ini):
+   the Switch's buttons in nn::hid's bit order, and a gamepad's inputs by position, SDL's order (the bottom face
+   button first: A on an Xbox pad, cross on a DualSense) */
+enum { HOS_SW_A, HOS_SW_B, HOS_SW_X, HOS_SW_Y, HOS_SW_LS, HOS_SW_RS, HOS_SW_L, HOS_SW_R, HOS_SW_ZL, HOS_SW_ZR,
+       HOS_SW_PLUS, HOS_SW_MINUS, HOS_SW_LEFT, HOS_SW_UP, HOS_SW_RIGHT, HOS_SW_DOWN, HOS_SW_N };
+enum { HOS_PAD_SOUTH, HOS_PAD_EAST, HOS_PAD_WEST, HOS_PAD_NORTH, HOS_PAD_BACK, HOS_PAD_GUIDE, HOS_PAD_START,
+       HOS_PAD_LSTICK, HOS_PAD_RSTICK, HOS_PAD_LSHOULDER, HOS_PAD_RSHOULDER, HOS_PAD_UP, HOS_PAD_DOWN, HOS_PAD_LEFT,
+       HOS_PAD_RIGHT, HOS_PAD_LTRIGGER, HOS_PAD_RTRIGGER, HOS_PAD_N };
+enum { HOS_BIND_PAD, HOS_BIND_KEY };
 
 /* what the executable gives the back end */
 typedef struct MkwVkHost {
@@ -58,6 +68,14 @@ typedef struct MkwVkHost {
     uint64_t (*guest_alloc)(uint64_t size);
     /// (debugging) CPU writes to [guest, guest + size) logged with the writer's guest call stack (a page watch)
     void (*watch_guest_writes)(uint64_t guest, uint64_t size);
+    /* (hookshot) the gamepads' inputs held now (1 << HOS_PAD_*), whatever they are bound to: the Insert menu's
+       (host/nn_hid.c) */
+    uint32_t (*pad_raw)(void);
+    /* (hookshot) the controls, for the Insert menu's Controls page. button: the Switch's, HOS_SW_*; set HOS_BIND_PAD:
+       the gamepad input that presses it (a HOS_PAD_* position, -1 none; slot 0 only); set HOS_BIND_KEY: the keys that
+       do (Windows key codes, 0 none; slots 0 and 1). bind with button -1: all back to their defaults */
+    int (*binding)(int set, int button, int slot);
+    void (*bind)(int set, int button, int slot, int code);
 } MkwVkHost;
 
 /* what the back end gives the executable: the rx_* functions (gpu/render/rx_nvn.h, rx_core) */
@@ -95,7 +113,7 @@ typedef struct MkwVkRenderer {
     void (*nvn_texture_created)(const nvn_tex *t);
     /* the CPU set an event's value: in order with the submits (the GPU's waits on it) */
     void (*nvn_event_signal)(uint64_t gpu, uint32_t value);
-    int (*option)(int id);   /* (hookshot, the Insert menu) 0: game time follows the clock, 1: the menu is open, 2: dynamic resolution, 3: its fixed scale in percent */
+    int (*option)(int id);   /* (hookshot, the Insert menu) 0: game time follows the clock, 1: the menu is open, 2: dynamic resolution, 3: its fixed scale in percent, 4: the controllers count behind other windows, 5: text speed (0 normal to 3 instant) */
     /* a submit with its queue */
     void (*nvn_submit_q)(const uint64_t *handles, int n, uint64_t queue);
 } MkwVkRenderer;

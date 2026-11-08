@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2021 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdio>
+#include <cstdlib>
 #include <optional>
 
 #include "common/common_types.h"
@@ -98,22 +100,82 @@ std::optional<IndirectBranchTableInfo> TrackIndirectBranchTable(Environment& env
     } else {
         // (amd-fix) NVN2 programs lowered to Maxwell clamp the index with ISETP + SEL against a register a MOV32I set
         // (SEL R, idx, Rbound, P), not with an IMNMX: OoT's 30 foliage mesh programs were rejected here
+        // A bound read from a constant buffer (MOV from cbuf) is data, not code: OoT's 2 remaining foliage mesh
+        // programs clamp so. The table is then measured by reading it until an entry is not a plausible target, and
+        // capped by the bound when its constant is known at translation time.
+        const auto table_count{[&](std::optional<u64> movc, u32 extra) -> u32 {
+            const u32 t_index{static_cast<u32>(ldc.index)};
+            const s64 base{Decode(brx_insn) == Opcode::JMX ? 0 : static_cast<s64>(brx_pos.Offset())};
+            u32 count{0};
+            for (u32 i = 0; i < 256; ++i) {
+                const s32 rel{static_cast<s32>(env.ReadCbufValue(t_index, cbuf_offset + i * 4))};
+                const s64 target{base + rel + brx_offset + 8};
+                const bool ok{(rel & 7) == 0 && rel > -0x40000 && rel < 0x40000 &&
+                              target >= static_cast<s64>(block_begin.Offset()) && target < 0x400000};
+                if (!ok) break;
+                ++count;
+            }
+            u32 bound{0};
+            if (movc) {
+                bound = env.ReadCbufValue(static_cast<u32>((*movc >> 34) & 0x1f),
+                                          static_cast<u32>(((*movc >> 20) & 0x3fff) * 4));
+                if (bound > 0 && bound + extra < count) count = bound + extra;
+            }
+            if (std::getenv("RX_VK_LOG_BRX")) {
+                std::fprintf(stderr, "brx: cbuf-bounded table at %#x: c%u[%#x], %u entries (bound %u)\n",
+                             static_cast<unsigned>(brx_pos.Offset()), t_index, cbuf_offset, count, bound);
+            }
+            return count;
+        }};
+        const auto find_movc{[&](Location from, IR::Reg reg) {
+            return Track(env, block_begin, from, [reg](u64 insn, Opcode opcode) {
+                return opcode == Opcode::MOV_cbuf && Encoding{insn}.dest_reg == reg;
+            });
+        }};
         Location at{after_shl};
         const std::optional<u64> sel_insn{Track(env, block_begin, at, [shl_reg](u64 insn, Opcode opcode) {
             return opcode == Opcode::SEL_reg && Encoding{insn}.dest_reg == shl_reg;
         })};
+        u32 count{0};
+        bool measured{false};
         if (!sel_insn) {
-            return std::nullopt;
+            measured = true;
+            // ISETP.LT against the bound and a branch around the jump: indices 0..bound-1
+            Location at2{after_shl};
+            const std::optional<u64> isetp{Track(env, block_begin, at2, [shl_reg](u64 insn, Opcode opcode) {
+                return opcode == Opcode::ISETP_reg && Encoding{insn}.src_reg == shl_reg;
+            })};
+            count = table_count(isetp ? find_movc(at2, static_cast<IR::Reg>((*isetp >> 20) & 0xff))
+                                      : std::optional<u64>{}, 0);
+        } else {
+            const IR::Reg bound_reg{static_cast<IR::Reg>((*sel_insn >> 20) & 0xff)};
+            Location at_mov{at};
+            const std::optional<u64> mov_insn{Track(env, block_begin, at_mov, [bound_reg](u64 insn, Opcode opcode) {
+                return (opcode == Opcode::MOV32I || opcode == Opcode::MOV_cbuf) && Encoding{insn}.dest_reg == bound_reg;
+            })};
+            if (!mov_insn) {
+                return std::nullopt;
+            }
+            if (Decode(*mov_insn) == Opcode::MOV32I) {
+                max_index = static_cast<u32>((*mov_insn >> 20) & 0xffffffffULL);
+                if (max_index > 255) {   // (a table that large is not a clamp of this kind)
+                    return std::nullopt;
+                }
+            } else {
+                measured = true;
+                count = table_count(mov_insn, 1);   // SEL clamps to the bound itself: indices 0..bound
+            }
         }
-        const IR::Reg bound_reg{static_cast<IR::Reg>((*sel_insn >> 20) & 0xff)};
-        const std::optional<u64> mov_insn{Track(env, block_begin, at, [bound_reg](u64 insn, Opcode opcode) {
-            return opcode == Opcode::MOV32I && Encoding{insn}.dest_reg == bound_reg;
-        })};
-        if (!mov_insn) {
-            return std::nullopt;
+        if (count) {
+            return IndirectBranchTableInfo{
+                .cbuf_index = cbuf_index,
+                .cbuf_offset = cbuf_offset,
+                .num_entries = count,
+                .branch_offset = brx_offset,
+                .branch_reg = brx_reg,
+            };
         }
-        max_index = static_cast<u32>((*mov_insn >> 20) & 0xffffffffULL);
-        if (max_index > 255) {   // (a table that large is not a clamp of this kind)
+        if (measured) {   // (a measured table with no plausible entry)
             return std::nullopt;
         }
     }

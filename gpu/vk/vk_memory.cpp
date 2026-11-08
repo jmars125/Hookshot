@@ -52,6 +52,7 @@ struct Pool {
     // made (mirror_make), and until then the mirror stays (mirrors_give_back)
     bool inherit_pending = false;
     uint64_t retired_epoch = 0;
+    bool prefetched = false;     // (amd-fix) imported ahead by the background thread, not bound yet
 };
 uint64_t mem_rec_value = 0, mem_completed = 0;   // (the recording being made, and the GPU's progress)
 
@@ -1242,7 +1243,15 @@ std::condition_variable bg_cv, bg_done_cv;
 std::deque<std::pair<uint64_t, uint64_t>> bg_queue;
 std::vector<uint64_t> bg_inflight;           // (lo of the ranges queued or being imported)
 std::vector<std::pair<uint64_t, Pool>> bg_ready;
-int64_t st_bg_imports, st_bg_waits;
+int64_t st_bg_imports, st_bg_waits, st_prefetch_sent, st_prefetch_used, st_prefetch_dropped;
+void bg_main();
+void bg_start() {   // (bg_mu held)
+    static bool started;
+    if (!started) {
+        started = true;
+        std::thread(bg_main).detach();
+    }
+}
 
 void bg_main() {
     SetThreadDescription(GetCurrentThread(), L"mkw_vk imports");
@@ -1257,6 +1266,7 @@ void bg_main() {
         Pool p;
         const bool ok = import_pool(r.first, r.second, p);
         std::lock_guard lk(bg_mu);
+        p.prefetched = true;
         if (ok) bg_ready.push_back({r.first, p}), st_bg_imports++;
         std::erase(bg_inflight, r.first);
         bg_done_cv.notify_all();
@@ -1278,10 +1288,67 @@ void bg_drain() {
             vkFreeMemory(dev.device, p.memory, nullptr);
             continue;
         }
+        bool overlap = false;   // (amd-fix: a chunk imported ahead that an import made since covers in part: the pools stay disjoint)
+        for (auto o = imported.lower_bound(p.hi); o != imported.begin();) {
+            --o;
+            if (o == imp) continue;
+            if (o->second.hi <= p.lo) {
+                if (o->second.hi + (1ull << 30) < p.lo) break;
+                continue;
+            }
+            overlap = true;
+            break;
+        }
+        if (overlap) {
+            st_prefetch_dropped++;
+            vkDestroyBuffer(dev.device, p.buffer, nullptr);
+            vkFreeMemory(dev.device, p.memory, nullptr);
+            continue;
+        }
         if (imp != imported.end()) retire_pool(imp);
         imported.emplace(lo, p);
         guest_pages_set(p.lo, p.hi, p.address);
     }
+}
+
+/// (amd-fix) An import on the replay thread stalled it 20-75 ms on an RX 9060 XT (the driver locks the chunk's pages, the
+/// commit of fresh ones), a tiny uniform buffer's binding as long, ~40 times entering Kokiri: hitches. The chunks next to
+/// one imported on demand, inside the game's pools, are imported ahead by the background thread; a lookup that needs one
+/// still under way waits for it (less than importing it), and a chunk imported ahead and first bound sends for its own
+/// neighbours. RX_VK_PREFETCH_CHUNKS: how many on each side (default 0: off, the background imports slowed the replay thread's own to 80-127 ms on AMD). (pools_mu held)
+void prefetch_chunks(uint64_t lo, uint64_t hi, uint64_t chunk) {
+    static const int n = getenv("RX_VK_PREFETCH_CHUNKS") ? std::max(0, atoi(getenv("RX_VK_PREFETCH_CHUNKS"))) : 0;
+    if (n <= 0 || !chunk || !dev.external_memory_host || hi <= lo) return;
+    auto in_game_pool = [](uint64_t a, uint64_t b) {
+        auto g = std::lower_bound(guest_pools.begin(), guest_pools.end(), b, [](const GuestPool& p, uint64_t v) { return p.lo < v; });
+        return g != guest_pools.begin() && std::prev(g)->hi > a;
+    };
+    auto imported_over = [](uint64_t a, uint64_t b) {
+        for (auto o = imported.lower_bound(b); o != imported.begin();) {
+            --o;
+            if (o->second.hi > a) return true;
+            if (o->second.hi + (1ull << 30) < a) break;
+        }
+        return false;
+    };
+    std::vector<std::pair<uint64_t, uint64_t>> want;
+    for (int k = 0; k < n; k++) {
+        const uint64_t up = hi + (uint64_t)k * chunk;
+        if (up < UINT64_MAX - chunk) want.push_back({up, up + chunk});
+        const uint64_t down = (uint64_t)(k + 1) * chunk;
+        if (lo >= down) want.push_back({lo - down, lo - down + chunk});
+    }
+    std::lock_guard lk(bg_mu);
+    for (const auto& [a, b] : want) {
+        if (b > (1ull << 40) || !in_game_pool(a, b) || imported_over(a, b)) continue;
+        if (std::find(bg_inflight.begin(), bg_inflight.end(), a) != bg_inflight.end()) continue;
+        if (bg_inflight.size() >= 16) break;
+        bg_start();
+        bg_inflight.push_back(a);
+        bg_queue.push_back({a, b});
+        st_prefetch_sent++;
+    }
+    bg_cv.notify_one();
 }
 
 Pool* pool_lookup(uint64_t guest, uint64_t size) {
@@ -1311,17 +1378,21 @@ Pool* pool_lookup(uint64_t guest, uint64_t size) {
         bool waited = false;
         {
             std::unique_lock lk(bg_mu);
-            if (std::find(bg_inflight.begin(), bg_inflight.end(), range.lo) != bg_inflight.end()) {
-                bg_done_cv.wait(lk, [&] {
-                    return std::find(bg_inflight.begin(), bg_inflight.end(), range.lo) == bg_inflight.end();
-                });
+            auto under_way = [&] {   // (the pool's own import, or a chunk of the range imported ahead)
+                for (const uint64_t x : bg_inflight)
+                    if (x == range.lo || (chunk && x >= want_lo && x < want_hi)) return true;
+                return false;
+            };
+            if (under_way()) {
+                bg_done_cv.wait(lk, [&] { return !under_way(); });
                 waited = true;
                 st_bg_waits++;
             }
         }
         if (waited) {
             bg_drain();
-            imp = imported.find(range.lo);
+            imp = chunk ? covering() : imported.find(range.lo);
+            if (chunk && imp == imported.end()) imp = imported.find(want_lo);
         }
     }
     if (imp == imported.end() || imp->second.hi < range.hi || imp->second.lo > range.lo) {
@@ -1364,7 +1435,7 @@ Pool* pool_lookup(uint64_t guest, uint64_t size) {
             static double total_ms;
             static int n, logged;
             total_ms += ms, n++;
-            if ((ms >= 2.0 && logged++ < 30) || n % 256 == 0)
+            if ((ms >= 2.0 && logged++ < 200) || n % 256 == 0)
                 logf("vk: pool %#llx+%#llx imported in %.1f ms (%d imports, %.0f ms in all)", (unsigned long long)range.lo,
                      (unsigned long long)(range.hi - range.lo), ms, n, total_ms);
         }
@@ -1385,6 +1456,7 @@ Pool* pool_lookup(uint64_t guest, uint64_t size) {
         }
         imp = imported.emplace(p.lo, p).first;
         guest_pages_set(p.lo, p.hi, p.address);
+        if (chunk) prefetch_chunks(p.lo, p.hi, chunk);
         if (overlapped.size() > 1) {
             static int logged_merge;
             if (logged_merge++ < 16)
@@ -1393,6 +1465,17 @@ Pool* pool_lookup(uint64_t guest, uint64_t size) {
         }
         static int logged;
         if (logged++ < 8 || imported.size() % 256 == 0) logf("vk: %zu pools imported", imported.size());
+    }
+    if (imp->second.prefetched) {   // (first bound: its neighbours ahead in turn)
+        imp->second.prefetched = false;
+        st_prefetch_used++;
+        prefetch_chunks(imp->second.lo, imp->second.hi, chunk);
+        static int64_t logged_at;
+        if (st_prefetch_used / 16 != logged_at) {
+            logged_at = st_prefetch_used / 16;
+            logf("vk: chunks imported ahead: %lld sent, %lld bound, %lld dropped; %lld waits", (long long)st_prefetch_sent,
+                 (long long)st_prefetch_used, (long long)st_prefetch_dropped, (long long)st_bg_waits);
+        }
     }
     imp->second.range_lo = range.lo, imp->second.range_hi = range.hi;
     return last_pool = &imp->second;
@@ -1615,11 +1698,7 @@ void memory_pool_created(uint64_t gpu, uint64_t size) {
     if (!on || !size || gpu >= (1ull << 40) || !dev.external_memory_host) return;   // (virtual pools are not imported)
     const uint64_t lo = gpu & ~(align - 1), hi = (gpu + size + align - 1) & ~(align - 1);
     std::lock_guard lk(bg_mu);
-    static bool started;
-    if (!started) {
-        started = true;
-        std::thread(bg_main).detach();
-    }
+    bg_start();
     if (std::find(bg_inflight.begin(), bg_inflight.end(), lo) != bg_inflight.end()) return;
     bg_inflight.push_back(lo);
     bg_queue.push_back({lo, hi});

@@ -1027,8 +1027,16 @@ void copy_pages(const uint32_t* pages, int64_t n, uint8_t* out, uint8_t* ok) {  
     copy_helpers.done.wait(lk, [] { return copy_helpers.pending == 0; });
 }
 
+std::unique_ptr<Capture> capture_make();
 void memory_capture_submit() {
-    if (!capture_on()) return;
+    std::unique_ptr<Capture> c = capture_make();
+    if (!c) return;
+    std::lock_guard lk(cap_mu);
+    captures.push_back(std::move(c));
+}
+/// (the pages the CPU wrote since the last capture, copied now: a submit's capture, or memory_capture_now's)
+std::unique_ptr<Capture> capture_make() {
+    if (!capture_on()) return nullptr;
     const auto t0 = std::chrono::steady_clock::now();
     std::unique_ptr<Capture> c;
     {
@@ -1102,8 +1110,7 @@ void memory_capture_submit() {
             ms = ms_lock = ms_scan = 0, written = copied = 0;
         }
     }
-    std::lock_guard lk(cap_mu);
-    captures.push_back(std::move(c));
+    return c;
 }
 
 bool capture_owns(uint64_t guest) {
@@ -1122,16 +1129,7 @@ void memory_recording_value(uint64_t value, uint64_t completed) {
     mem_rec_value = value;
     if (completed > mem_completed) mem_completed = completed;
 }
-bool memory_take_capture(uint64_t value, uint64_t completed) {
-    if (completed > mem_completed) mem_completed = completed;
-    if (!capture_on()) return false;
-    std::unique_ptr<Capture> c;
-    {
-        std::lock_guard lk(cap_mu);
-        if (captures.empty()) return false;
-        c = std::move(captures.front());
-        captures.pop_front();
-    }
+bool take_capture(std::unique_ptr<Capture> c, uint64_t value, uint64_t completed) {
     const auto tk0 = std::chrono::steady_clock::now();
     std::lock_guard lk(pools_mu);
     cur_cap_value = value;
@@ -1211,6 +1209,25 @@ bool memory_take_capture(uint64_t value, uint64_t completed) {
         }
     }
     return true;
+}
+bool memory_take_capture(uint64_t value, uint64_t completed) {
+    if (completed > mem_completed) mem_completed = completed;
+    if (!capture_on()) return false;
+    std::unique_ptr<Capture> c;
+    {
+        std::lock_guard lk(cap_mu);
+        if (captures.empty()) return false;
+        c = std::move(captures.front());
+        captures.pop_front();
+    }
+    return take_capture(std::move(c), value, completed);
+}
+/// (hookshot) A capture made and taken at once, for a submission going on from a wait the CPU's signal met
+/// (vk_replay.cpp resume_queue): the CPU's writes up to that signal, which the console's GPU reads after its wait
+bool memory_capture_now(uint64_t value, uint64_t completed) {
+    if (completed > mem_completed) mem_completed = completed;
+    std::unique_ptr<Capture> c = capture_make();
+    return c && take_capture(std::move(c), value, completed);
 }
 
 namespace {

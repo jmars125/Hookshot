@@ -32,7 +32,7 @@ def main():
     lock_at = read.index("std::lock_guard lk(pools_mu)")
     if reuse_at > lock_at:
         raise SystemExit("the page is looked up under the pool lock before the cache")
-    for name in ("void memory_stamp(", "void memory_collect_written(", "bool memory_take_capture("):
+    for name in ("void memory_stamp(", "void memory_collect_written(", "bool take_capture("):
         body = block(source, name)
         if "cap_view_bump()" not in body:
             raise SystemExit(f"{name} changes page state without dropping the cached read")

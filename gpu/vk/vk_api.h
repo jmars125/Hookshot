@@ -118,6 +118,8 @@ typedef struct MkwVkRenderer {
     int (*option)(int id);   /* (hookshot, the Insert menu) 0: game time follows the clock, 1: the menu is open, 2: dynamic resolution, 3: its fixed scale in percent, 4: the controllers count behind other windows, 5: text speed (0 normal to 3 instant) */
     /* a submit with its queue */
     void (*nvn_submit_q)(const uint64_t *handles, int n, uint64_t queue);
+    /* (hookshot) a fence of one queue: the value its own last submission signals (nvnQueueFenceSync) */
+    uint64_t (*nvn_fence_q)(uint64_t queue);
 } MkwVkRenderer;
 
 /* the DLL's one export: null when Vulkan is not usable (the executable then falls back to WebGPU) */

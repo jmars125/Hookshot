@@ -227,6 +227,7 @@ void rx_nvn_submit(const uint64_t *handles, int n);
 void rx_nvn_submit_q(const uint64_t *handles, int n, uint64_t queue);
 /* fence value of everything submitted so far; waits until the GPU reached a fence (1: reached, 0: timed out) */
 uint64_t rx_nvn_fence(void);
+uint64_t rx_nvn_fence_q(uint64_t queue);   /* (hookshot) a fence of one queue */
 /* submits and presents queued so far / replayed so far (recordings released after a submit stay until it replayed) */
 uint64_t rx_nvn_pushed(void);
 uint64_t rx_nvn_replayed(void);

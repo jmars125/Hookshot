@@ -245,6 +245,7 @@ void rx_nvn_submit_q(const uint64_t *handles, int n, uint64_t queue) {
     else rx_nvn_submit(handles, n);
 }
 uint64_t rx_nvn_fence(void) { return vk ? vk->nvn_fence() : wgr_nvn_fence(); }
+uint64_t rx_nvn_fence_q(uint64_t queue) { return vk && vk->nvn_fence_q ? vk->nvn_fence_q(queue) : rx_nvn_fence(); }
 uint64_t rx_nvn_pushed(void) { return vk ? vk->nvn_pushed() : wgr_nvn_pushed(); }
 uint64_t rx_nvn_replayed(void) { return vk ? vk->nvn_replayed() : wgr_nvn_replayed(); }
 int rx_nvn_wait(uint64_t fence, uint64_t timeout_ns) {

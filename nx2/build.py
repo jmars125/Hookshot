@@ -500,18 +500,31 @@ def main():
         jobs = list(vk_jobs)
     print("%d files, %d jobs, %s" % (len(jobs), a.jobs, " ".join(f for f in fl if f.startswith("-D") or f.startswith("-O"))),
           flush=True)
-    t0, failed = time.time(), 0
+    t0, failed = time.time(), []
     with concurrent.futures.ThreadPoolExecutor(a.jobs) as ex:
         # (as each ends, not in order: the builder app shows progress from these lines, and the biggest file comes first)
         for src, secs, err in (f.result() for f in concurrent.futures.as_completed([ex.submit(compile_one, j) for j in jobs])):
             size = os.path.getsize(src) >> 20
             if err:
-                failed += 1
-                print("FAILED %s (%d MB, %.0fs):\n%s" % (os.path.basename(src), size, secs, err), flush=True)
+                failed.append(src)
+                print("not compiled yet: %s (%d MB, %.0fs), tried again alone at the end:\n%s"
+                      % (os.path.basename(src), size, secs, err[-1500:]), flush=True)
             else:
                 print("  %-16s %4d MB  %6.0fs  (%.0fs)" % (os.path.basename(src), size, secs, time.time() - t0), flush=True)
-    print("compiled in %.0fs, %d failed" % (time.time() - t0, failed), flush=True)
-    if failed:
+    # (a compiler that ran out of memory beside the others dies "due to signal": a player's 24 MB code_021.c, 2026-11-08. The
+    # files that failed are compiled again one at a time, with all the memory, before the build gives up)
+    still = 0
+    for src in failed:
+        job = next(j for j in jobs if j[1] == src)
+        _, secs, err = compile_one(job)
+        size = os.path.getsize(src) >> 20
+        if err:
+            still += 1
+            print("FAILED %s (%d MB, %.0fs, alone too):\n%s" % (os.path.basename(src), size, secs, err), flush=True)
+        else:
+            print("  %-16s %4d MB  %6.0fs  (%.0fs, alone)" % (os.path.basename(src), size, secs, time.time() - t0), flush=True)
+    print("compiled in %.0fs, %d failed" % (time.time() - t0, still), flush=True)
+    if still:
         return 1
     vk_objs = {j[2] for j in vk_jobs}
     objs = [j[2] for j in jobs if j[2] not in vk_objs]

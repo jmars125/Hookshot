@@ -22,6 +22,7 @@ on:
       - tests/test_fps_rate.py
       - gpu/vk/vk_memory.cpp
       - tests/test_vertex_bind.py
+      - tests/test_bind_memo.py
       - tests/test_fps_overlay_order.py
       - tests/test_dispatch_clock.py
       - gpu/vk/vk_framegen.cpp
@@ -37,9 +38,11 @@ on:
       - gpu/vk/vk_replay.cpp
       - gpu/vk/vk_draw.h
       - tests/test_ub_memo.py
+      - tests/test_ub_gap.py
       - tests/test_shader_census_cmd.py
       - gpu/vk/vk_shader.cpp
       - tests/test_same_draw.py
+      - tests/test_pass_hazard.py
       - nx2/version.py
       - nx2/test_version.py
       - host/nn_audio.c
@@ -80,6 +83,7 @@ on:
       - tests/test_fps_rate.py
       - gpu/vk/vk_memory.cpp
       - tests/test_vertex_bind.py
+      - tests/test_bind_memo.py
       - tests/test_fps_overlay_order.py
       - tests/test_dispatch_clock.py
       - gpu/vk/vk_framegen.cpp
@@ -95,9 +99,11 @@ on:
       - gpu/vk/vk_replay.cpp
       - gpu/vk/vk_draw.h
       - tests/test_ub_memo.py
+      - tests/test_ub_gap.py
       - tests/test_shader_census_cmd.py
       - gpu/vk/vk_shader.cpp
       - tests/test_same_draw.py
+      - tests/test_pass_hazard.py
       - nx2/version.py
       - nx2/test_version.py
       - host/nn_audio.c
@@ -164,6 +170,9 @@ jobs:
       - name: Check a vertex stream is bound once
         if: runner.os == 'Linux'
         run: python -I -B tests/test_vertex_bind.py
+      - name: Check a read-only buffer bind is remembered
+        if: runner.os == 'Linux'
+        run: python -I -B tests/test_bind_memo.py
       - name: Check FPS overlay transfer ordering
         if: runner.os == 'Linux'
         run: python -I -B tests/test_fps_overlay_order.py
@@ -189,6 +198,12 @@ jobs:
       - name: Check a repeated uniform word is not read again
         if: runner.os == 'Linux'
         run: python -I -B tests/test_ub_memo.py
+      - name: Check a uniform word outside the updates is not scanned again
+        if: runner.os == 'Linux'
+        run: python -I -B tests/test_ub_gap.py
+      - name: Check a pass hazard skips textures that are not targets
+        if: runner.os == 'Linux'
+        run: python -I -B tests/test_pass_hazard.py
       - name: Check the shader list's text encoding
         run: python -I -B tests/test_shader_census_cmd.py
       - name: Check the build's version stamp

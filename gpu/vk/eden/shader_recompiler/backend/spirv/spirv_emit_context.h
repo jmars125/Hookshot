@@ -362,6 +362,7 @@ public:
     Id write_global_func_u32{};
     Id write_global_func_u32x2{};
     Id write_global_func_u32x4{};
+    Id write_global_cas_loop_func{};
 
     bool need_input_position_indirect{};
     Id input_position{};

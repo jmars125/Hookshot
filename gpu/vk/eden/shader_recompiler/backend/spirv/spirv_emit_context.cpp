@@ -1142,8 +1142,8 @@ void EmitContext::DefineGlobalMemoryFunctions(const Info& info) {
         AddLabel(end_label);
     }};
     const auto define_body{[&](DefPtr ssbo_member, Id addr, Id element_pointer, u32 shift,
-                               auto&& callback) {
-        AddLabel();
+                               auto&& callback, bool add_label = true) {
+        if (add_label) AddLabel();
         const size_t num_buffers{info.storage_buffers_descriptors.size()};
         for (size_t index = 0; index < num_buffers; ++index) {
             if (index == miss_index) {
@@ -1304,6 +1304,58 @@ void EmitContext::DefineGlobalMemoryFunctions(const Info& info) {
             OpFunctionEnd();
             atomic_global_func_u32[i] = func_id;
         }
+    }
+    // (hookshot) 8- and 16-bit global stores: the aligned 32-bit word is changed in place with a compare-exchange loop, as
+    // the storage buffers' narrow stores are (emit_spirv_memory.cpp). A plain load/store pair loses the other invocations'
+    // halves of the word; the console's byte-enabled store does not.
+    if (info.stores_global_memory) {
+        const Id func_type{TypeFunction(void_id, U64, U32[1], U32[1], U32[1])};
+        const Id func{OpFunction(void_id, spv::FunctionControlMask::MaskNone, func_type)};
+        const Id addr{OpFunctionParameter(U64)};
+        const Id value{OpFunctionParameter(U32[1])};
+        const Id bit_offset{OpFunctionParameter(U32[1])};
+        const Id bit_count{OpFunctionParameter(U32[1])};
+        AddLabel();
+        // (one variable in the entry block: OpVariable with Function storage must lead the function)
+        const Id expected_var{AddLocalVariable(TypePointer(spv::StorageClass::Function, U32[1]),
+                                               spv::StorageClass::Function)};
+        const auto cas_loop{[&](Id pointer) {
+            OpStore(expected_var, OpLoad(U32[1], pointer, spv::MemoryAccessMask::Aligned, 4U));
+            const Id scope_device{Const(static_cast<u32>(spv::Scope::Device))};
+            const Id ordering_relaxed{u32_zero_value};
+            const Id begin_label{OpLabel()};
+            const Id body_label{OpLabel()};
+            const Id continue_label{OpLabel()};
+            const Id end_label{OpLabel()};
+            OpBranch(begin_label);
+            AddLabel(begin_label);
+            OpLoopMerge(end_label, continue_label, spv::LoopControlMask::MaskNone);
+            OpBranch(body_label);
+            AddLabel(body_label);
+            const Id expected{OpLoad(U32[1], expected_var)};
+            const Id desired{OpBitFieldInsert(U32[1], expected, value, bit_offset, bit_count)};
+            const Id actual{OpAtomicCompareExchange(U32[1], pointer, scope_device, ordering_relaxed,
+                                                    ordering_relaxed, desired, expected)};
+            OpStore(expected_var, actual);
+            const Id success{OpIEqual(U1, expected, actual)};
+            OpBranchConditional(success, end_label, continue_label);
+            AddLabel(end_label);
+            OpReturn();
+            AddLabel(continue_label);
+            OpBranch(begin_label);
+        }};
+        define_body(&StorageDefinitions::U32, addr, storage_types.U32.element, 2,
+                    [&](Id ssbo_pointer) { cas_loop(ssbo_pointer); }, false);
+        guest_lookup(addr, 4U, [&](Id target) {
+            if (gp_level >= 3) {
+                cas_loop(psb_member(U32[1], target));
+            } else {
+                OpReturn();
+            }
+        });
+        OpReturn();
+        OpFunctionEnd();
+        write_global_cas_loop_func = func;
     }
 }
 

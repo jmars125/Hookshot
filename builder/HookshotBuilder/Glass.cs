@@ -11,6 +11,8 @@ static class Glass
 {
     [DllImport("dwmapi.dll")] static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int value, int size);
     [DllImport("dwmapi.dll")] static extern int DwmExtendFrameIntoClientArea(IntPtr hwnd, ref Margins margins);
+    [DllImport("user32.dll")] static extern IntPtr GetWindowLongPtrW(IntPtr hwnd, int index);
+    [DllImport("user32.dll")] static extern IntPtr SetWindowLongPtrW(IntPtr hwnd, int index, IntPtr value);
 
     [StructLayout(LayoutKind.Sequential)]
     struct Margins { public int Left, Right, Top, Bottom; }
@@ -23,6 +25,11 @@ static class Glass
     {
         var hwnd = new WindowInteropHelper(w).Handle;
         if (hwnd == IntPtr.Zero) return false;
+        // (a framed window: Windows draws the backdrop only behind one. Without the system menu it draws no caption buttons of its
+        // own behind the window's; WindowStyle None lost the acrylic, and the window was flat grey)
+        const int GwlStyle = -16;
+        const long SysMenu = 0x00080000;
+        SetWindowLongPtrW(hwnd, GwlStyle, (IntPtr)((long)GetWindowLongPtrW(hwnd, GwlStyle) & ~SysMenu));
         var on = 1;
         DwmSetWindowAttribute(hwnd, DarkMode, ref on, sizeof(int));
         var corner = Round;

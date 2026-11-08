@@ -106,7 +106,7 @@ struct Code {
     uint32_t texture_bound = ~0u;   // the bank native TEX instructions name (~0: none; TEXS take the stage's own)
     bool isbe = false;              // an NVN2 task (stage 6) or mesh (stage 7) program: it writes the internal stage buffer
     // (task / mesh: control section +0x58 threads 15:0, payload bytes 31:16; +0x60 max primitives 15:0, max vertices
-    // 31:16; +0x5f the output topology, 3 triangles)
+    // 31:16; +0x5f the output topology, 1 points, 3 triangles)
     uint32_t mesh_threads = 0, payload_bytes = 0, max_vertices = 0, max_primitives = 0, topology = 0;
     bool header_only = false;       // a graphics header and no code (NVN2's per-primitive output map of a mesh program)
     uint8_t sph[sizeof(Shader::ProgramHeader)]{};
@@ -1199,7 +1199,11 @@ void miss_note(uint64_t key, const char* what, uint64_t a, uint64_t b, const Nvn
 }
 
 std::array<u32, 3> mesh_registers_of(const Code* task, const Code& mesh) {
-    const uint32_t topology = mesh.topology == 3 ? 4 : mesh.topology;   // (triangles)
+    // (the control section's topology in GL's numbers: 3 triangles; 1 points, not lines. OoT's four mesh programs with a 1 (the grass
+    // drawn into the 2400 x 2400 shadow map around Link) write one index byte per primitive, the primitive count = their vertex
+    // count, and a point size. Read as lines, each joined vertex 2i to 2i + 1 of its meshlet: a mesh of long thin dark stripes on
+    // the ground, the water and Link around him, on AMD; Hookshot issue 302)
+    const uint32_t topology = mesh.topology == 3 ? 4 : mesh.topology == 1 ? 0 : mesh.topology;
     const uint32_t lines = task ? (task->payload_bytes + 127) / 128 : 0;
     // (the larger of the two for both: the control section's pair is not always vertices and primitives in that order. The door's
     // says 126 and 64, where its code writes 64 vertices and up to 128 primitives; held to 64, a meshlet's other primitives were
@@ -1292,6 +1296,13 @@ void translate_mesh_into(Program& p, const NvnState& s, const Code* task, const 
                 if (Shader::IR::IsGeneric(attribute))
                     frt.per_primitive_generics.set(Shader::IR::GenericAttributeIndex(attribute));
             }
+            // (points: a generic the fragment program reads and the mesh program never writes is the point sprite's coordinate,
+            // as the hardware replaces it. OoT's grass shadow reads its alpha mask at generic 5's (s, t): left at (0, 0, 0, 1),
+            // each point was a filled square in the shadow map instead of a tuft)
+            if (mesh_t->program.mesh.topology == 0)
+                for (size_t i = 0; i < Shader::IR::NUM_GENERICS; i++)
+                    if (fs->program.info.loads.Generic(i) && !mesh_t->program.info.stores.Generic(i))
+                        frt.point_coord_generics.set(i);
             for (int i = 0; i < 8; i++) frt.color_output_types[i] = static_cast<Shader::AttributeType>(color_types[i]);
             const std::vector<uint32_t> fspirv = Shader::Backend::SPIRV::EmitSPIRV(profile(), frt, fs->program, bindings);
             kept.push_back(fspirv);

@@ -47,7 +47,7 @@ pub fn run(args: &[String]) -> Result<()> {
     let mut gen: Option<PathBuf> = None;
     // (bisection of a wrong-but-running build: only functions at [lo, hi) and without a word matching a denied
     // (mask, value) are lifted to Rust; the rest stay with the C build's objects, linked after with /force:multiple)
-    let mut range = (0u64, u64::MAX);
+    let mut range: Vec<(u64, u64)> = vec![(0, u64::MAX)];
     let mut deny: Vec<(u32, u32)> = Vec::new();
     while let Some(a) = it.next() {
         let mut val = || {
@@ -64,8 +64,13 @@ pub fn run(args: &[String]) -> Result<()> {
             "--gen" => gen = Some(PathBuf::from(val()?)),
             "--range" => {
                 let v = val()?;
-                let (lo, hi) = v.split_once('-').ok_or_else(|| anyhow::anyhow!("--range lo-hi"))?;
-                range = (u64::from_str_radix(lo, 16)?, u64::from_str_radix(hi, 16)?);
+                range = v
+                    .split(',')
+                    .map(|r| {
+                        let (lo, hi) = r.split_once('-').ok_or_else(|| anyhow::anyhow!("--range lo-hi[,lo-hi...]"))?;
+                        Ok((u64::from_str_radix(lo, 16)?, u64::from_str_radix(hi, 16)?))
+                    })
+                    .collect::<Result<_>>()?;
             }
             "--deny" => {
                 let v = val()?;
@@ -132,7 +137,7 @@ pub fn run(args: &[String]) -> Result<()> {
             |b, &e| {
                 let body = &d.funcs[&e];
                 let ok = !forced.contains(&e)
-                    && (range.0..range.1).contains(&e)
+                    && range.iter().any(|r| (r.0..r.1).contains(&e))
                     && !body.insns.values().any(|&(_, w)| deny.iter().any(|&(m, v)| w & m == v));
                 (e, if ok { b.check(e, &d.funcs[&e]).ok() } else { None })
             },

@@ -1349,7 +1349,17 @@ Texture* create(const Key& key, const nvn_tex* t, VkFormat vf, bool astc, int bw
         // less: BC3's 8 keep what they have) from 2 MB as RGBA8 (RX_VK_ASTC_BC_MB), the finer ones (UI, characters)
         // only from 64 MB)
         static const uint64_t low = (uint64_t)(getenv("RX_VK_ASTC_BC_MB") ? atoi(getenv("RX_VK_ASTC_BC_MB")) : 2) << 20;
-        const uint64_t min_bytes = bw * bh >= 36 ? low : 64ull << 20;
+        // (issue 519: on a card the driver gives under 6 GB, the finer ones too. An RTX 3050 Laptop (4 GB, 3.3 allowed)
+        // held 1.75 GB of decoded ASTC in Goron City, drawn every frame: 5.6 GB used of 3.3, paged, 4 fps. As BC3, a
+        // quarter. RX_VK_ASTC_BC_ALL=1 or 0 says so on any card)
+        static const bool all = [] {
+            if (const char* e = getenv("RX_VK_ASTC_BC_ALL")) return e[0] == '1';
+            uint64_t used = 0, allowed = 0;
+            const bool small = vram_usage(&used, &allowed) && allowed && allowed < (6ull << 30);
+            if (small) logf("vk: %llu MB of VRAM allowed: all large ASTC textures kept as BC3", (unsigned long long)(allowed >> 20));
+            return small;
+        }();
+        const uint64_t min_bytes = (bw * bh >= 36 || all) ? low : 64ull << 20;
         uint64_t px = 0;
         for (uint32_t l = 0; l < x.levels; l++)
             px += (uint64_t)std::max(1u, x.width >> l) * std::max(1u, x.height >> l);

@@ -15,6 +15,7 @@ data ever comes with the tools. Lines the app reads, each on its own line of std
     @@error <text>           stopped
 """
 import argparse
+import filecmp
 import os
 import re
 import shutil
@@ -307,7 +308,8 @@ def default_jobs():
     mem = free_memory_gb()
     # (3.5 GB each: at 2 GB a player's compiler ran out of memory beside the others and died "due to signal", 2026-11-08; the
     # hot pieces, built with the play profile, take more than the rest. nx2/build.py also compiles a failed file again alone)
-    jobs = cpus if mem is None else max(1, min(cpus, int(mem / 3.5)))
+    floor = max(1, min(4, cpus // 2))   # (as many as before at the least: Windows pages rather than fails)
+    jobs = cpus if mem is None else max(floor, min(cpus, int(mem // 2)))
     print("build: %d compilers at once (%d CPU threads, %s GB of memory free; HOOKSHOT_JOBS=<n> to change)"
           % (jobs, cpus, "?" if mem is None else "%.0f" % mem), flush=True)
     return jobs
@@ -612,8 +614,10 @@ def main():
     # (made once on the development PC: lists of addresses and counts, no game code)
     for name in ("hot_funcs.txt", "hot_order.txt", "hookshot_pieces.prof", "hookshot.res"):
         src = os.path.join(ROOT, "work", name)
-        if os.path.exists(src):
-            shutil.copy2(src, os.path.join(work, name))
+        dst = os.path.join(work, name)
+        # (copied only when it differs: a compiler still ending from a cancelled build keeps the profile mapped, WinError 1224)
+        if os.path.exists(src) and not (os.path.exists(dst) and filecmp.cmp(src, dst, shallow=False)):
+            shutil.copy2(src, dst)
     os.makedirs(os.path.join(work, "image"), exist_ok=True)
     src = os.path.join(ROOT, "work", "image", "chunks.txt")   # (where the lifted code's files begin: addresses)
     if os.path.exists(src):

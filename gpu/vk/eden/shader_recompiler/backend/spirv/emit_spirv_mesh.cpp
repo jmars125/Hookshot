@@ -161,8 +161,8 @@ void MeshEpilogue(EmitContext& ctx) {
     for (u32 first = 0; first < mesh.max_primitives; first += threads) {
         const Id primitive{ctx.OpIAdd(ctx.U32[1], invocation, ctx.Const(first))};
         If(ctx, ctx.OpULessThan(ctx.U1, primitive, count), [&] {
-            // Vertex indices: map bytes 4 + 3 * primitive (lines: 4 + 2 * primitive).
-            const u32 corners{mesh.topology == 1 ? 2U : 3U};
+            // Vertex indices: map bytes 4 + 3 * primitive (lines: 4 + 2 * primitive, points: 4 + primitive).
+            const u32 corners{mesh.Corners()};
             const Id byte{ctx.OpIAdd(ctx.U32[1], ctx.OpIMul(ctx.U32[1], primitive, ctx.Const(corners)),
                                      ctx.Const(4U))};
             std::array<Id, 3> indices;
@@ -175,7 +175,9 @@ void MeshEpilogue(EmitContext& ctx) {
             }
             const Id output_indices{ctx.TypePointer(spv::StorageClass::Output, ctx.U32[corners])};
             ctx.OpStore(ctx.OpAccessChain(output_indices, ctx.mesh_primitive_indices, primitive),
-                        ctx.OpCompositeConstruct(ctx.U32[corners], std::span<const Id>(indices.data(), corners)));
+                        corners == 1 ? indices[0]   // (a point's index is a scalar)
+                                     : ctx.OpCompositeConstruct(ctx.U32[corners],
+                                                                std::span<const Id>(indices.data(), corners)));
             CopyLines(ctx, primitive, ctx.mesh_primitive_base, primitive_lines,
                       ctx.mesh_primitive_targets);
         });

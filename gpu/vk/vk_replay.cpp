@@ -110,10 +110,18 @@ uint64_t completed() {
 // On amdgpu every command submission pays for all imported host memory (userptr) again; the replay made ~6 a frame.
 // Held submits go out at the next point that needs the GPU's results or the queue's order: a wait, a readback, a
 // present, a sparse bind, another submit (queue_flush_locked under dev.present_mu).
+// (hookshot) on by default with Mesa's RADV, where it was measured (issue 413: a Radeon 8060S on Bazzite, ~10 -> 30-50 fps, the
+// replay's queue submit ~70 -> ~6 ms a frame); elsewhere as before. RX_VK_BATCH=0 / 1: off / on on any driver
 bool batch_on() {
     static const bool on = [] {
-        const bool v = getenv("RX_VK_BATCH") && atoi(getenv("RX_VK_BATCH"));
-        logf("vk: batched submits %s (RX_VK_BATCH)", v ? "on" : "off");
+        bool radv = false;
+        VkPhysicalDeviceDriverProperties dp{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES};
+        VkPhysicalDeviceProperties2 p2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
+        p2.pNext = &dp;
+        if (dev.physical) vkGetPhysicalDeviceProperties2(dev.physical, &p2), radv = dp.driverID == VK_DRIVER_ID_MESA_RADV;
+        const char* e = getenv("RX_VK_BATCH");
+        const bool v = e ? atoi(e) != 0 : radv;
+        logf("vk: batched submits %s (RX_VK_BATCH%s)", v ? "on" : "off", !e && radv ? ", on with RADV" : "");
         return v;
     }();
     return on && batch_tl != VK_NULL_HANDLE;

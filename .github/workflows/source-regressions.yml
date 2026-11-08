@@ -54,6 +54,8 @@ on:
       - tests/test_changelog.py
       - host/nn_audio.c
       - tests/test_audio_deadline.py
+      - tests/test_audio_output_errors.py
+      - tests/audio_output_errors_test.c
       - host/pad_sdl.c
       - tests/test_rumble_refresh.py
       - tests/test_same_dyn.py
@@ -130,6 +132,8 @@ on:
       - tests/test_changelog.py
       - host/nn_audio.c
       - tests/test_audio_deadline.py
+      - tests/test_audio_output_errors.py
+      - tests/audio_output_errors_test.c
       - host/pad_sdl.c
       - tests/test_rumble_refresh.py
       - tests/test_same_dyn.py
@@ -276,6 +280,9 @@ jobs:
       - name: Check the audio mixer's catch-up
         if: runner.os == 'Linux'
         run: python -I -B tests/test_audio_deadline.py
+      - name: Check audio output recovers from failed device calls
+        if: runner.os == 'Linux'
+        run: python -I -B tests/test_audio_output_errors.py
       - name: Check controller rumble keeps going
         if: runner.os == 'Linux'
         run: python -I -B tests/test_rumble_refresh.py

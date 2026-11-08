@@ -34,7 +34,3 @@ __pycache__/
 # ---- Linux builds ----
 build-linux/
 *.so
-
-# ---- Rust ----
-rs/target/
-rs/hsrt/target/

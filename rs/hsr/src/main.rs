@@ -5,6 +5,7 @@
 //!   hsr unpack <exefs dir>                               ZBIC modules -> plain NSOs
 //!   hsr nup <file.nup> --cat <title>:<exefs|romfs>/<path> <out>   one file, as itself
 
+mod lift;
 mod nso;
 mod nup;
 mod zbic;
@@ -108,10 +109,38 @@ fn cmd_unpack(exefs: &str) -> Result<()> {
     Ok(())
 }
 
+/// Runs rs/tests/difftest.py's cases through the Cranelift translation
+fn cmd_difftest(args: &[String]) -> Result<()> {
+    let [input, output] = args else { usage() };
+    let t0 = Instant::now();
+    let (out, run, skipped) = lift::difftest(&std::fs::read(input)?)?;
+    std::fs::write(output, out)?;
+    println!("{run} cases run, {skipped} not translated, {:.2} s", t0.elapsed().as_secs_f64());
+    Ok(())
+}
+
+/// How much of a code dump (raw little-endian words) the Rust translation covers
+fn cmd_cover(args: &[String]) -> Result<()> {
+    let [path] = args else { usage() };
+    let raw = std::fs::read(path)?;
+    let words: Vec<u32> = raw.chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
+    let t0 = Instant::now();
+    let (ok, bad, by) = lift::coverage(&words);
+    let control = words.iter().filter(|&&w| lift::control_kind(w).is_some()).count();
+    println!("{} words: {control} control flow, {ok} translated, {bad} not ({:.1}% of the rest), {:.1} s",
+             words.len(), 100.0 * ok as f64 / (ok + bad).max(1) as f64, t0.elapsed().as_secs_f64());
+    for (top, n) in by.iter().take(25) {
+        println!("  {:03x}xxxxx  {n}", top << 1);
+    }
+    Ok(())
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let r = match args.first().map(String::as_str) {
         Some("nup") => cmd_nup(&args[1..]),
+        Some("cover") => cmd_cover(&args[1..]),
+        Some("difftest") => cmd_difftest(&args[1..]),
         Some("unpack") => cmd_unpack(args.get(1).map(String::as_str).unwrap_or_else(|| usage())),
         _ => usage(),
     };

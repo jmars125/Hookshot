@@ -264,6 +264,15 @@ static const char *manifest_url(void) {
 
 static DWORD WINAPI work(LPVOID unused) {
     (void)unused;
+    /* (--repair, from the builder's Repair button: every part checked again and the version unpacked anew, after the builder that
+       started this has closed. It is not passed on) */
+    int repair = 0;
+    wchar_t *flag = wcsstr(g_cmdline, L"--repair");
+    if (flag) {
+        repair = 1;
+        wmemmove(flag, flag + 8, wcslen(flag + 8) + 1);
+        Sleep(2000);
+    }
     wchar_t base[MAX_PATH], downloads[MAX_PATH];
     if (SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, base) != S_OK) fail(L"No local application data folder.");
     wcscat(base, L"\\HookshotBuilder");
@@ -302,7 +311,7 @@ static DWORD WINAPI work(LPVOID unused) {
     swprintf(exe, MAX_PATH, L"%ls\\%ls", install, wrun);
     for (wchar_t *q = exe; *q; q++) if (*q == L'/') *q = L'\\';
 
-    if (GetFileAttributesW(marker) == INVALID_FILE_ATTRIBUTES || GetFileAttributesW(exe) == INVALID_FILE_ATTRIBUTES) {
+    if (repair || GetFileAttributesW(marker) == INVALID_FILE_ATTRIBUTES || GetFileAttributesW(exe) == INVALID_FILE_ATTRIBUTES) {
         /* (unpacked into <tag>.part and renamed once complete: a setup stopped half way never leaves a version that looks installed) */
         swprintf(install, MAX_PATH, L"%ls\\%ls.part", versions, wtag);
         rmtree(install);

@@ -68,6 +68,7 @@ on:
       - tests/audio_output_errors_test.c
       - host/nvn_native.c
       - tests/test_nvn_null_pool.py
+      - tests/test_nvn_tex_builder_guard.py
       - host/pad_sdl.c
       - tests/test_rumble_refresh.py
       - tests/test_same_dyn.py
@@ -170,6 +171,7 @@ on:
       - tests/audio_output_errors_test.c
       - host/nvn_native.c
       - tests/test_nvn_null_pool.py
+      - tests/test_nvn_tex_builder_guard.py
       - host/pad_sdl.c
       - tests/test_rumble_refresh.py
       - tests/test_same_dyn.py
@@ -349,6 +351,9 @@ jobs:
       - name: Check a null NVN memory pool is answered, not dereferenced
         if: runner.os == 'Linux'
         run: python -I -B tests/test_nvn_null_pool.py
+      - name: Check a null NVN texture builder is a scratch one
+        if: runner.os == 'Linux'
+        run: python -I -B tests/test_nvn_tex_builder_guard.py
       - name: Check controller rumble keeps going
         if: runner.os == 'Linux'
         run: python -I -B tests/test_rumble_refresh.py

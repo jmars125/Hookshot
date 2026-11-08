@@ -15,9 +15,7 @@ static class Updater
 {
     const string Latest = "https://api.github.com/repos/NotRexed/Hookshot/releases/latest";
     const string Asset = "HookshotBuilder.zip";
-    // (the setup, builder/setup/setup.c: a release holds it and its list. Hookshot-Builder.exe since compile-retry: GitHub lists a
-    // release's files by name, and it sorts first; HookshotBuilder.exe, the name before)
-    static readonly string[] SetupAssets = { "Hookshot-Builder.exe", "HookshotBuilder.exe" };
+    const string SetupAsset = "HookshotBuilder.exe";            // (the setup, builder/setup/setup.c: a release holds it and its list)
     const string SetupList = "hookshot-setup.txt";              // (scripts/make_setup_parts.py)
 
     public static async void FromCommandLine(MainWindow w)
@@ -67,8 +65,7 @@ static class Updater
                         url = asset.GetProperty("browser_download_url").GetString();
                         size = asset.GetProperty("size").GetInt64();
                     }
-                    else if (Array.IndexOf(SetupAssets, assetName) >= 0 && (setupUrl == null || assetName == SetupAssets[0]))
-                        setupUrl = asset.GetProperty("browser_download_url").GetString();
+                    else if (assetName == SetupAsset) setupUrl = asset.GetProperty("browser_download_url").GetString();
                     else if (assetName == SetupList) hasList = true;
                 }
             }
@@ -86,7 +83,7 @@ static class Updater
             if (setupUrl != null && hasList)
             {
                 w.Note($"Downloading the update for {newTag}");
-                var setup = Path.Combine(cache, SetupAssets[0]);
+                var setup = Path.Combine(cache, SetupAsset);
                 var bytes = await http.GetByteArrayAsync(setupUrl, token);
                 await File.WriteAllBytesAsync(setup, bytes, token);
                 var ssi = new ProcessStartInfo(setup) { UseShellExecute = false, WorkingDirectory = cache };

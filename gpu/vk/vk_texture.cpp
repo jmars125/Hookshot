@@ -2749,6 +2749,16 @@ void texture_frame(uint64_t completed) {
         // each "written in one frame", and kept so they added up, ~20 MB a minute)
         const bool baked = tex->first_written && tex->first_written == tex->last_written && tex->bytes <= (4ull << 20);
         if (!overwritten && tex->gpu_written && !tex->released && !evict_rendered && baked) continue;
+        // (a texture the GPU drew that still holds the game's content goes into the game's memory first: made again later, it is
+        // uploaded from there with what the GPU drew. Evicted without it, it came back empty or stale: a terrain chunk dark, a
+        // tiled pattern over the Deku Tree's planks and Hyrule Field's path, with a 16 GB card's textures at the 6 GB budget
+        // (issue 386). RX_VK_EVICT_NO_FLUSH=1: not written back, as before)
+        static const bool no_flush = getenv("RX_VK_EVICT_NO_FLUSH") != nullptr;
+        if (!no_flush && !overwritten && tex->gpu_written && !tex->released && flushable(*tex) &&
+            flush_texture(*tex, tex->gpu, tex->gpu + tex->guest_size)) {
+            static std::atomic<int64_t> flushed{0};
+            if (++flushed % 50 == 1) logf("vk: textures the GPU drew, written back into their memory before eviction: %lld so far", (long long)flushed.load());
+        }
         watch_tex(tex, "evicted");
         if (remade_log_on()) {
             std::lock_guard lk(evicted_mu);

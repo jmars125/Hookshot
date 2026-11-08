@@ -171,7 +171,7 @@ public partial class MainWindow : Window
             var text = new TextBlock { Text = names[i], FontSize = 13, VerticalAlignment = VerticalAlignment.Center,
                                        FontWeight = i == on ? FontWeights.SemiBold : FontWeights.Medium,
                                        Foreground = (Brush)FindResource(i == on ? "Ink" : done ? "InkSoft" : "InkFaint") };
-            var inner = new StackPanel { Orientation = Orientation.Horizontal };
+            var inner = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
             if (done)
             {
                 var tick = new Grid { Width = 22, Height = 22, Margin = new Thickness(0, 0, 8, 0) };
@@ -181,7 +181,7 @@ public partial class MainWindow : Window
                 inner.Children.Add(tick);
             }
             inner.Children.Add(text);
-            var pill = new Border { CornerRadius = new CornerRadius(99), Padding = done ? new Thickness(6, 5, 14, 5) : new Thickness(14, 5, 14, 5), Child = inner };
+            var pill = new Border { Height = 30, CornerRadius = new CornerRadius(15), Padding = done ? new Thickness(4, 0, 14, 0) : new Thickness(14, 0, 14, 0), Child = inner };
             if (i == on)
             {
                 text.Foreground = Brushes.White;
@@ -242,7 +242,7 @@ public partial class MainWindow : Window
             : c.Value.Ok ? ("✓ Supported version", "Go")
             : c.Value.Text.StartsWith("This is build") ? ("Not the supported version", "Warn")
             : ("Can't be read", "Bad");
-        var chip = new Border { Style = (Style)FindResource("Chip"), Child = new TextBlock { Text = text, FontSize = 12, Foreground = (Brush)FindResource(brush) } };
+        var chip = new Border { Style = (Style)FindResource("Chip"), Child = new TextBlock { Text = text, FontSize = 12, Foreground = (Brush)FindResource(brush), VerticalAlignment = VerticalAlignment.Center } };
         if (c is { Ok: false }) chip.ToolTip = c.Value.Text;
         if (c is { Ok: true }) chip.Background = (Brush)FindResource("GoSoft");
         return chip;

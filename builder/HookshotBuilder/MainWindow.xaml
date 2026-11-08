@@ -74,11 +74,11 @@
         </Image>
         <TextBlock Text="Hookshot" FontSize="15" FontWeight="Bold" Margin="10,0,0,0" VerticalAlignment="Center"/>
         <Border x:Name="VersionChip" Style="{StaticResource Chip}" Margin="10,0,0,0" Visibility="Collapsed">
-          <TextBlock x:Name="VersionChipText" FontSize="12" Foreground="{StaticResource InkSoft}"/>
+          <TextBlock x:Name="VersionChipText" FontSize="12" Foreground="{StaticResource InkSoft}" VerticalAlignment="Center"/>
         </Border>
       </StackPanel>
 
-      <Border x:Name="StepPill" HorizontalAlignment="Center" VerticalAlignment="Top" Margin="0,14,0,0" Padding="4" CornerRadius="99"
+      <Border x:Name="StepPill" HorizontalAlignment="Center" VerticalAlignment="Top" Margin="0,12,0,0" Padding="4" Height="40" CornerRadius="20"
               Background="#0BFFFFFF" BorderBrush="#17FFFFFF" BorderThickness="1">
         <StackPanel x:Name="StepItems" Orientation="Horizontal"/>
       </Border>

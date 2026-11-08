@@ -86,8 +86,10 @@
       <Setter Property="Background" Value="#0DFFFFFF"/>
       <Setter Property="BorderBrush" Value="#14FFFFFF"/>
       <Setter Property="BorderThickness" Value="1"/>
-      <Setter Property="CornerRadius" Value="99"/>
-      <Setter Property="Padding" Value="10,4"/>
+      <!-- (a pill: the radius exactly half the height; WPF draws a larger one as a squashed ellipse) -->
+      <Setter Property="Height" Value="26"/>
+      <Setter Property="CornerRadius" Value="13"/>
+      <Setter Property="Padding" Value="10,0"/>
       <Setter Property="VerticalAlignment" Value="Center"/>
     </Style>
 

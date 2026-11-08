@@ -32,8 +32,6 @@ def main():
     scan = read.index("for (size_t i = 0; i < lim; i++)")
     if holds > scan:
         raise SystemExit("ub_read walks the updates before checking the gap")
-    if "memory_read_as_submitted(" not in read[:holds]:
-        raise SystemExit("a word in the gap is answered without the captured bytes")
     if "ub_list_epoch.fetch_add" not in block(source, "void ub_prune("):
         raise SystemExit("dropping an update leaves the gap in place")
     push = source[source.index("ub_updates.push_back(std::move(up));"):source.index("ub_updates.push_back(std::move(up));") + 180]

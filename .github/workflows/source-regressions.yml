@@ -107,6 +107,9 @@ on:
       - gpu/vk/eden/shader_recompiler/backend/spirv/emit_spirv.cpp
       - gpu/vk/eden/shader_recompiler/backend/spirv/emit_spirv_mesh.cpp
       - tests/test_mesh_point_topology.py
+      - tests/test_lower_depbar.py
+      - tests/lower_depbar_test.cpp
+      - gpu/vk/eden/shader_recompiler/frontend/ampere/lower_to_maxwell.h
       - .github/workflows/source-regressions.yml
   pull_request:
     branches: [main]
@@ -214,6 +217,9 @@ on:
       - gpu/vk/eden/shader_recompiler/backend/spirv/emit_spirv.cpp
       - gpu/vk/eden/shader_recompiler/backend/spirv/emit_spirv_mesh.cpp
       - tests/test_mesh_point_topology.py
+      - tests/test_lower_depbar.py
+      - tests/lower_depbar_test.cpp
+      - gpu/vk/eden/shader_recompiler/frontend/ampere/lower_to_maxwell.h
       - .github/workflows/source-regressions.yml
   workflow_dispatch:
 
@@ -391,6 +397,12 @@ jobs:
       - name: Check the game launcher
         if: runner.os == 'Linux'
         run: python -I -B tests/test_hookshot_launch.py
+      - name: Clang for the lowering check
+        if: runner.os == 'Linux'
+        run: sudo apt-get install -y clang
+      - name: Check every dependency barrier form lowers
+        if: runner.os == 'Linux'
+        run: python -I -B tests/test_lower_depbar.py --cxx clang++
 
   spirv-global16:
     name: SPIR-V global narrow load/store lowering

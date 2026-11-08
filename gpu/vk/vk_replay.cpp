@@ -3089,7 +3089,25 @@ void enqueue(Job&& j) {
 }
 
 void wait_queue_empty() {
-    if (!async_on()) return sync_drain(2);
+    if (!async_on()) {
+        // A catch-up (a queue finish, a CPU read back of what the GPU wrote, a pool remapped) used to force every queue
+        // stopped at an event wait past it. The work those waits are for is mostly not submitted yet (the waiting thread is the one
+        // that submits it), so the stopped submission went on without it and its lit passes read what that work makes before it
+        // was made: the scene black, or grey, or blown out for a frame, every other frame for seconds at a time in Kokiri Forest
+        // once the game ran at 60 fps (at 4-8 fps the work had always come first). Measured over 70 s of Kokiri gameplay: 10000-
+        // 40000 waits gone past and 250-1100 flashing frames before, ~300 and ~65 now, 60 fps either way. A catch-up now lets on the
+        // waits that are met; what stays stopped goes on with its own queue's work, a present, or sync_watch's hold_ms as before.
+        // RX_VK_CATCHUP_FORCE=1: forced, as before.
+        static const bool force = getenv("RX_VK_CATCHUP_FORCE") != nullptr;
+        if (force) return sync_drain(2);
+        if (!blocked_n.load()) return;
+        std::lock_guard lk(sync_order_mu);
+        burst_begin(0);
+        schedule();
+        burst_end();
+        update_blocked();
+        return;
+    }
     std::unique_lock lk(q_mu);
     drain_waiters++;   // (stopped submissions go on now: replay_thread_main)
     q_cv.notify_all();

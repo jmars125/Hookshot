@@ -213,15 +213,16 @@ VkBuffer guest_pages_buffer = VK_NULL_HANDLE;
 // before (still running, or queued) read the new entries early. A pool's range zeroed at its merge read as unmapped (zero
 // counts: the culling's foliage gone for a frame), and a mirror made but not yet filled read as garbage: the foliage
 // culling 53caac5f looped on a count from it until Windows reset the driver (the device lost of ~1 start in 5, always
-// after pool merges, 2 s after the GPU stopped). Off unless RX_VK_TABLE_DEFER=1 (see below)
+// after pool merges, 2 s after the GPU stopped)
 struct TableRun { uint64_t first, count, address; };
 thread_local std::vector<TableRun> table_pending;
 thread_local bool table_defer = false;
 void guest_pages_set(uint64_t lo, uint64_t hi, uint64_t address) {
     if (!guest_pages) return;
-    // (off by default: measured 11-07, deferred changes gave 21 one-frame flashes and 17 fps in Kokiri against 6 and 23 written at
-    // once. RX_VK_TABLE_DEFER=1: deferred, for the device-lost hunt)
-    static const bool now = getenv("RX_VK_TABLE_DEFER") == nullptr;
+    // (on by default since 11-08: 14 of 14 starts without the device lost, against ~1 in 7 written at once; one-frame flashes
+    // 0-1 bright / 4 dark in two 40 s Kokiri runs, as many as without it, and the same fps. One earlier run with 21 dark ones was
+    // the runs' spread, not this. RX_VK_TABLE_NOW=1: written at once, as before)
+    static const bool now = getenv("RX_VK_TABLE_NOW") != nullptr;
     // (two windows, as spirv_emit_context.cpp reads them: 8 GB from 0x1000000000, then 4 GB from 0x7f00000000)
     const struct { uint64_t base, bytes, first; } windows[] = {{0x1000000000ull, 8ull << 30, 0}, {0x7f00000000ull, 4ull << 30, (8ull << 30) >> 12}};
     for (const auto& w : windows) {

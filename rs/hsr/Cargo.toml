@@ -1,0 +1,12 @@
+[package]
+name = "hsr"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "Hookshot's build tool in Rust: reads the game package and (later) lifts it to native objects"
+
+[dependencies]
+anyhow = "1"
+rayon = "1"
+ruzstd = "0.9"
+sha2 = "0.10"

@@ -70,7 +70,7 @@ std::mutex replay_mu;   // one replay at a time (the game submits from several t
 // (RX_VK_BATCH: see queue_flush_locked)
 VkSemaphore batch_tl = VK_NULL_HANDLE;
 uint64_t batch_next = 0, batch_flushed = 0;
-struct { std::vector<VkCommandBufferSubmitInfo> cbs; uint64_t signal = 0; bool any_signal = false; } pend;
+struct { std::vector<VkCommandBufferSubmitInfo> cbs; uint64_t signal = 0; bool any_signal = false; uint64_t rec = 0; } pend;   // (rec: the recordings' timeline value the held ones reach)
 int64_t st_flushes, st_batched_cbs;
 enum { FR_OTHER, FR_POLL, FR_WAIT, FR_SLOT, FR_PRESENT, FR_CAP, FR_VALUE, FR_COUNT };
 int64_t st_reason[FR_COUNT];
@@ -146,10 +146,15 @@ bool batch_on() {
 } // namespace
 void queue_flush_locked() {   // (dev.present_mu held)
     if (pend.cbs.empty()) return;
-    VkSemaphoreSubmitInfo sig[2]{{VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO}, {VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO}};
+    VkSemaphoreSubmitInfo sig[3]{{VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO}, {VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO},
+                                 {VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO}};
     uint32_t n = 0;
     if (pend.any_signal) {
         sig[n].semaphore = timeline, sig[n].value = pend.signal, sig[n].stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+        n++;
+    }
+    if (pend.rec) {   // (the recordings' timeline too: wait_recorded waits on it, and held submits carried no signal of it)
+        sig[n].semaphore = rec_timeline, sig[n].value = pend.rec, sig[n].stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
         n++;
     }
     sig[n].semaphore = batch_tl, sig[n].value = batch_next, sig[n].stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
@@ -168,7 +173,7 @@ void queue_flush_locked() {   // (dev.present_mu held)
     st_flushes++, st_batched_cbs += (int64_t)pend.cbs.size();
     st_reason[flush_reason]++;
     flush_reason = FR_OTHER;
-    pend.cbs.clear(), pend.any_signal = false, pend.signal = 0;
+    pend.cbs.clear(), pend.any_signal = false, pend.signal = 0, pend.rec = 0;
 }
 void queue_flush() {
     std::lock_guard lk(dev.present_mu);
@@ -280,8 +285,9 @@ void submit_recording(Recording& r, bool signal_value = true, uint64_t signal_at
     si.pCommandBufferInfos = cb;
     VkSemaphoreSubmitInfo signals[2] = {signal, {VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO}};
     uint32_t nsig = signal_value ? 1 : 0;
+    uint64_t seq = 0;
     if (rec_timeline) {   // (and its number on the recordings' timeline; every caller holds replay_mu: in order)
-        const uint64_t seq = ++rec_seq;
+        seq = ++rec_seq;
         signals[nsig].semaphore = rec_timeline;
         signals[nsig].value = seq;
         signals[nsig].stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
@@ -299,6 +305,7 @@ void submit_recording(Recording& r, bool signal_value = true, uint64_t signal_at
         if (pend.cbs.empty()) batch_next++, pend_since = std::chrono::steady_clock::now();
         for (uint32_t i = 0; i < n; i++) pend.cbs.push_back(cb[i]);
         if (signal_value) pend.signal = std::max(pend.signal, signal.value), pend.any_signal = true;
+        if (seq) pend.rec = std::max(pend.rec, seq);
         r.batch = batch_next;
         r.submitted = true;
         // (RX_VK_BATCH_MAX=<command buffers>: held at most this many, default 32)

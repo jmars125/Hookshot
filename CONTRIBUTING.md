@@ -204,6 +204,10 @@ gigabytes and are derived from the game.
 5. Rebase or merge `main` when it has moved, and resolve conflicts in your branch rather than in the review.
 6. Do not include build output, dumps, generated files or a `.gitignore` bypass. Check `git status`.
 
+Commit subjects decide the next release: write them as Conventional Commits (`feat:`, `fix:`, and `!` or
+`BREAKING CHANGE:` for a break). The version rules, branches and changelog format are in
+[docs/versioning.md](docs/versioning.md).
+
 Maintainer commits record AI assistance with `Assisted-by:` and `Co-Authored-By:` trailers. If you used a tool, add
 the trailers that describe it; if you wrote the change yourself, there is nothing to add.
 

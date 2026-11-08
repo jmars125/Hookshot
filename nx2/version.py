@@ -5,7 +5,8 @@ The game prints it as the first line of hookshot_log.txt and in the Insert menu,
     python -I nx2/version.py            prints it for this folder
 
 The release name comes from, in order: HOOKSHOT_VERSION; a VERSION file at the root (written when a release is packaged,
-since the builder's tools folder has no git history); `git describe --tags --always --dirty` in a checkout. The
+since the builder's tools folder has no git history); `git describe --tags --always --dirty` in a checkout, matching
+only version tags (`v0.1.0`, not the branch-like tags from before the scheme). The
 fingerprint is a hash of the sources in this folder (host/, gpu/, nx2/), line endings aside: every build from the
 same release zip gives the same one, so even a build that says "unknown" can be traced to the zip it came from. (A
 checkout and a release's tools folder hold different sets of files, so their fingerprints differ.)
@@ -33,7 +34,7 @@ def release(root=ROOT):
                 break
     if not name and os.path.exists(os.path.join(root, ".git")):
         try:
-            r = subprocess.run(["git", "-C", root, "describe", "--tags", "--always", "--dirty"],
+            r = subprocess.run(["git", "-C", root, "describe", "--tags", "--always", "--dirty", "--match", "v[0-9]*"],
                                capture_output=True, text=True, timeout=20)
             name = r.stdout.strip() if r.returncode == 0 else ""
         except (OSError, subprocess.SubprocessError):

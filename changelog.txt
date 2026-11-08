@@ -1,0 +1,21 @@
+---------------------------------------------------------------------------------------------------
+Version: 0.1.0
+Date: 07. 11. 2026
+  Major Features:
+    - First release.
+    - The game's AArch64 code is lifted to C and compiled natively on the player's PC from their own copy; no emulator is involved.
+    - Horizon OS and NVN2 are implemented natively, and the GPU work is replayed on Vulkan.
+    - Hookshot Builder on Windows and the Linux AppImage build the game without Visual Studio.
+  Features:
+    - Kokiri Forest: reaching gameplay and walking around.
+    - Sound, controller, keyboard and saves.
+    - In-game menu with frame generation and upscaling.
+    - Movies, with a fallback when the PC has no AV1 decoder.
+    - Linux: the AppImage carries the compiler, Python and the Vulkan back end; the built game runs without it.
+  Changes:
+    - Versioning starts at 0.1.0. Releases follow Semantic Versioning and semantic-release conventions; the changelog uses Factorio's format.
+  Info:
+    - Tested on one Windows PC (Ryzen 5 7600X, RTX 4060 Ti) and one Linux PC, mostly around the start of the game.
+    - AMD and Intel graphics cards and the rest of the game are not tested yet.
+    - A build needs about 60 GB free, and a run uses about 10 GB of RAM.
+    - The repository contains no game files. The game is built from your own dump.

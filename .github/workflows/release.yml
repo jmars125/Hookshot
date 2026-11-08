@@ -1,0 +1,59 @@
+# The version, tag and changelog entry for a push to main (stable) or next (release candidates). The tag starts the
+# Linux AppImage workflow, which publishes the GitHub release. The rules and the one-time v0.1.0 tag are in
+# docs/versioning.md. No game data is involved.
+name: Release
+
+on:
+  push:
+    branches: [main, next]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    # (a manual run on a branch, not on a tag: semantic-release needs a release branch)
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/next'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # the last release tag and the commits since it are part of the analysis
+          fetch-depth: 0
+          # the release commit and the tag are pushed with this token; RELEASE_TOKEN lets the tag start the AppImage
+          # workflow, which publishes the GitHub release
+          token: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Release tooling
+        run: npm install --no-audit --no-fund --ignore-scripts
+
+      # semantic-release starts at 1.0.0 when it finds no tag. The first version is 0.1.0, tagged by hand on the merge
+      # that introduces the scheme, so nothing is released before that tag exists.
+      - name: First release tag
+        id: first
+        run: |
+          if git describe --tags --match 'v[0-9]*' >/dev/null 2>&1; then
+            echo "released=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "released=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No version tag yet. Tag the first release by hand (docs/versioning.md)."
+          fi
+
+      # RELEASE_TOKEN is a fine-grained personal access token with contents: write. It is preferred over GITHUB_TOKEN
+      # because a tag pushed by GITHUB_TOKEN does not start the Linux AppImage workflow that publishes the release.
+      # Without the secret, run that workflow by hand and attach its artifact.
+      - name: semantic-release
+        if: steps.first.outputs.released == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+        run: npx semantic-release

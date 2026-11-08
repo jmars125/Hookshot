@@ -115,7 +115,7 @@ with Vulkan-Headers, SPIRV-Headers and VulkanMemoryAllocator in CPM's layout (`s
 ### Updating to a newer release
 
 A new release is not a patch to your game folder: the game is built again from your copy, with the new code. Your
-saves and settings are kept.
+saves and settings are kept. What changed in each release is in [changelog.txt](changelog.txt).
 
 1. Close the game.
 2. To be safe, copy your saves somewhere first: the `user` folder beside `hookshot.exe` on Windows, or

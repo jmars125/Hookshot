@@ -15,7 +15,7 @@ ROOT=$PWD
 B=$ROOT/build-linux
 DEPS=${DEPS:-$B/deps}
 APPDIR=$B/AppDir
-VERSION=${HOOKSHOT_VERSION:-$(git describe --tags --always 2>/dev/null || echo dev)}
+VERSION=${HOOKSHOT_VERSION:-$(git describe --tags --always --match "v[0-9]*" 2>/dev/null || echo dev)}
 export EMSDK=$DEPS/emsdk RX_CPM=$DEPS/cpm
 PY=$DEPS/python/bin/python3
 

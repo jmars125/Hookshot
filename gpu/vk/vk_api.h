@@ -15,7 +15,7 @@
 extern "C" {
 #endif
 
-#define MKWVK_API_VERSION 3
+#define MKWVK_API_VERSION 4
 
 /* (hookshot) the controls' names (host/nn_hid.c, host/pad_sdl.c, the pad_ and key_ lines of hookshot_options.ini):
    the Switch's buttons in nn::hid's bit order, and a gamepad's inputs by position, SDL's order (the bottom face
@@ -76,6 +76,8 @@ typedef struct MkwVkHost {
        do (Windows key codes, 0 none; slots 0 and 1). bind with button -1: all back to their defaults */
     int (*binding)(int set, int button, int slot);
     void (*bind)(int set, int button, int slot, int code);
+    /// The guest camera aspect explicitly applied at startup (0: its default aspect)
+    float (*aspect_ratio)(void);
 } MkwVkHost;
 
 /* what the back end gives the executable: the rx_* functions (gpu/render/rx_nvn.h, rx_core) */

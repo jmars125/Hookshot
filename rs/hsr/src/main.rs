@@ -5,6 +5,8 @@
 //!   hsr unpack <exefs dir>                               ZBIC modules -> plain NSOs
 //!   hsr nup <file.nup> --cat <title>:<exefs|romfs>/<path> <out>   one file, as itself
 
+mod cli_discover;
+mod image;
 mod lift;
 mod nso;
 mod nup;
@@ -192,6 +194,7 @@ fn main() {
         Some("nup") => cmd_nup(&args[1..]),
         Some("cover") => cmd_cover(&args[1..]),
         Some("difftest") => cmd_difftest(&args[1..]),
+        Some("discover") => cli_discover::run(&args[1..]),
         Some("difftest-fn") => cmd_difftest_fn(&args[1..]),
         Some("unpack") => cmd_unpack(args.get(1).map(String::as_str).unwrap_or_else(|| usage())),
         _ => usage(),

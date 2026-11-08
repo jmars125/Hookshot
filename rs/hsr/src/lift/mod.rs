@@ -3,6 +3,7 @@
 
 pub mod a64;
 pub mod ctx;
+pub mod discover;
 pub mod fntest;
 pub mod func;
 pub mod rt;

@@ -57,7 +57,11 @@ def native_link():
         # (/nodefaultlib: libraries built with Microsoft's compiler, the CPM cache's FFmpeg, ask in their objects for its C runtime;
         # the MinGW one stands in, with host/mingw_msvc_shims.c for what it lacks)
         return ["-fuse-ld=lld", "-static"] + ["-Wl,-Xlink=/nodefaultlib:" + l for l in ("libcmt", "oldnames", "libvcruntime", "msvcrt")]
-    return ["-fuse-ld=lld", "-B" + os.path.dirname(lld_link())] if os.name == "nt" else []
+    # (issue 439: clang names oldnames.lib as a default library for the MSVC target, and recent Windows SDKs no longer
+    # ship it (an older SDK has it in ucrt\x64; Visual Studio has its own copy in its lib folder). The game and host use
+    # no legacy non-underscore name; the ones the prebuilt static FFmpeg libraries ask for are host/msvc_oldnames.c)
+    return (["-fuse-ld=lld", "-B" + os.path.dirname(lld_link()), "-Wl,/nodefaultlib:oldnames"]
+            if os.name == "nt" else [])
 
 
 def link_opt(opt):

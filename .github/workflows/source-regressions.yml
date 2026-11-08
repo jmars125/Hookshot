@@ -8,6 +8,9 @@ on:
       - nx2/make_game.py
       - nx2/build.py
       - nx2/unpack.py
+      - third_party/a64-kit/tools/toolchain.py
+      - host/msvc_oldnames.c
+      - tests/test_msvc_oldnames.py
       - nx2/test_nup_paths.py
       - tests/test_make_game_cache.py
       - tests/test_child_unicode.py
@@ -79,6 +82,9 @@ on:
       - nx2/make_game.py
       - nx2/build.py
       - nx2/unpack.py
+      - third_party/a64-kit/tools/toolchain.py
+      - host/msvc_oldnames.c
+      - tests/test_msvc_oldnames.py
       - nx2/test_nup_paths.py
       - tests/test_make_game_cache.py
       - tests/test_child_unicode.py
@@ -174,6 +180,8 @@ jobs:
         run: python -I -B nx2/test_nup_paths.py
       - name: Check source-cache coherency
         run: python -I -B tests/test_make_game_cache.py
+      - name: Check the Windows link's oldnames default
+        run: python -I -B tests/test_msvc_oldnames.py
       - name: Check isolated child Unicode output
         run: python -I -B tests/test_child_unicode.py
       - name: Check packaged CPM discovery

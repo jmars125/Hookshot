@@ -90,6 +90,8 @@ on:
       - tests/global_load_16/**
       - gpu/vk/eden/shader_recompiler/backend/spirv/emit_spirv_memory.cpp
       - gpu/vk/eden/shader_recompiler/backend/spirv/emit_spirv_instructions.h
+      - gpu/vk/eden/shader_recompiler/backend/spirv/spirv_emit_context.cpp
+      - gpu/vk/eden/shader_recompiler/backend/spirv/spirv_emit_context.h
       - gpu/vk/eden/shader_recompiler/backend/spirv/emit_spirv_mesh.cpp
       - tests/test_mesh_stage_buffer_zero.py
       - gpu/vk/eden/shader_recompiler/shader_info.h
@@ -190,6 +192,8 @@ on:
       - tests/global_load_16/**
       - gpu/vk/eden/shader_recompiler/backend/spirv/emit_spirv_memory.cpp
       - gpu/vk/eden/shader_recompiler/backend/spirv/emit_spirv_instructions.h
+      - gpu/vk/eden/shader_recompiler/backend/spirv/spirv_emit_context.cpp
+      - gpu/vk/eden/shader_recompiler/backend/spirv/spirv_emit_context.h
       - gpu/vk/eden/shader_recompiler/backend/spirv/emit_spirv_mesh.cpp
       - tests/test_mesh_stage_buffer_zero.py
       - gpu/vk/eden/shader_recompiler/shader_info.h
@@ -373,7 +377,7 @@ jobs:
         run: python -I -B tests/test_hookshot_launch.py
 
   spirv-global16:
-    name: SPIR-V global halfword lowering
+    name: SPIR-V global narrow load/store lowering
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:

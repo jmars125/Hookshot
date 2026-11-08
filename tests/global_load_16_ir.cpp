@@ -23,7 +23,7 @@ using Shader::Backend::SPIRV::EmitSPIRV;
 static std::filesystem::path output_dir{"work/global16-modules"};
 
 struct TestEnvironment final : Environment {
-    TestEnvironment() { stage = Stage::Compute; }
+    explicit TestEnvironment(Stage s = Stage::Compute) { stage = s; }
     u64 ReadInstruction(u32) override { return 0; }
     u32 ReadCbufValue(u32, u32) override { return 0; }
     TextureType ReadTextureType(u32) override { return TextureType::Color2D; }
@@ -47,11 +47,15 @@ struct TestEnvironment final : Environment {
 }
 
 static std::vector<u32> emit_program(bool is_signed, u64 address, bool support_int64,
-                                     bool lower_address) {
+                                     bool lower_address, Stage stage = Stage::Compute) {
     ObjectPool<IR::Inst> inst_pool;
     IR::Block block{inst_pool};
     IR::Program program;
-    program.stage = Stage::Compute;
+    program.stage = stage;
+    program.output_vertices = stage == Stage::Mesh ? 1 : 0;
+    program.mesh.max_vertices = stage == Stage::Mesh ? 1 : 0;
+    program.mesh.max_primitives = stage == Stage::Mesh ? 1 : 0;
+    program.mesh.payload_words = stage == Stage::Mesh ? 1 : 0;
     program.workgroup_size = {1, 1, 1};
     program.blocks.push_back(&block);
     program.post_order_blocks.push_back(&block);
@@ -79,7 +83,7 @@ static std::vector<u32> emit_program(bool is_signed, u64 address, bool support_i
     }
     ir.Epilogue();
 
-    TestEnvironment env;
+    TestEnvironment env{stage};
     if (lower_address) Optimization::LowerInt64ToInt32(program);
     Optimization::CollectShaderInfoPass(env, program);
     if (!program.info.uses_global_memory) fail("CollectShaderInfoPass did not see the actual global load");
@@ -143,10 +147,10 @@ static std::vector<u32> save_module(const std::string& name, std::vector<u32> co
     return code;
 }
 
-static void check_case(bool is_signed, u64 address, const char* name) {
+static void check_case(bool is_signed, u64 address, const char* name, Stage stage = Stage::Compute) {
     std::string filename;
     for (const char* c = name; *c; ++c) filename += (*c == ' ' ? '-' : *c);
-    const auto module = inspect(save_module(filename, emit_program(is_signed, address, true, false)));
+    const auto module = inspect(save_module(filename, emit_program(is_signed, address, true, false, stage)));
     const u64 aligned = address & ~u64{3};
     const u32 expected_bit_offset = static_cast<u32>((address & 3u) << 3);
     u32 address_id = 0, aligned_id = 0, low_lane_id = 0, low_id = 0, bit_offset_id = 0;
@@ -219,6 +223,77 @@ static void check_case(bool is_signed, u64 address, const char* name) {
                 expected_bit_offset);
 }
 
+static std::vector<u32> emit_write_program(bool is_signed, u64 address, bool support_int64, u32 bits,
+                                           Stage stage = Stage::Compute) {
+    ObjectPool<IR::Inst> inst_pool;
+    IR::Block block{inst_pool};
+    IR::Program program;
+    program.stage = stage;
+    program.output_vertices = stage == Stage::Mesh ? 1 : 0;
+    program.mesh.max_vertices = stage == Stage::Mesh ? 1 : 0;
+    program.mesh.max_primitives = stage == Stage::Mesh ? 1 : 0;
+    program.mesh.payload_words = stage == Stage::Mesh ? 1 : 0;
+    program.workgroup_size = {1, 1, 1};
+    program.blocks.push_back(&block);
+    program.post_order_blocks.push_back(&block);
+    IR::AbstractSyntaxNode node{};
+    node.type = IR::AbstractSyntaxNode::Type::Block;
+    node.data.block = &block;
+    program.syntax_list.push_back(node);
+    IR::AbstractSyntaxNode ret{};
+    ret.type = IR::AbstractSyntaxNode::Type::Return;
+    program.syntax_list.push_back(ret);
+
+    IR::IREmitter ir{block};
+    const IR::U64 guest_address{ir.Imm64(address)};
+    const IR::U32 value{ir.Imm32(bits == 8 ? 0xA5u : 0xA5A5u)};
+    if (is_signed) {
+        if (bits == 8) ir.WriteGlobalS8(guest_address, value);
+        else ir.WriteGlobalS16(guest_address, value);
+    } else {
+        if (bits == 8) ir.WriteGlobalU8(guest_address, value);
+        else ir.WriteGlobalU16(guest_address, value);
+    }
+    ir.Epilogue();
+
+    TestEnvironment env{stage};
+    Optimization::CollectShaderInfoPass(env, program);
+    if (!program.info.stores_global_memory) fail("CollectShaderInfoPass did not see the actual global store");
+    if (!program.info.uses_global_memory) fail("CollectShaderInfoPass did not see the global store's memory");
+
+    Profile profile{};
+    profile.supported_spirv = 0x00010600;
+    profile.support_int64 = support_int64;
+    return EmitSPIRV(profile, program);
+}
+
+static void check_write_case(bool is_signed, u64 address, u32 bits, const char* name,
+                             Stage stage = Stage::Compute) {
+    std::string filename;
+    for (const char* c = name; *c; ++c) filename += (*c == ' ' ? '-' : *c);
+    const auto module = inspect(save_module(filename, emit_write_program(is_signed, address, true, bits, stage)));
+    const u32 expected_bit_offset = static_cast<u32>((address & 3u) << 3);
+    bool saw_insert = false, saw_cas = false, saw_call = false, saw_shift = false;
+    for (const auto& inst : module.instructions) {
+        const auto& w = inst.words;
+        if (inst.op == spv::Op::OpBitFieldInsert && w.size() >= 6) saw_insert = true;
+        if (inst.op == spv::Op::OpAtomicCompareExchange) saw_cas = true;
+        // (the compare-exchange helper's call: address, value, bit offset, width)
+        if (inst.op == spv::Op::OpFunctionCall && w.size() >= 7 &&
+            constant(module, w[6], "missing narrow-store width") == bits)
+            saw_call = true;
+        if (inst.op == spv::Op::OpShiftLeftLogical && w.size() >= 4 &&
+            constant(module, w[3], "missing byte-to-bit shift") == 3)
+            saw_shift = true;
+    }
+    if (!saw_insert) fail("narrow global store did not insert into its aligned word");
+    if (!saw_cas) fail("narrow global store did not use a compare-exchange loop");
+    if (!saw_call) fail("narrow global store did not call the compare-exchange helper with its width");
+    if (!saw_shift) fail("narrow global store did not derive its bit offset from the address low bits");
+    std::printf("PASS: %s emitted aligned-word compare-exchange + %u-bit insert (offset=%u)\n", name, bits,
+                expected_bit_offset);
+}
+
 static void check_unsupported_profile() {
     const auto module = inspect(save_module(
         "unsupported-int64", emit_program(true, 0x0000000100000002ull, false, true)));
@@ -267,5 +342,11 @@ int main(int argc, char** argv) {
     check_case(false, 0x0000000100000002ull, "unsigned offset 2 high address");
     check_case(true, 0x0000007f00000ffeull, "signed guest-page end 0xffe");
     check_case(false, 0x0000007f00000ffeull, "unsigned guest-page end 0xffe");
+    check_write_case(true, 0x0000000100000000ull, 16, "signed 16-bit store high address");
+    check_write_case(false, 0x0000000100000002ull, 16, "unsigned 16-bit store offset 2");
+    check_write_case(true, 0x0000000100000003ull, 8, "signed 8-bit store offset 3");
+    check_write_case(false, 0x0000007f00000fffull, 8, "unsigned 8-bit store page end");
+    check_case(true, 0x0000000100000000ull, "mesh signed offset 0 high address", Stage::Mesh);
+    check_write_case(true, 0x0000000100000000ull, 16, "mesh signed 16-bit store high address", Stage::Mesh);
     check_unsupported_profile();
 }

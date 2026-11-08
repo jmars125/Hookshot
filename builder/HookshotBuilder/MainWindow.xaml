@@ -133,12 +133,30 @@
             </StackPanel>
           </Grid>
 
-          <StackPanel Grid.Row="4" Orientation="Horizontal" Margin="0,12,0,0">
-            <Border Width="16" Height="16" CornerRadius="8" Background="{StaticResource BrandSoft}" VerticalAlignment="Center">
-              <TextBlock Text="i" FontSize="10" FontWeight="Bold" Foreground="#B9C8FF" HorizontalAlignment="Center" VerticalAlignment="Center"/>
-            </Border>
-            <TextBlock x:Name="ToolsNote" Style="{StaticResource Note}" FontSize="12" Margin="8,0,0,0" VerticalAlignment="Center"/>
-          </StackPanel>
+          <Grid Grid.Row="4" Margin="0,12,0,0">
+            <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="20"/><ColumnDefinition Width="160"/></Grid.ColumnDefinitions>
+            <Grid VerticalAlignment="Center">
+              <Grid.ColumnDefinitions><ColumnDefinition Width="16"/><ColumnDefinition/></Grid.ColumnDefinitions>
+              <Border Width="16" Height="16" CornerRadius="8" Background="{StaticResource BrandSoft}" VerticalAlignment="Center">
+                <TextBlock Text="i" FontSize="10" FontWeight="Bold" Foreground="#B9C8FF" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+              </Border>
+              <TextBlock x:Name="ToolsNote" Grid.Column="1" Style="{StaticResource Note}" FontSize="12" Margin="8,0,0,0" VerticalAlignment="Center" TextWrapping="Wrap"/>
+            </Grid>
+            <StackPanel Grid.Column="2">
+              <TextBlock x:Name="WorkerLabel" Style="{StaticResource Label}" Text="BUILD WORKERS"/>
+              <ComboBox x:Name="WorkerBox" Style="{StaticResource Choice}" IsEditable="False"
+                        AutomationProperties.Name="Build workers" AutomationProperties.LabeledBy="{Binding ElementName=WorkerLabel}"
+                        ToolTip="Automatic uses available memory and any existing worker override. More workers need more memory and may not be faster.">
+                <ComboBox.FocusVisualStyle>
+                  <Style TargetType="Control">
+                    <Setter Property="Template">
+                      <Setter.Value><ControlTemplate><Border BorderBrush="{StaticResource Brand}" BorderThickness="2" CornerRadius="10" Margin="-2"/></ControlTemplate></Setter.Value>
+                    </Setter>
+                  </Style>
+                </ComboBox.FocusVisualStyle>
+              </ComboBox>
+            </StackPanel>
+          </Grid>
 
           <Grid Grid.Row="6">
             <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>

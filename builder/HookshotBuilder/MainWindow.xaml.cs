@@ -43,6 +43,8 @@ public partial class MainWindow : Window
         OutPath.Text = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Games", "Hookshot");
         LanguageBox.ItemsSource = Strings.All;
         LanguageBox.SelectedItem = lang;
+        WorkerBox.ItemsSource = BuildWorkers.Choices(Environment.ProcessorCount);
+        WorkerBox.SelectedIndex = 0;
         clock.Tick += (_, _) => Tick();
         Drop += Dropped;
         SourceInitialized += (_, _) =>
@@ -430,6 +432,13 @@ public partial class MainWindow : Window
 
     void Run(Tools tools, List<string> args, bool keepRows = false)
     {
+        int? workers;
+        try { workers = BuildWorkers.Selected(WorkerBox.SelectedItem); }
+        catch (ArgumentException e)
+        {
+            MessageBox.Show(this, e.Message, "Hookshot");
+            return;
+        }
         if (!keepRows)
         {
             updating = false;
@@ -452,7 +461,7 @@ public partial class MainWindow : Window
         compileClock.Reset();
         clock.Start();
         Tick();
-        runner = new Runner(tools, args);
+        runner = new Runner(tools, args, workers);
         runner.Line += l => Dispatcher.BeginInvoke(() => Line(l));
         runner.Finished += failure => Dispatcher.BeginInvoke(() => Ended(failure));
         runner.Start();

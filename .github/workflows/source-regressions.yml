@@ -25,6 +25,8 @@ on:
       - tests/test_failure_reason.py
       - tests/test_linux_builder_jobs.py
       - builder/linux/hookshot_builder.py
+      - builder/HookshotBuilder/**
+      - tests/builder_workers/**
       - tests/test_import_hold.py
       - gpu/vk/vk_replay.cpp
       - tests/import_hold_test.cpp
@@ -135,6 +137,8 @@ on:
       - tests/test_failure_reason.py
       - tests/test_linux_builder_jobs.py
       - builder/linux/hookshot_builder.py
+      - builder/HookshotBuilder/**
+      - tests/builder_workers/**
       - tests/test_import_hold.py
       - gpu/vk/vk_replay.cpp
       - tests/import_hold_test.cpp
@@ -292,6 +296,20 @@ jobs:
         run: python -I -B tests/test_failure_reason.py
       - name: Linux builder worker selection
         run: python -I -B tests/test_linux_builder_jobs.py
+      - name: Set up .NET for Windows Builder checks
+        if: runner.os == 'Windows'
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Check Windows Builder worker delivery
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          dotnet restore tests/builder_workers/BuilderWorkersTests.csproj --configfile tests/builder_workers/NuGet.Config
+          dotnet run --project tests/builder_workers/BuilderWorkersTests.csproj --configuration Release --no-restore -- (Get-Command python).Source
+      - name: Compile Windows Builder
+        if: runner.os == 'Windows'
+        run: dotnet build builder/HookshotBuilder/HookshotBuilder.csproj --configuration Debug -p:NuGetAudit=false
       - name: C++ compiler for the import-hold check
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y g++

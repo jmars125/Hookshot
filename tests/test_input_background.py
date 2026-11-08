@@ -43,7 +43,7 @@ def main():
     menu = (ROOT / "gpu" / "vk" / "vk_menu.cpp").read_text(encoding="utf-8")
 
     read = block(hid, "static void read_input(")
-    behind = read[read.index("if (!game_in_front())"):]
+    behind = read[read.index("if (!game_in_front()"):]   # (with or without PR 545's scripted-background test)
     behind = behind[:behind.index("return;") + len("return;")]
     if "pads_in_background(" not in behind or "pads_read(" not in behind:
         raise SystemExit("behind another window the pads are never read")

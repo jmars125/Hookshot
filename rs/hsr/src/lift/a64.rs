@@ -21,6 +21,12 @@ pub struct Unsupported;
 
 pub type R = Result<(), Unsupported>;
 
+/// The FPCR bits MSR keeps on the Switch 2's Cortex-A78C: AHP DN FZ RMode FZ16 (no FP traps, so the trap enables
+/// read as zero; no FEAT_AFP; the rest is RES0)
+const FPCR_BITS: u64 = 0x07C8_0000;
+/// The FPSR bits MSR keeps: NZCV QC and the cumulative exception flags
+const FPSR_BITS: u64 = 0xF800_009F;
+
 /// The variables holding the guest's integer registers and flags
 #[derive(Clone)]
 pub struct Regs {
@@ -1213,6 +1219,13 @@ impl Em<'_, '_> {
                     self.ctx,
                     ctx::TPIDRRO_EL0,
                 ),
+                0x5A20 | 0x5A21 => {
+                    // FPCR / FPSR
+                    let off = if key == 0x5A20 { ctx::FPCR } else { ctx::FPSR };
+                    self.b
+                        .ins()
+                        .load(types::I64, MemFlagsData::trusted(), self.ctx, off)
+                }
                 0x5A10 => {
                     let mut acc = self.b.ins().iconst(types::I64, 0);
                     for (i, var) in [self.r.n, self.r.z, self.r.c, self.r.v]
@@ -1239,6 +1252,19 @@ impl Em<'_, '_> {
                     self.b
                         .ins()
                         .store(MemFlagsData::trusted(), v, self.ctx, ctx::TPIDR_EL0);
+                }
+                0x5A20 | 0x5A21 => {
+                    // FPCR / FPSR: only the defined bits are kept (the rest are RES0: they read back as zero)
+                    let (off, mask) = if key == 0x5A20 {
+                        (ctx::FPCR, FPCR_BITS)
+                    } else {
+                        (ctx::FPSR, FPSR_BITS)
+                    };
+                    let v = self.x(rt, true);
+                    let v = self.b.ins().band_imm_u(v, mask as i64);
+                    self.b
+                        .ins()
+                        .store(MemFlagsData::trusted(), v, self.ctx, off);
                 }
                 0x5A10 => {
                     let v = self.x(rt, true);

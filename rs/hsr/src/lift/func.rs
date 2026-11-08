@@ -204,7 +204,7 @@ pub fn plt_target(code: &dyn Code, e: u64, entries: &HashSet<u64>) -> Option<(u6
 
 /// The program being lifted: the function entries and what discovery found about them
 pub struct Program<'p> {
-    pub code: &'p dyn Code,
+    pub code: &'p (dyn Code + Sync),
     pub entries: HashSet<u64>,
     pub jt: HashMap<u64, Vec<u64>>,
     /// PLT stub entry -> (final target, GOT slot)
@@ -240,7 +240,7 @@ impl Program<'_> {
 pub struct Builder<'p, 'q> {
     pub p: &'q Program<'p>,
     /// Functions with a t_ body in this module (a direct call or tail call of one goes to it)
-    pub rust: HashSet<u64>,
+    pub rust: std::sync::Arc<HashSet<u64>>,
     written: HashMap<u32, Result<u64, Unsupported>>,
     scratch: FunctionBuilderContext,
     pub fbc: FunctionBuilderContext,
@@ -281,7 +281,7 @@ impl<'p, 'q> Builder<'p, 'q> {
     pub fn new(p: &'q Program<'p>, frontend: cranelift_codegen::isa::TargetFrontendConfig) -> Self {
         Builder {
             p,
-            rust: HashSet::new(),
+            rust: Default::default(),
             written: HashMap::new(),
             scratch: FunctionBuilderContext::new(),
             fbc: FunctionBuilderContext::new(),
@@ -324,6 +324,11 @@ impl<'p, 'q> Builder<'p, 'q> {
         r
     }
 
+    /// Whether the word translates on its own
+    pub fn translates(&mut self, w: u32) -> bool {
+        self.written(w).is_ok()
+    }
+
     /// The function's dirty mask, or Unsupported when an instruction does not translate or a call needs setjmp
     pub fn check(&mut self, e: u64, body: &Body) -> Result<u64, Unsupported> {
         if self.p.plt.contains_key(&e) {
@@ -332,6 +337,9 @@ impl<'p, 'q> Builder<'p, 'q> {
         let mut dirty = 0;
         for (_, &(k, w)) in &body.insns {
             match k {
+                // (encoding group 0000 is unallocated, UDF among it: undefined on the hardware, so it traps here as
+                // in a64_lift.py, and the function stays in Rust)
+                Kind::Op if (w >> 25) & 0xF == 0 => {}
                 Kind::Op => dirty |= self.written(w)?,
                 Kind::Bl(t) => {
                     if self.p.setjmp_owners.contains(&self.p.callee(t)) {
@@ -350,7 +358,7 @@ impl<'p, 'q> Builder<'p, 'q> {
     pub fn declare<M: Module>(&self, m: &mut M, e: u64) -> ModuleResult<(FuncId, FuncId)> {
         let cc = m.host_cc();
         let f = m.declare_function(&fname(e), Linkage::Export, &host_sig(cc, &[], false))?;
-        let t = m.declare_function(&tname(e), Linkage::Local, &body_sig())?;
+        let t = m.declare_function(&tname(e), Linkage::Export, &body_sig())?;
         Ok((f, t))
     }
 

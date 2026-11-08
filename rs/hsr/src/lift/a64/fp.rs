@@ -756,11 +756,83 @@ impl Em<'_, '_> {
         }
         if bits(w, 31, 31) == 0 && bits(w, 29, 29) == 0 && bits(w, 21, 21) == 1 {
             match bits(w, 11, 10) {
-                0b10 if bits(w, 15, 15) == 0 || bits(w, 15, 12) == 8 => {
-                    // 2-source: FMUL FDIV FADD FSUB FNMUL (min/max not yet)
+                0b10 if bits(w, 15, 12) < 4 || bits(w, 15, 12) == 8 => {
+                    // 2-source: FMUL FDIV FADD FSUB FNMUL
                     let a = self.vget(rn, ity);
                     let b = self.vget(rm, ity);
                     let r = self.arith2(bits(w, 15, 12), a, b, dbl)?;
+                    self.vset(rd, r);
+                    return Ok(());
+                }
+                0b01 => {
+                    // FCCMP / FCCMPE: the compare when the condition holds, else NZCV = #nzcv
+                    let holds = self.cond(bits(w, 15, 12));
+                    let (yes, no, done) = (
+                        self.b.create_block(),
+                        self.b.create_block(),
+                        self.b.create_block(),
+                    );
+                    self.b.ins().brif(holds, yes, &[], no, &[]);
+                    self.b.seal_block(yes);
+                    self.b.seal_block(no);
+                    self.b.switch_to_block(yes);
+                    let a = self.vget(rn, ity);
+                    let b = self.vget(rm, ity);
+                    self.fcmp(a, b, dbl, bits(w, 4, 4) != 0);
+                    self.b.ins().jump(done, &[]);
+                    self.b.switch_to_block(no);
+                    let nzcv = bits(w, 3, 0);
+                    let f: Vec<Value> = (0..4)
+                        .map(|i| {
+                            self.b
+                                .ins()
+                                .iconst(types::I8, ((nzcv >> (3 - i)) & 1) as i64)
+                        })
+                        .collect();
+                    self.set_flags(f[0], f[1], f[2], f[3]);
+                    self.b.ins().jump(done, &[]);
+                    self.b.switch_to_block(done);
+                    self.b.seal_block(done);
+                    return Ok(());
+                }
+                0b10 if (4..=7).contains(&bits(w, 15, 12)) => {
+                    // FMAX FMIN FMAXNM FMINNM: native without NaNs or flushed subnormals (no exception, and the
+                    // host's IEEE maximum / minimum agree with the Arm ones), else hsr_fminmax
+                    let op = bits(w, 15, 12);
+                    let (max, nm) = (op & 1 == 0, op >= 6);
+                    let a = self.vget(rn, ity);
+                    let b = self.vget(rm, ity);
+                    let (_, exp, _) = fmt(dbl);
+                    let (aa, ab) = (self.abs_bits(a, dbl), self.abs_bits(b, dbl));
+                    let na = self
+                        .b
+                        .ins()
+                        .icmp_imm_u(IntCC::UnsignedGreaterThan, aa, exp as i64);
+                    let nb = self
+                        .b
+                        .ins()
+                        .icmp_imm_u(IntCC::UnsignedGreaterThan, ab, exp as i64);
+                    let (sa, sb) = (self.subnormal(a, dbl), self.subnormal(b, dbl));
+                    let s = self.b.ins().bor(sa, sb);
+                    let fz = self.fz();
+                    let flush = self.b.ins().band(s, fz);
+                    let bad = self.b.ins().bor(na, nb);
+                    let bad = self.b.ins().bor(bad, flush);
+                    let keep = self.b.ins().icmp_imm_s(IntCC::Equal, bad, 0);
+                    let fty = Self::fty_of(dbl);
+                    let fa = self.b.ins().bitcast(fty, MemFlagsData::new(), a);
+                    let fb = self.b.ins().bitcast(fty, MemFlagsData::new(), b);
+                    let f = if max {
+                        self.b.ins().fmax(fa, fb)
+                    } else {
+                        self.b.ins().fmin(fa, fb)
+                    };
+                    let fast = self.b.ins().bitcast(ity, MemFlagsData::new(), f);
+                    let p = self.b.ins().iconst(
+                        types::I64,
+                        dbl as i64 | (max as i64) << 1 | (nm as i64) << 2,
+                    );
+                    let r = self.fast_or_exact(keep, fast, "hsr_fminmax", &[a, b, p], dbl);
                     self.vset(rd, r);
                     return Ok(());
                 }

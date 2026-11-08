@@ -108,6 +108,7 @@ GROUPS = [
     ("fp_dp2", FP | 0xFFA00C00, 0x1E200800),
     ("fp_cmp", FP | 0xFFA0FC07, 0x1E202000),
     ("fp_csel", FP | 0xFFA00C00, 0x1E200C00),
+    ("fp_ccmp", FP | 0xFFA00C00, 0x1E200400),
     ("fp_imm", FP | 0xFFA01FE0, 0x1E201000),
     ("fp_fma", FP | 0xFF800000, 0x1F000000),
     ("fp_fcvt", FP | 0xFFBF7C00, 0x1E224000),
@@ -135,7 +136,7 @@ GROUPS = [
     ("v_single_post", 0xBF800000, 0x0D800000),
 ]
 SYSTEM = [0xD503201F, 0xD503203F, 0xD503233F, 0xD50323BF, 0xD5033BBF, 0xD5033B9F, 0xD50339BF]
-SYS_RW = [0xD53B4200, 0xD51B4200, 0xD53BD040, 0xD51BD040]   # MRS/MSR NZCV, MRS/MSR TPIDR_EL0 (Rt added)
+SYS_RW = [0xD53B4200, 0xD51B4200, 0xD53BD040, 0xD51BD040, 0xD53B4400, 0xD51B4400, 0xD53B4420, 0xD51B4420]   # MRS/MSR NZCV, MRS/MSR TPIDR_EL0 (Rt added)
 
 
 def unpredictable(word):
@@ -275,6 +276,8 @@ def main():
         if gnzcv != enzcv:
             bad.append("nzcv %x != %x" % (gnzcv >> 28, enzcv >> 28))
         bad += ["%s %#x != %#x" % ("sp" if j == 31 else "x%d" % j, gx[j], ex[j]) for j in range(32) if gx[j] != ex[j]]
+        if word & 0xFFFFFFE0 == 0xD51B4400:   # MSR FPCR: QEMU keeps the AArch32 Len / Stride bits, RES0 here
+            efpcr &= ~0x370000
         if gfpcr != efpcr:
             bad.append("fpcr %#x != %#x" % (gfpcr, efpcr))
         if gfpsr != efpsr:

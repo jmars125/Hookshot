@@ -160,7 +160,7 @@ fn run_case(
             }
         }
     }
-    b.rust = entries.iter().copied().collect();
+    b.rust = std::sync::Arc::new(entries.iter().copied().collect());
     for (e, body, d) in &bodies {
         b.define(&mut m, *e, body, *d)?;
     }

@@ -99,9 +99,12 @@ def run(cmd, env=None, on_line=None):
         lines.append(line)
         if on_line:
             on_line(line)
-    if p.wait():
+    p.stdout.close()
+    code = p.wait()
+    if code:
         step = next((os.path.basename(c) for c in cmd[1:] if c.endswith(".py")), os.path.basename(cmd[-1]))   # (issue 154: not "-u")
-        fail("%s stopped: %s" % (step, failure_reason(lines)))
+        status = "signal %d" % -code if os.name == "posix" and code < 0 else "exit status %d" % code
+        fail("%s stopped (%s): %s" % (step, status, failure_reason(lines)))
 
 
 def build_id(main):

@@ -278,7 +278,18 @@ NV(nvnMemoryPoolInitialize) {
     OLOG("pool %#llx size %#llx flags %#x", (unsigned long long)o->gpu, (unsigned long long)o->size, o->flags);
     RET(1);
 }
+/* (hookshot) A memory-pool call made with no pool: the game passed 0 while the banc changed (thread
+   OptimizeChangeBanc, Kakariko's day/night transition), and flags at +4 of it crashed. 0 then, and who asked, once.
+   P(0) returns NULL for a 0 argument, but dereferencing that NULL is undefined behaviour: the compiler folds the
+   check away and reads A64_MEM + offset instead, so the guard has to come before the dereference. */
+static int no_pool(Ctx *c, const char *what) {
+    if (c->x[0]) return 0;
+    static int told;
+    if (told++ < 4) hos_log("nvn: %s of no memory pool (lr %#llx): 0", what, (unsigned long long)c->x[30]);
+    return 1;
+}
 NV(nvnMemoryPoolFinalize) {
+    if (no_pool(c, "finalize")) return;
     nvn_pool *o = (nvn_pool *)P(0);
     if (o->vmap) {   /* (its GPU range is not reused) */
         int mapped = 0;   /* (pages still mapped: what the GPU drew there goes into their memory first) */
@@ -299,23 +310,35 @@ NV(nvnMemoryPoolFinalize) {
     }
     o->magic = 0;
 }
-NV(nvnMemoryPoolGetFlags) { RET(((const nvn_pool *)P(0))->flags); }
-NV(nvnMemoryPoolGetSize) { RET(((const nvn_pool *)P(0))->size); }
+NV(nvnMemoryPoolGetFlags) {
+    if (no_pool(c, "flags")) { RET(0); return; }
+    RET(((const nvn_pool *)P(0))->flags);
+}
+NV(nvnMemoryPoolGetSize) {
+    if (no_pool(c, "size")) { RET(0); return; }
+    RET(((const nvn_pool *)P(0))->size);
+}
 NV(nvnMemoryPoolMap) {
+    if (no_pool(c, "map")) { RET(0); return; }
     const nvn_pool *o = (const nvn_pool *)P(0);
     if (o->magic != NVN_MAGIC('P', 'O', 'O', 'L') || (o->flags & NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS)) { RET(0); return; }
     if (!o->mem) die("CPU mapping of a virtual pool");
     RETP(o->mem);
 }
-NV(nvnMemoryPoolGetBufferAddress) { RET(((const nvn_pool *)P(0))->gpu); }
+NV(nvnMemoryPoolGetBufferAddress) {
+    if (no_pool(c, "buffer address")) { RET(0); return; }
+    RET(((const nvn_pool *)P(0))->gpu);
+}
 NV(nvnMemoryPoolFlushMappedRange) {}   /* CPU writes are seen through write watch */
 NV(nvnMemoryPoolInvalidateMappedRange) {   /* the CPU is about to read what the GPU wrote */
+    if (no_pool(c, "invalidate mapped range")) return;
     const nvn_pool *o = (const nvn_pool *)P(0);
     if ((int64_t)U64(1) >= 0) rx_nvn_invalidate(o->gpu + U64(1), U64(2));
 }
 NV(nvnMemoryPoolSetDebugLabel) {}
 /* NVNmappingRequest (0x28 bytes): physical pool (guest pointer), physical offset, virtual offset, size, storage class */
 NV(nvnMemoryPoolMapVirtual) {
+    if (no_pool(c, "map virtual")) return;
     nvn_pool *v = (nvn_pool *)P(0);
     const int n = I(1);
     const uint8_t *r = (const uint8_t *)P(2);

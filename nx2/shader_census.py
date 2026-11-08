@@ -2,8 +2,10 @@
 
     python -I nx2/shader_census.py <romfs> [--out <file>]
 
-Walks romfs/Shader/*.bfsha.zs (and the shader packages inside other archives), and each BNSH inside them. A BNSH's variations
-are programs: which stages go together, so what comes out are real pairs, not a heap of stages. --out writes them for the back
+Walks romfs/Shader/*.bfsha.zs (and the shader packages inside other archives) and romfs/Effect/*.vsetb.byml.zs, and each BNSH
+inside them. A BNSH's variations are programs: which stages go together, so what comes out are real pairs, not a heap of
+stages. The agl shader archives in ApplicationPackage (AglShader.sharcb, FoliageShader.sharcb: BAHS, no BNSH) give their
+compute programs, each a program of its own. --out writes them for the back
 end to translate (gpu/vk/vk_shader.cpp); nothing here goes into the repository: the file is made from the player's own game.
 
 After tools/shader_census.py of TotK Recomp (github.com/valentderah/totk-pc-recomp, MIT), itself after MacNativeGames'
@@ -84,13 +86,39 @@ def bnsh_programs(data, stats):
             yield stages
 
 
+def sharc_computes(data, stats):
+    """The compute programs of an agl shader archive (BAHS, .sharcb: AglShader and FoliageShader in ApplicationPackage), each
+    [(5, control, code)]. No BNSH there: each control section (NVN's magic) has its code's offset 0x68 bytes before it, from
+    the code region at header +0x1c. The game's own compute work is in these (the foliage's culling and the like: 2-18 s each
+    for AMD's compiler, built in play before)"""
+    size = len(data)
+    code_base = struct.unpack_from("<I", data, 0x1c)[0]
+    for m in re.finditer(re.escape(CONTROL_MAGIC), data):
+        c = m.start()
+        if c < 0x68 or c + 0xd8 > size:
+            continue
+        stage = struct.unpack_from("<H", data, c + 0x56)[0]
+        length = struct.unpack_from("<I", data, c + 0x38)[0]
+        c1o, end = struct.unpack_from("<II", data, c + 0x40)
+        if stage != 5 or not length or end > (16 << 20) or c1o > end or length > end:
+            continue
+        code = code_base + struct.unpack_from("<I", data, c - 0x68)[0]
+        if code + end > size:
+            stats["sharc, code out of range"] += 1
+            continue
+        stats["sharc, stage 5"] += 1
+        yield [(5, data[c:c + 0xd8], data[code:code + end])]
+
+
 def archives(romfs):
-    """The files that hold shaders: Shader/* (programs, and ApplicationPackage's compute), Layout2Shader/*"""
-    for folder in ("Shader", "Layout2Shader"):
+    """The files that hold shaders: Shader/* (programs, and ApplicationPackage's compute), Layout2Shader/*, and Effect/*.vsetb
+    (the particle effects: each its own BNSH, with the game's compute programs, which nothing else has. Left out, every one
+    was translated and built the first time it was met, 2-2.6 s each on an RX 7700S, the picture frozen meanwhile)"""
+    for folder in ("Shader", "Layout2Shader", "Effect"):
         top = os.path.join(romfs, folder)
         if os.path.isdir(top):
             for name in sorted(os.listdir(top)):
-                if ".bfsha" in name or ".sarc" in name:
+                if ".bfsha" in name or ".sarc" in name or ".vsetb" in name:
                     yield os.path.join(top, name)
 
 
@@ -124,10 +152,12 @@ def main():
         made = 0
         for data in blobs(unpack(open(path, "rb").read(), dicts, zs), dicts, zs):
             view = memoryview(data)
-            for m in re.finditer(b"BNSH", data):
-                if data[m.start() + 96:m.start() + 100] != b"grsc":
-                    continue
-                for stages in bnsh_programs(bytes(view[m.start():m.start() + struct.unpack_from("<I", data, m.start() + 28)[0]]), stats):
+            found = (bnsh_programs(bytes(view[m.start():m.start() + struct.unpack_from("<I", data, m.start() + 28)[0]]), stats)
+                     for m in re.finditer(b"BNSH", data) if data[m.start() + 96:m.start() + 100] == b"grsc")
+            if data[:4] == b"BAHS":
+                found = [sharc_computes(data, stats)]
+            for each in found:
+                for stages in each:
                     ids = []
                     for stage, control, code in stages:
                         key = int.from_bytes(hashlib.sha1(control + code).digest()[:8], "little")

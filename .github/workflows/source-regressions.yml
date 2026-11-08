@@ -50,6 +50,8 @@ on:
       - tests/test_ub_gap.py
       - tests/test_bind_memo.py
       - tests/test_shader_census_cmd.py
+      - tests/test_shader_census.py
+      - nx2/shader_census.py
       - gpu/vk/vk_shader.cpp
       - tests/test_same_draw.py
       - tests/test_pass_hazard.py
@@ -135,6 +137,8 @@ on:
       - tests/test_ub_gap.py
       - tests/test_bind_memo.py
       - tests/test_shader_census_cmd.py
+      - tests/test_shader_census.py
+      - nx2/shader_census.py
       - gpu/vk/vk_shader.cpp
       - tests/test_same_draw.py
       - tests/test_pass_hazard.py
@@ -291,6 +295,8 @@ jobs:
         run: python -I -B tests/test_bind_memo.py
       - name: Check the shader list's text encoding
         run: python -I -B tests/test_shader_census_cmd.py
+      - name: Check the shader list has the game's compute programs
+        run: python -I -B tests/test_shader_census.py
       - name: Check the build's version stamp
         run: python -I -B nx2/test_version.py
       - name: Check the release changelog entry

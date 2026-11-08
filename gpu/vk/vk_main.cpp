@@ -8,6 +8,7 @@
 #include <cstring>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "vk_api.h"
@@ -536,6 +537,20 @@ const MkwVkRenderer* mkwvk_init(const MkwVkHost* h) {
          dev.props.deviceName, VK_VERSION_MAJOR(dev.props.apiVersion), VK_VERSION_MINOR(dev.props.apiVersion),
          dev.props.driverVersion, dev.mesh_shader ? "yes" : "no", dev.external_memory_host ? "yes" : "no",
          dev.graphics_pipeline_library ? "yes" : "no");
+    if (!dev.mesh_shader && !getenv("RX_VK_NO_MESH_WARNING")) {
+        // (the game draws its foliage, grass and many effects with mesh shaders: without them those draws are left out and the
+        // picture is broken (an RX 580's "static"-like scenes, 2026-11-08). Said once, on its own thread, and the game goes on)
+        logf("vk: this GPU has no mesh shaders: the game's foliage, grass and many effects cannot be drawn");
+#ifdef _WIN32
+        std::thread([name = std::string(dev.props.deviceName)] {
+            const std::string text = "Your graphics card (" + name + ") or its driver has no mesh shader support, which Ocarina of Time "
+                "uses for foliage, grass and many effects, so parts of the picture will be missing or broken.\n\nHookshot needs a GPU "
+                "with mesh shaders: NVIDIA GeForce RTX 20 series or newer, AMD Radeon RX 6000 series or newer, or Intel Arc. If your "
+                "card is one of those, update its driver.";
+            MessageBoxA(nullptr, text.c_str(), "Hookshot: graphics card", MB_OK | MB_ICONWARNING | MB_TOPMOST);
+        }).detach();
+#endif
+    }
     table.version = MKWVK_API_VERSION;
     table.start = start;
     table.resize = resize;

@@ -1580,11 +1580,32 @@ uint64_t oldest_unfinished() {
         if (q.blocked()) m = std::min(m, q.oldest());
     return m;
 }
+// ---- (from PR 430, YunaraDebugs) Releases while queues are stopped: kept until the stopped work has gone on, instead of making it
+// go at once (drain 1). Made to go early, a queue's work ran before the work it waits for, and about every 13th frame in Kokiri a
+// pass read what was not there yet: the ground fog thinner for that frame, the light dimmed. The stopped work runs as before, at
+// its wait, a present or hold_ms; the release follows it. RX_VK_RELEASE_DRAIN=1: as before ----
+void do_texture_released(const nvn_tex* t);
+void do_program_released(const nvn_prog* p);
+std::vector<nvn_tex> held_tex_releases;    // (sync_order_mu)
+std::vector<nvn_prog> held_prog_releases;  // (sync_order_mu)
+std::atomic<int64_t> st_held_releases{0};
+bool hold_releases() {
+    static const bool v = !getenv("RX_VK_RELEASE_DRAIN") || atoi(getenv("RX_VK_RELEASE_DRAIN")) == 0;
+    return v;
+}
 void update_blocked() {
     int n = 0;
     for (const auto& [queue, q] : qruns) n += q.blocked();
     if (n && !blocked_n.load()) blocked_since = std::chrono::steady_clock::now();
     blocked_n = n;
+    if (!n && (!held_tex_releases.empty() || !held_prog_releases.empty())) {   // (the stopped work has gone on: its releases now)
+        std::vector<nvn_tex> ts;
+        std::vector<nvn_prog> ps;
+        ts.swap(held_tex_releases);
+        ps.swap(held_prog_releases);
+        for (const nvn_tex& t : ts) do_texture_released(&t);
+        for (const nvn_prog& p : ps) do_program_released(&p);
+    }
 }
 void log_order_stats() {
     logf("vk: queues ordered by their events: %lld submissions stopped at a wait, %lld went on once it was reached, %lld "
@@ -3180,6 +3201,14 @@ void texture_released_of(const nvn_tex* t) {
     if (!t) return;
     tex_pages_add(t, -1);
     if (!async_on()) {
+        if (hold_releases() && sync_waits_on()) {   // (PR 430: after the stopped work that may use it, when it goes on)
+            std::lock_guard lk(sync_order_mu);
+            if (blocked_n.load()) {
+                held_tex_releases.push_back(*t);
+                if (++st_held_releases % 2000 == 1) logf("vk: releases kept for stopped work: %lld", (long long)st_held_releases.load());
+                return;
+            }
+        }
         sync_drain(1);   // (after the stopped work that may use it)
         return do_texture_released(t);
     }
@@ -3190,6 +3219,14 @@ void texture_released_of(const nvn_tex* t) {
 void program_released_locked(const nvn_prog* p) {
     if (!p) return;
     if (!async_on()) {
+        if (hold_releases() && sync_waits_on()) {   // (PR 430: as texture releases)
+            std::lock_guard lk(sync_order_mu);
+            if (blocked_n.load()) {
+                held_prog_releases.push_back(*p);
+                st_held_releases++;
+                return;
+            }
+        }
         sync_drain(1);
         return do_program_released(p);
     }

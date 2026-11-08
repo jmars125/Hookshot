@@ -1,12 +1,14 @@
-"""Compile the native NVN memory-pool getters and call them with no pool.
+"""Compile every guarded NVN memory-pool accessor and call it with no pool.
 
 The crash this guards: while Kakariko changed from day to night, the OptimizeChangeBanc thread called
 nvnMemoryPoolGetFlags(NULL); the HLE read flags at A64_MEM + 4 (guest 0x4) and took an access violation.
 P(0) returns NULL for a 0 argument, but dereferencing it is undefined behaviour, so the compiler may fold the
 check away (and did: the shipped code read 0x100000000004).  The fix guards before the dereference.
 
+Every accessor that checks no_pool is covered here: flags, size, map, buffer address and invalidate mapped range.
 The fixture is built from the actual function bodies in host/nvn_native.c, at -O2.  With the pre-fix source the
-null call crashes the fixture; with the fix it returns 0 and a real pool still answers with its flags and size.
+null calls crash the fixture; with the fix they answer 0 (or return without touching anything) and a real pool
+still answers with its flags, size, CPU mapping and GPU address.
 
 python tests/test_nvn_null_pool.py [--cc clang] [--source host/nvn_native.c]
 """
@@ -44,6 +46,9 @@ def main():
         guard = ""   # the pre-fix source has no guard
     flags = block(source, "NV(nvnMemoryPoolGetFlags)")
     size = block(source, "NV(nvnMemoryPoolGetSize)")
+    map_ = block(source, "NV(nvnMemoryPoolMap)")
+    address = block(source, "NV(nvnMemoryPoolGetBufferAddress)")
+    invalidate = block(source, "NV(nvnMemoryPoolInvalidateMappedRange)")
 
     fixture = r'''#include <stdint.h>
 #include <stdio.h>
@@ -60,14 +65,21 @@ typedef struct {
 #define P(i) ((void *)(c->x[i] ? GP(c->x[i]) : NULL))
 #define RET(v) (c->x[0] = (uint64_t)(v))
 #define NV(name) __attribute__((noinline)) static void n_##name(Ctx *c, void *u_)
+#define NVN_MAGIC(a, b, c, d) ((uint32_t)(a) | (uint32_t)(b) << 8 | (uint32_t)(c) << 16 | (uint32_t)(d) << 24)
+#define NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS 0x1
 static int logs;
 static void hos_log(const char *fmt, ...) { (void)fmt; logs++; }
-''' + guard + "\n" + flags + "\n" + size + r'''
+static void die(const char *fmt, ...) { (void)fmt; }
+static uint64_t h2g(void *p) { return (uint64_t)(uintptr_t)p; }
+#define RETP(p) RET(h2g(p))
+#define U64(i) (c->x[i])
+static void rx_nvn_invalidate(uint64_t a, uint64_t b) { (void)a; (void)b; }
+''' + guard + "\n" + flags + "\n" + size + "\n" + map_ + "\n" + address + "\n" + invalidate + r'''
 int main(void) {
     Ctx c;
     memset(&c, 0, sizeof c);
 
-    /* Before the guard this is the crash: P(0) is NULL and the getter reads NULL + 4. */
+    /* Before the guard these crash: P(0) is NULL and the accessor reads through it. */
     n_nvnMemoryPoolGetFlags(&c, NULL);
     if (c.x[0] != 0) {
         fprintf(stderr, "FAIL: flags of no memory pool = %#llx\n", (unsigned long long)c.x[0]);
@@ -78,12 +90,26 @@ int main(void) {
         fprintf(stderr, "FAIL: size of no memory pool = %#llx\n", (unsigned long long)c.x[0]);
         return 1;
     }
+    n_nvnMemoryPoolMap(&c, NULL);
+    if (c.x[0] != 0) {
+        fprintf(stderr, "FAIL: map of no memory pool = %#llx\n", (unsigned long long)c.x[0]);
+        return 1;
+    }
+    n_nvnMemoryPoolGetBufferAddress(&c, NULL);
+    if (c.x[0] != 0) {
+        fprintf(stderr, "FAIL: buffer address of no memory pool = %#llx\n", (unsigned long long)c.x[0]);
+        return 1;
+    }
+    n_nvnMemoryPoolInvalidateMappedRange(&c, NULL);
 
     /* A real pool still answers as before. */
     nvn_pool pool;
     memset(&pool, 0, sizeof pool);
+    pool.magic = NVN_MAGIC('P', 'O', 'O', 'L');
     pool.flags = 0x40;
-    pool.size = 0x1234;
+    pool.mem = (uint8_t *)(uintptr_t)0x1234;
+    pool.size = 0x2000;
+    pool.gpu = 0x5678;
     c.x[0] = (uint64_t)(uintptr_t)&pool;
     n_nvnMemoryPoolGetFlags(&c, NULL);
     if (c.x[0] != 0x40) {
@@ -92,11 +118,25 @@ int main(void) {
     }
     c.x[0] = (uint64_t)(uintptr_t)&pool;
     n_nvnMemoryPoolGetSize(&c, NULL);
-    if (c.x[0] != 0x1234) {
+    if (c.x[0] != 0x2000) {
         fprintf(stderr, "FAIL: size of a real pool = %#llx\n", (unsigned long long)c.x[0]);
         return 1;
     }
-    puts("PASS: a null memory pool answers 0; a real pool keeps its flags and size");
+    c.x[0] = (uint64_t)(uintptr_t)&pool;
+    n_nvnMemoryPoolMap(&c, NULL);
+    if (c.x[0] != 0x1234) {
+        fprintf(stderr, "FAIL: map of a real pool = %#llx\n", (unsigned long long)c.x[0]);
+        return 1;
+    }
+    c.x[0] = (uint64_t)(uintptr_t)&pool;
+    n_nvnMemoryPoolGetBufferAddress(&c, NULL);
+    if (c.x[0] != 0x5678) {
+        fprintf(stderr, "FAIL: buffer address of a real pool = %#llx\n", (unsigned long long)c.x[0]);
+        return 1;
+    }
+    c.x[0] = (uint64_t)(uintptr_t)&pool;
+    n_nvnMemoryPoolInvalidateMappedRange(&c, NULL);
+    puts("PASS: a null memory pool answers 0; a real pool keeps its flags, size, mapping and address");
     return 0;
 }
 '''
@@ -114,7 +154,7 @@ int main(void) {
         if result.returncode != 0:
             print(result.stdout, end="")
             print(result.stderr, end="")
-            raise SystemExit("test_nvn_null_pool: the null-pool getter crashed (exit %d); the source dereferences "
+            raise SystemExit("test_nvn_null_pool: a null-pool accessor crashed (exit %d); the source dereferences "
                              "the null pool" % result.returncode)
         print(result.stdout, end="")
 

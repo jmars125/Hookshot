@@ -310,6 +310,15 @@ def bundled_mingw():
         here = os.path.join(ROOT, "llvm-mingw")
         if os.path.isfile(os.path.join(here, "bin", "clang.exe")):
             os.environ["HOOKSHOT_MINGW"] = here
+        elif os.path.isdir(here):
+            # (the folder is there and its compiler is not: an antivirus took it (false positives on unsigned tools), or the
+            # zip was not unpacked whole. It went on to the Visual Studio route and said "The Windows SDK was not found")
+            missing = [n for n in ("clang.exe", "clang++.exe", "ld.lld.exe")
+                       if not os.path.isfile(os.path.join(here, "bin", n))]
+            fail("Files of the builder's own compiler are missing (%s in %s). Your antivirus most likely removed them "
+                 "(a false alarm on unsigned programs): restore them from its quarantine or allow the Hookshot Builder folder, "
+                 "then unzip HookshotBuilder.zip again and build. Visual Studio is not needed."
+                 % (", ".join(missing) or "bin", os.path.join(here, "bin")))
     return os.environ.get("HOOKSHOT_MINGW", "")
 
 

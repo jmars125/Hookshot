@@ -97,7 +97,14 @@ From the command line: `./Hookshot-<version>-x86_64.AppImage --cli --nup ~/your-
 You need a 64-bit x86 PC with glibc 2.35 or newer (Ubuntu 22.04, Debian 12, Fedora, Arch, SteamOS ...), a Vulkan 1.3
 driver with mesh shaders (Mesa or NVIDIA), and the same memory and disk space as on Windows. The build's own files go
 to `~/.cache/hookshot-builder`. Saves go in `$XDG_DATA_HOME/hookshot` (`~/.local/share/hookshot`). A `user` folder
-beside the game from an earlier build is moved there once. `HOOKSHOT_JOBS` sets how many files compile at once.
+beside the game from an earlier build is moved there once.
+
+To choose how many files compile at once, launch the builder from a terminal with, for example,
+`HOOKSHOT_JOBS=2 ./Hookshot-<version>-x86_64.AppImage` (replace the filename with the one you downloaded).
+Or run `export HOOKSHOT_JOBS=2` and launch the AppImage from that same terminal. Use a positive whole number;
+`0`, an empty value or leaving it unset keeps automatic selection. The Linux builder's automatic selection still
+uses `RX_JOBS` when set, otherwise its existing memory limit. The `--cli` route also accepts `--jobs 2`.
+These are build settings: `hookshot_env.txt` is read by the running game, not by the builder.
 Switches to test (`RX_VK_NOOPT=1` and the others) go in `hookshot_env.txt` beside the game, one `NAME=VALUE` a line,
 as on Windows.
 

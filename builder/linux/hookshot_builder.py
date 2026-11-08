@@ -207,10 +207,15 @@ class Builder(tk.Tk):
             src = ["--romfs", self.romfs.get(), "--exefs", self.exefs.get()]
         if not out:
             return messagebox.showerror("Hookshot", "Choose where to save the game.")
+        try:
+            jobs = make_game.requested_jobs(os.environ.get("HOOKSHOT_JOBS"))
+        except ValueError as error:
+            return messagebox.showerror("Hookshot", str(error))
         code = next((c for c, n in make_game.LANGUAGES if n == self.language.get()), "en-US")
         self.cfg.update(kind=self.kind.get(), nup=self.nup.get(), romfs=self.romfs.get(), exefs=self.exefs.get(), out=out, language=code)
         save_config(self.cfg)
-        jobs = toolchain.default_jobs(3.5)   # (what fits in memory: a big chunk takes up to ~3.5 GB to compile)
+        if jobs is None:
+            jobs = toolchain.default_jobs(3.5)   # (what fits in memory: a big chunk takes up to ~3.5 GB to compile)
         cmd = [sys.executable, "-I", os.path.join(ROOT, "nx2", "make_game.py")] + src + ["--out", out, "--language", code, "--jobs", str(jobs)]
         self.show_progress()
         self.started = time.time()

@@ -1778,7 +1778,7 @@ impl Em<'_, '_> {
             return Err(Unsupported);
         }
         let base = self.xsp(rn, true);
-        let host = self.b.ins().iadd_imm_s(base, ctx::MEM_BASE);
+        let host = self.host(base);
         let bytes;
         if !single {
             let (opcode, size) = (bits(w, 15, 12), bits(w, 11, 10));
@@ -1916,6 +1916,9 @@ impl Em<'_, '_> {
                     }
                 }
             }
+        }
+        if !l {
+            self.mark_mem(rn, base, bytes);
         }
         if post {
             let nb = if rm == 31 {

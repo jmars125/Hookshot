@@ -1,11 +1,13 @@
 //! Runtime helpers that lifted code calls, written in Rust. They take the guest context first, like the C runtime's
-//! `recomp_fpe_*` bodies, and read and update FPCR / FPSR there.
+//! `recomp_fpe_*` bodies, and read and update FPCR / FPSR there. The file is also the game runtime's copy of them
+//! (rs/hsrt, a no_std library: nothing here needs std)
 
 use super::ctx::Ctx;
 
 /// SCVTF / UCVTF of an integer or fixed-point value, in the guest's FPCR rounding mode (a64_suyu.h recomp_fixed_to_fp).
 /// `packed`: bits 7:0 the float width (32 or 64), 15:8 the integer width, bit 16 signed, 31:24 the fraction bits.
 /// Every S/D input converts to zero or a finite normal, so only IXC can be raised.
+#[unsafe(no_mangle)]
 pub extern "C" fn hsr_fixed_to_fp(c: *mut Ctx, bits: u64, packed: u64) -> u64 {
     // SAFETY: lifted code passes its own live context
     let c = unsafe { &mut *c };
@@ -63,6 +65,7 @@ pub extern "C" fn hsr_fixed_to_fp(c: *mut Ctx, bits: u64, packed: u64) -> u64 {
 
 /// FCVT Sd, Dn by the Arm ARM (FPConvert / FPRoundBase): FPCR.RMode, FZ (input flushed with IDC; a result below the
 /// normal range, judged before rounding, flushed with UFC), DN, tininess before rounding, IOC for a signalling NaN
+#[unsafe(no_mangle)]
 pub extern "C" fn hsr_fcvt_ds(c: *mut Ctx, a: u64) -> u64 {
     // SAFETY: lifted code passes its own live context
     let c = unsafe { &mut *c };
@@ -237,6 +240,7 @@ fn process_nans(c: &mut Ctx, f: Fmt, a: u64, b: u64) -> Option<u64> {
 }
 
 /// FMAX / FMIN / FMAXNM / FMINNM (FPMax, FPMin, FPMaxNum, FPMinNum). `packed`: bit 0 double, bit 1 max, bit 2 NM
+#[unsafe(no_mangle)]
 pub extern "C" fn hsr_fminmax(c: *mut Ctx, a: u64, b: u64, packed: u64) -> u64 {
     // SAFETY: lifted code passes its own live context
     let c = unsafe { &mut *c };
@@ -273,6 +277,7 @@ pub extern "C" fn hsr_fminmax(c: *mut Ctx, a: u64, b: u64, packed: u64) -> u64 {
 
 /// FCMEQ / FCMGE / FCMGT / FACGE / FACGT: all ones when true. `packed`: bits 1:0 = 0 EQ, 1 GE, 2 GT; bit 3 compares
 /// absolute values; bit 8 double. EQ signals (IOC) only for a signalling NaN, GE and GT for any NaN
+#[unsafe(no_mangle)]
 pub extern "C" fn hsr_fcmp(c: *mut Ctx, a: u64, b: u64, packed: u64) -> u64 {
     // SAFETY: lifted code passes its own live context
     let c = unsafe { &mut *c };
@@ -306,6 +311,7 @@ pub extern "C" fn hsr_fcmp(c: *mut Ctx, a: u64, b: u64, packed: u64) -> u64 {
 
 /// FRINT{N,P,M,Z,A,I,X} (FPRoundInt). `packed`: bit 0 double; bits 3:1 the mode (0 to nearest even, 1 up, 2 down,
 /// 3 toward zero, 4 to nearest away, 5 FPCR.RMode); bit 4 raises IXC when the result differs (FRINTX)
+#[unsafe(no_mangle)]
 pub extern "C" fn hsr_frint(c: *mut Ctx, a: u64, packed: u64) -> u64 {
     // SAFETY: lifted code passes its own live context
     let c = unsafe { &mut *c };
@@ -323,11 +329,11 @@ pub extern "C" fn hsr_frint(c: *mut Ctx, a: u64, packed: u64) -> u64 {
     }
     let v = f.value(a);
     let r = match mode {
-        0 => v.round_ties_even(),
-        1 => v.ceil(),
-        2 => v.floor(),
-        3 => v.trunc(),
-        _ => v.round(),
+        0 => round_int(v, Round::Even),
+        1 => round_int(v, Round::Up),
+        2 => round_int(v, Round::Down),
+        3 => trunc(v),
+        _ => round_int(v, Round::Away),
     };
     if packed & 16 != 0 && r != v {
         c.fpsr |= 16;
@@ -341,12 +347,90 @@ pub extern "C" fn hsr_frint(c: *mut Ctx, a: u64, packed: u64) -> u64 {
 }
 
 /// Every helper by name, for a JIT to resolve them
-pub fn symbols() -> Vec<(&'static str, *const u8)> {
-    vec![
+pub fn symbols() -> [(&'static str, *const u8); 5] {
+    [
         ("hsr_fixed_to_fp", hsr_fixed_to_fp as *const u8),
         ("hsr_fcvt_ds", hsr_fcvt_ds as *const u8),
         ("hsr_fminmax", hsr_fminmax as *const u8),
         ("hsr_fcmp", hsr_fcmp as *const u8),
         ("hsr_frint", hsr_frint as *const u8),
     ]
+}
+
+/// f64::trunc, in bit operations (core has no rounding functions): the fraction bits below the exponent cleared
+fn trunc(v: f64) -> f64 {
+    let b = v.to_bits();
+    let e = ((b >> 52) & 0x7ff) as i32 - 1023;
+    if e >= 52 {
+        v // an integer already, or infinity / NaN
+    } else if e < 0 {
+        f64::from_bits(b & 1 << 63) // |v| < 1: a zero of v's sign
+    } else {
+        f64::from_bits(b & !((1u64 << (52 - e)) - 1))
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Round {
+    Even,
+    Up,
+    Down,
+    Away,
+}
+
+/// v rounded to an integer: f64::round_ties_even / ceil / floor / round. From trunc(v): v - t is exact and |t| < 2^52
+/// whenever it is not zero, so t ± 1 is exact too, and a result of zero keeps v's sign as the library functions do.
+fn round_int(v: f64, mode: Round) -> f64 {
+    let t = trunc(v);
+    let d = v - t;
+    if d == 0.0 {
+        return t;
+    }
+    let away = match mode {
+        Round::Up => d > 0.0,
+        Round::Down => d < 0.0,
+        Round::Away => d.abs() >= 0.5,
+        Round::Even => d.abs() > 0.5 || (d.abs() == 0.5 && trunc(t * 0.5) * 2.0 != t),
+    };
+    if !away {
+        return t;
+    }
+    let step = if d > 0.0 { 1.0 } else { -1.0 };
+    let r = t + step;
+    if r == 0.0 {
+        f64::from_bits(v.to_bits() & 1 << 63) // -0.4 up is -0, as ceil gives
+    } else {
+        r
+    }
+}
+
+#[cfg(test)]
+mod round_tests {
+    use super::*;
+
+    #[test]
+    fn matches_std() {
+        let mut vals = vec![0.0, -0.0, 0.5, -0.5, 1.5, -1.5, 2.5, -2.5, 0.49999999999999994, -0.49999999999999994,
+            4503599627370495.5, -4503599627370495.5, 4503599627370496.0, 1e300, -1e-300, f64::MIN_POSITIVE, 3.7, -3.7,
+            f64::INFINITY, f64::NEG_INFINITY];
+        let mut x = 0x9E37_79B9_7F4A_7C15u64;
+        for _ in 0..200_000 {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            let v = f64::from_bits(x);
+            if !v.is_nan() {
+                vals.push(v);
+                vals.push((x % 4000) as f64 / 8.0 - 250.0);
+            }
+        }
+        for v in vals {
+            let same = |a: f64, b: f64| a.to_bits() == b.to_bits();
+            assert!(same(trunc(v), v.trunc()), "trunc {v}");
+            assert!(same(round_int(v, Round::Up), v.ceil()), "ceil {v}");
+            assert!(same(round_int(v, Round::Down), v.floor()), "floor {v}");
+            assert!(same(round_int(v, Round::Away), v.round()), "round {v}");
+            assert!(same(round_int(v, Round::Even), v.round_ties_even()), "even {v}");
+        }
+    }
 }

@@ -245,6 +245,12 @@ pub struct Builder<'p, 'q> {
     scratch: FunctionBuilderContext,
     pub fbc: FunctionBuilderContext,
     frontend: cranelift_codegen::isa::TargetFrontendConfig,
+    /// this module's hsr_mem_base, once defined
+    mem: Option<DataId>,
+    /// Windows unwind entries of the functions defined so far, when collected (Some: an object file's build)
+    pub unwind: Option<Vec<super::winunwind::Entry>>,
+    /// the runtime's a64_dirty as this module imports it, once declared (a64::WRITE_TRACK)
+    marks: Option<DataId>,
 }
 
 fn body_sig() -> Signature {
@@ -286,6 +292,9 @@ impl<'p, 'q> Builder<'p, 'q> {
             scratch: FunctionBuilderContext::new(),
             fbc: FunctionBuilderContext::new(),
             frontend,
+            mem: None,
+            marks: None,
+            unwind: None,
         }
     }
 
@@ -362,6 +371,12 @@ impl<'p, 'q> Builder<'p, 'q> {
         Ok((f, t))
     }
 
+    fn keep_unwind<M: Module>(&mut self, m: &M, cx: &cranelift_codegen::Context, id: FuncId) {
+        if let Some(v) = self.unwind.as_mut() {
+            v.extend(super::winunwind::entry(m, cx, id));
+        }
+    }
+
     /// Defines f_<e> and t_<e> in m (declare first). Unsupported leaves m without them.
     pub fn define<M: Module>(
         &mut self,
@@ -376,6 +391,7 @@ impl<'p, 'q> Builder<'p, 'q> {
         let sites = self.emit(m, &mut cx.func, e, body, dirty);
         m.define_function(tid, &mut cx)
             .map_err(|err| anyhow::anyhow!("t_{e:08x}: {err:?}\n{}", cx.func.display()))?;
+        self.keep_unwind(m, &cx, tid);
         if let Some((id, n)) = sites {
             let mut d = DataDescription::new();
             d.define_zeroinit(16 * n);
@@ -398,8 +414,33 @@ impl<'p, 'q> Builder<'p, 'q> {
         }
         m.define_function(fid, &mut cx)
             .map_err(|err| anyhow::anyhow!("f_{e:08x}: {err:?}"))?;
+        self.keep_unwind(m, &cx, fid);
         m.clear_context(&mut cx);
         Ok(())
+    }
+
+    /// The module's 8-byte copy of ctx::MEM_BASE
+    fn mem_data<M: Module>(&mut self, m: &mut M) -> DataId {
+        if let Some(id) = self.mem {
+            return id;
+        }
+        let id = m.declare_data("hsr_mem_base", Linkage::Local, false, false).expect("hsr_mem_base");
+        let mut d = DataDescription::new();
+        d.define((ctx::MEM_BASE as u64).to_le_bytes().to_vec().into_boxed_slice());
+        m.define_data(id, &d).expect("hsr_mem_base");
+        self.mem = Some(id);
+        id
+    }
+
+    /// The runtime's page marks (rt/a64_rt.c a64_dirty), when guest stores mark them
+    fn marks_data<M: Module>(&mut self, m: &mut M) -> Option<DataId> {
+        if !crate::lift::a64::WRITE_TRACK.load(std::sync::atomic::Ordering::Relaxed) {
+            return None;
+        }
+        if self.marks.is_none() {
+            self.marks = Some(m.declare_data("a64_dirty", Linkage::Import, true, false).expect("a64_dirty"));
+        }
+        self.marks
     }
 
     /// Builds t_<e>'s IR into func; returns its call-site cache data (id, slot count) when it has indirect sites
@@ -411,6 +452,8 @@ impl<'p, 'q> Builder<'p, 'q> {
         body: &Body,
         dirty: u64,
     ) -> Option<(DataId, usize)> {
+        let mem_data = self.mem_data(m);
+        let marks_data = self.marks_data(m);
         let frontend = m.isa().frontend_config();
         let mut b = FunctionBuilder::new(func, &mut self.fbc);
         let mut f = Fn {
@@ -426,6 +469,8 @@ impl<'p, 'q> Builder<'p, 'q> {
             blocks: HashMap::new(),
             sites: None,
             nsites: 0,
+            mem_data,
+            marks_data,
         };
         f.run();
         let sites = f.sites.map(|id| (id, f.nsites));
@@ -449,6 +494,8 @@ struct Fn<'a, 'p, 'q, M: Module> {
     blocks: HashMap<u64, Block>,
     sites: Option<DataId>,
     nsites: usize,
+    mem_data: DataId,
+    marks_data: Option<DataId>,
 }
 
 impl<M: Module> Fn<'_, '_, '_, M> {
@@ -654,6 +701,17 @@ impl<M: Module> Fn<'_, '_, '_, M> {
         self.b.switch_to_block(entry);
         self.c = self.b.block_params(entry)[0];
         self.reload();
+        // MEM_BASE once, from this module's copy (a load the register allocator keeps or spills, not a constant it
+        // rematerializes at every access)
+        let gv = self.m.declare_data_in_func(self.mem_data, self.b.func);
+        let a = self.b.ins().symbol_value(types::I64, gv);
+        let mb = self.b.ins().load(types::I64, MemFlagsData::trusted(), a, 0);
+        self.regs.mem.set(Some(mb));
+        if let Some(d) = self.marks_data {
+            let gv = self.m.declare_data_in_func(d, self.b.func);
+            let a = self.b.ins().symbol_value(types::I64, gv);
+            self.regs.marks.set(Some(a));
+        }
         if let Some(&(t, slot)) = self.p.plt.get(&self.e) {
             // a PLT stub reached indirectly: x16 = GOT slot, x17 = target, as the stub leaves them
             let (s, tv) = (self.k64(slot), self.k64(t));

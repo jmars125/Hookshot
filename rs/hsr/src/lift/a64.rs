@@ -39,6 +39,12 @@ pub struct Regs {
     /// Which variables the lifted code has written: bit n for Xn, 31 for SP, 32 for the flags (func.rs stores only
     /// these back to the context)
     pub dirty: std::cell::Cell<u64>,
+    /// ctx::MEM_BASE as a value loaded once at the function's entry (func.rs), so each access adds a register
+    /// instead of rematerializing a 10-byte constant; None: the constant
+    pub mem: std::cell::Cell<Option<Value>>,
+    /// The address of the runtime's a64_dirty (one byte per 4 KB guest page, which the renderer scans for written
+    /// buffers), loaded at the function's entry when WRITE_TRACK is on; None: stores mark nothing
+    pub marks: std::cell::Cell<Option<Value>>,
 }
 
 impl Regs {
@@ -54,6 +60,8 @@ impl Regs {
             c,
             v,
             dirty: Default::default(),
+            mem: Default::default(),
+            marks: Default::default(),
         }
     }
 }
@@ -63,12 +71,21 @@ pub trait Imports {
     fn func(&mut self, name: &str, sig: &Signature, f: &mut Function) -> FuncRef;
 }
 
+/// Every function lifted code calls ends up in the same executable (object builds): direct rel32 calls. Off for the
+/// JIT, whose code may be far from the runtime.
+pub static COLOCATED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Guest stores mark their page in a64_dirty, as the C lifter's A64_MARK does for -DA64_WRITE_TRACK (the game build;
+/// the JIT tests have no such table)
+pub static WRITE_TRACK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 impl<M: cranelift_module::Module> Imports for M {
     fn func(&mut self, name: &str, sig: &Signature, f: &mut Function) -> FuncRef {
         let id = self
             .declare_function(name, cranelift_module::Linkage::Import, sig)
             .expect("helper declaration");
-        self.declare_func_in_func(id, f)
+        let r = self.declare_func_in_func(id, f);
+        f.dfg.ext_funcs[r].colocated = COLOCATED.load(std::sync::atomic::Ordering::Relaxed);
+        r
     }
 }
 
@@ -247,6 +264,13 @@ impl Em<'_, '_> {
             self.b.def_var(self.r.x[r as usize], v);
         }
     }
+    /// The host address of a guest address
+    pub(crate) fn host(&mut self, a: Value) -> Value {
+        match self.r.mem.get() {
+            Some(m) => self.b.ins().iadd(a, m),
+            None => self.b.ins().iadd_imm_s(a, ctx::MEM_BASE),
+        }
+    }
     /// Records a write of register variable `bit` (Regs::dirty)
     pub(crate) fn mark(&self, bit: u32) {
         self.r.dirty.set(self.r.dirty.get() | 1 << bit);
@@ -390,9 +414,6 @@ impl Em<'_, '_> {
     }
 
     // ---- guest memory --------------------------------------------------------------------------------------------
-    fn host(&mut self, addr: Value) -> Value {
-        self.b.ins().iadd_imm_s(addr, ctx::MEM_BASE)
-    }
     fn load(&mut self, ty: Type, addr: Value) -> Value {
         let h = self.host(addr);
         self.b.ins().load(ty, MemFlagsData::new(), h, 0)
@@ -423,6 +444,27 @@ impl Em<'_, '_> {
                 .ireduce([types::I8, types::I16, types::I32][size as usize], v)
         };
         self.store(v, addr);
+    }
+    /// Marks the 4 KB pages of the first and last byte of an `n`-byte guest store at `a` in a64_dirty (A64_MARK in
+    /// the C runtime's a64.h). Stores based on SP (rn 31) mark nothing: the guest stack is never memory the GPU reads.
+    pub(crate) fn mark_mem(&mut self, rn: u32, a: Value, n: u32) {
+        let Some(d) = self.r.marks.get() else { return };
+        if rn == 31 {
+            return;
+        }
+        let one = self.b.ins().iconst(types::I8, 1);
+        let page = |b: &mut FunctionBuilder, a: Value| {
+            let lo = b.ins().ireduce(types::I32, a);
+            let pg = b.ins().ushr_imm_u(lo, 12);
+            let pg = b.ins().uextend(types::I64, pg);
+            let p = b.ins().iadd(d, pg);
+            b.ins().store(MemFlagsData::trusted(), one, p, 0);
+        };
+        page(self.b, a);
+        if n > 1 {
+            let last = self.b.ins().iadd_imm_s(a, (n - 1) as i64);
+            page(self.b, last);
+        }
     }
 
     pub fn emit(&mut self, w: u32) -> R {
@@ -952,7 +994,10 @@ impl Em<'_, '_> {
             return Err(Unsupported);
         };
         match opc {
-            0 => self.store_n(size, rt, addr),
+            0 => {
+                self.store_n(size, rt, addr);
+                self.mark_mem(rn, addr, 1 << size);
+            }
             1 => {
                 let v = self.load_ext(size, None, addr);
                 self.set(rt, v);
@@ -1060,6 +1105,7 @@ impl Em<'_, '_> {
                 };
                 let val = self.x_sized(rt, size);
                 let old = self.b.ins().atomic_cas(MemFlagsData::new(), h, expect, val);
+                self.mark_mem(rn, a, 1 << size);
                 let neq = self.b.ins().icmp(IntCC::NotEqual, old, expect);
                 let st = self.b.ins().uextend(types::I64, neq);
                 self.b.ins().jump(done, &[st.into()]);
@@ -1079,6 +1125,8 @@ impl Em<'_, '_> {
                 } else {
                     let v = self.x_sized(rt, size);
                     self.b.ins().atomic_store(MemFlagsData::new(), v, h);
+                    let a = self.xsp(rn, true);
+                    self.mark_mem(rn, a, 1 << size);
                 }
                 Ok(())
             }
@@ -1088,6 +1136,8 @@ impl Em<'_, '_> {
                 let e = self.x_sized(rs, size);
                 let v = self.x_sized(rt, size);
                 let old = self.b.ins().atomic_cas(MemFlagsData::new(), h, e, v);
+                let a = self.xsp(rn, true);
+                self.mark_mem(rn, a, 1 << size);
                 let old = self.widen(old);
                 self.set(rs, old);
                 Ok(())
@@ -1143,6 +1193,8 @@ impl Em<'_, '_> {
             .b
             .ins()
             .atomic_rmw(Self::ity(size), MemFlagsData::new(), op, h, v);
+        let a = self.xsp(rn, true);
+        self.mark_mem(rn, a, 1 << size);
         let old = self.widen(old);
         self.set(rt, old);
         Ok(())
@@ -1179,6 +1231,7 @@ impl Em<'_, '_> {
         } else {
             self.store_n(scale, rt, addr);
             self.store_n(scale, rt2, addr2);
+            self.mark_mem(rn, addr, 2 << scale);
         }
         if let Some(nb) = wb {
             self.setsp(rn, nb);

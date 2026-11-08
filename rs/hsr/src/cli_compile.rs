@@ -1,4 +1,4 @@
-//! `hsr compile <exefs> [--standalone [--host <dir>]] [--aslr <hex>] [--out <dir>] [--chunks N] [--limit N]`:
+//! `hsr compile <exefs> [--standalone [--host <dir>]] [--aslr <hex>] [--out <dir>] [--chunks N] [--limit N] [--gen <dir>]`:
 //! discovery, then every function lifted by Cranelift into object files, in parallel.
 //!
 //! Pass 1 checks every function (does each instruction translate, which registers it writes); the ones that do form
@@ -6,6 +6,11 @@
 //! (chunk_<i>.o, consecutive functions by address), one Cranelift ObjectModule per chunk, on all cores. The functions
 //! that do not translate are listed in fallback.txt for the C lifter. --limit compiles only the first N functions
 //! (a quick timing sample).
+//!
+//! --gen <dir>: the C lifter's output for the same image (work/sa/gen). The functions the game patches edit in C (they
+//! use the host's hos_* state) stay C, and the C of every fallback function is written beside the objects as
+//! fallback_<i>.c (cfallback.rs), one file per core, for the hybrid link. Each object carries Windows unwind tables
+//! (winunwind.rs) and its guest stores mark a64_dirty, as the C build's do.
 
 use crate::image;
 use crate::lift::func::{Builder, Code, Program};
@@ -39,6 +44,11 @@ pub fn run(args: &[String]) -> Result<()> {
     };
     let (mut out, mut host, mut aslr, mut standalone) = (None, PathBuf::from("host"), 0u64, false);
     let (mut chunks, mut limit, mut check_only) = (256usize, usize::MAX, false);
+    let mut gen: Option<PathBuf> = None;
+    // (bisection of a wrong-but-running build: only functions at [lo, hi) and without a word matching a denied
+    // (mask, value) are lifted to Rust; the rest stay with the C build's objects, linked after with /force:multiple)
+    let mut range = (0u64, u64::MAX);
+    let mut deny: Vec<(u32, u32)> = Vec::new();
     while let Some(a) = it.next() {
         let mut val = || {
             it.next()
@@ -51,6 +61,17 @@ pub fn run(args: &[String]) -> Result<()> {
             "--aslr" => aslr = u64::from_str_radix(val()?.trim_start_matches("0x"), 16)?,
             "--chunks" => chunks = val()?.parse()?,
             "--limit" => limit = val()?.parse()?,
+            "--gen" => gen = Some(PathBuf::from(val()?)),
+            "--range" => {
+                let v = val()?;
+                let (lo, hi) = v.split_once('-').ok_or_else(|| anyhow::anyhow!("--range lo-hi"))?;
+                range = (u64::from_str_radix(lo, 16)?, u64::from_str_radix(hi, 16)?);
+            }
+            "--deny" => {
+                let v = val()?;
+                let (m, w) = v.split_once('=').ok_or_else(|| anyhow::anyhow!("--deny mask=value"))?;
+                deny.push((u32::from_str_radix(m, 16)?, u32::from_str_radix(w, 16)?));
+            }
             "--standalone" => standalone = true,
             "--check" => check_only = true,
             _ => bail!("unknown option {a}"),
@@ -87,6 +108,20 @@ pub fn run(args: &[String]) -> Result<()> {
     funcs.sort_unstable();
     funcs.truncate(limit);
     let frontend = isa().frontend_config();
+    // the C lifter's output: the patched functions stay C, and the fallback's C comes from it
+    let cgen = match &gen {
+        Some(g) => {
+            let t = Instant::now();
+            let cg = crate::cfallback::Gen::scan(g)?;
+            println!("read {} C functions from {} ({:.1}s)", cg.len(), g.display(), t.elapsed().as_secs_f64());
+            Some(cg)
+        }
+        None => None,
+    };
+    let forced: HashSet<u64> = cgen.as_ref().map(|g| g.patched()).unwrap_or_default();
+    if !forced.is_empty() {
+        println!("{} patched functions stay C", forced.len());
+    }
 
     // pass 1: what translates
     let t1 = Instant::now();
@@ -94,7 +129,13 @@ pub fn run(args: &[String]) -> Result<()> {
         .par_iter()
         .map_init(
             || Builder::new(&p, frontend),
-            |b, &e| (e, b.check(e, &d.funcs[&e]).ok()),
+            |b, &e| {
+                let body = &d.funcs[&e];
+                let ok = !forced.contains(&e)
+                    && (range.0..range.1).contains(&e)
+                    && !body.insns.values().any(|&(_, w)| deny.iter().any(|&(m, v)| w & m == v));
+                (e, if ok { b.check(e, &d.funcs[&e]).ok() } else { None })
+            },
         )
         .collect();
     let rust: HashSet<u64> = checked
@@ -146,6 +187,8 @@ pub fn run(args: &[String]) -> Result<()> {
         return Ok(());
     }
     let rust = Arc::new(rust);
+    crate::lift::a64::COLOCATED.store(true, std::sync::atomic::Ordering::Relaxed);
+    crate::lift::a64::WRITE_TRACK.store(true, std::sync::atomic::Ordering::Relaxed);
 
     // pass 2: compile
     let t2 = Instant::now();
@@ -162,6 +205,7 @@ pub fn run(args: &[String]) -> Result<()> {
             let mut m = ObjectModule::new(ob);
             let mut b = Builder::new(&p, frontend);
             b.rust = rust.clone();
+            b.unwind = Some(Vec::new());
             let mut errs = Vec::new();
             for &(e, dirty) in part {
                 if let Err(err) = b.define(&mut m, e, &d.funcs[&e], dirty) {
@@ -171,7 +215,9 @@ pub fn run(args: &[String]) -> Result<()> {
                     ));
                 }
             }
-            let bytes = m.finish().emit()?;
+            let mut prod = m.finish();
+            crate::lift::winunwind::add(&mut prod, b.unwind.as_deref().unwrap_or_default())?;
+            let bytes = prod.emit()?;
             let n = bytes.len();
             if let Some(out) = &out {
                 std::fs::write(out.join(format!("chunk_{i}.o")), bytes)?;
@@ -207,6 +253,15 @@ pub fn run(args: &[String]) -> Result<()> {
         fb.sort_unstable();
         let text: String = fb.iter().map(|e| format!("{e:x}\n")).collect();
         std::fs::write(out.join("fallback.txt"), text)?;
+        if let Some(cg) = &cgen {
+            let want: BTreeSet<u64> = fb.iter().copied().collect();
+            let parts = std::thread::available_parallelism().map_or(8, |n| n.get());
+            let missing = cg.write(&want, out, parts)?;
+            println!("wrote {parts} fallback_<i>.c: {} functions", want.len() - missing.len());
+            if !missing.is_empty() {
+                bail!("the C output has no definition of {} fallback functions (e.g. {:#x})", missing.len(), missing[0]);
+            }
+        }
     }
     Ok(())
 }

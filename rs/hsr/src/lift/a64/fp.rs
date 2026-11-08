@@ -571,7 +571,7 @@ impl Em<'_, '_> {
         }
     }
     pub(super) fn vload(&mut self, rt: u32, scale: u32, addr: Value) {
-        let h = self.b.ins().iadd_imm_s(addr, ctx::MEM_BASE);
+        let h = self.host(addr);
         if scale == 4 {
             let lo = self.b.ins().load(types::I64, MemFlagsData::new(), h, 0);
             let hi = self.b.ins().load(types::I64, MemFlagsData::new(), h, 8);
@@ -588,7 +588,7 @@ impl Em<'_, '_> {
         }
     }
     pub(super) fn vstore(&mut self, rt: u32, scale: u32, addr: Value) {
-        let h = self.b.ins().iadd_imm_s(addr, ctx::MEM_BASE);
+        let h = self.host(addr);
         if scale == 4 {
             let lo = self.vget(rt, types::I64);
             let hi = self.vget_hi(rt);
@@ -643,6 +643,7 @@ impl Em<'_, '_> {
             } else {
                 self.vstore(rt, scale, addr);
                 self.vstore(rt2, scale, a2);
+                self.mark_mem(rn, addr, 2 << scale);
             }
             if mode == 1 || mode == 3 {
                 self.setsp(rn, nb);
@@ -683,6 +684,7 @@ impl Em<'_, '_> {
             self.vload(rt, scale, addr);
         } else {
             self.vstore(rt, scale, addr);
+            self.mark_mem(rn, addr, 1 << scale);
         }
         if let Some(nb) = wb {
             self.setsp(rn, nb);

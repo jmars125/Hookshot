@@ -7,6 +7,7 @@ pub mod discover;
 pub mod fntest;
 pub mod func;
 pub mod rt;
+pub mod winunwind;
 
 use a64::{Em, Regs, Unsupported};
 use cranelift_codegen::ir::{types, AbiParam, InstBuilder, MemFlagsData, Value};
@@ -22,6 +23,11 @@ pub fn isa() -> cranelift_codegen::isa::OwnedTargetIsa {
     f.set("use_colocated_libcalls", "false").unwrap();
     // (Cranelift implements return_call, the guest tail calls of func.rs, only with frame pointers)
     f.set("preserve_frame_pointers", "true").unwrap();
+    // (Windows commits a thread's stack one guard page at a time: a frame of more than a page must touch each page in
+    // order, or its first access skips the guard page, faults in reserved memory, and the exception has no stack to
+    // be dispatched on (the game died with 0xc0000005 and no crash report). Inline probes need no __chkstk symbol)
+    f.set("enable_probestack", "true").unwrap();
+    f.set("probestack_strategy", "inline").unwrap();
     cranelift_native::builder()
         .unwrap()
         .finish(settings::Flags::new(f))

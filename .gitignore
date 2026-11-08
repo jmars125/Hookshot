@@ -37,3 +37,4 @@ build-linux/
 
 # ---- Rust ----
 rs/target/
+rs/hsrt/target/

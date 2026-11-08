@@ -5,6 +5,7 @@
 //!   hsr unpack <exefs dir>                               ZBIC modules -> plain NSOs
 //!   hsr nup <file.nup> --cat <title>:<exefs|romfs>/<path> <out>   one file, as itself
 
+mod cfallback;
 mod cli_compile;
 mod cli_discover;
 mod image;

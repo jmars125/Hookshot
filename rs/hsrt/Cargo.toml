@@ -1,0 +1,21 @@
+[package]
+name = "hsrt"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "The runtime half of hsr's lifted code: the helpers it calls, linked into the game beside the C runtime"
+
+[lib]
+crate-type = ["staticlib"]
+path = "src/lib.rs"
+
+[workspace]
+
+[profile.release]
+opt-level = 3
+panic = "abort"
+codegen-units = 1
+debug = false
+
+[profile.dev]
+panic = "abort"

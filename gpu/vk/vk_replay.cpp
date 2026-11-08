@@ -2535,8 +2535,12 @@ void do_present(const nvn_tex* t, const int crop[4]) {
         }
         if (interpolated) framegen_queue(value);
         else menu_note_frame(true);   // (the FPS counter's, as frame generation's thread counts what it shows)
-        {   // (RX_VK_WAIT_GPU=<frames>: the replay no further ahead of the GPU than that)
+        {   // The replay waits for each frame's GPU work at its present (RX_VK_WAIT_GPU=0, the default): the game's CPU
+            // otherwise runs a frame ahead and writes data a pass of this frame has yet to read, and the scene and the
+            // exposure meter's samples of it came out too bright for one frame (one-frame exposure flashes).
+            // RX_VK_WAIT_GPU=<frames>: that many frames ahead instead; -1: no wait, as before
             static const int ahead = getenv("RX_VK_WAIT_GPU") ? atoi(getenv("RX_VK_WAIT_GPU")) : 0;
+            if (ahead == 0) wait_value(value);
             static uint64_t values[8];
             if (ahead > 0) {
                 const uint64_t old = values[presents % ahead];

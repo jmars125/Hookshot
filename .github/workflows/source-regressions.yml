@@ -28,6 +28,8 @@ on:
       - tests/test_dispatch_clock.py
       - gpu/vk/vk_framegen.cpp
       - tests/test_framegen_gate.py
+      - tests/test_upscale_independent.py
+      - tests/upscale_independent_test.cpp
       - gpu/vk/vk_draw.cpp
       - tests/test_table_track.py
       - tests/test_desc_clock.py
@@ -90,6 +92,8 @@ on:
       - tests/test_dispatch_clock.py
       - gpu/vk/vk_framegen.cpp
       - tests/test_framegen_gate.py
+      - tests/test_upscale_independent.py
+      - tests/upscale_independent_test.cpp
       - gpu/vk/vk_draw.cpp
       - tests/test_table_track.py
       - tests/test_desc_clock.py
@@ -182,6 +186,9 @@ jobs:
       - name: Check frame generation stays off until asked
         if: runner.os == 'Linux'
         run: python -I -B tests/test_framegen_gate.py
+      - name: Check upscaling works without frame generation
+        if: runner.os == 'Linux'
+        run: python -I -B tests/test_upscale_independent.py
       - name: Check the table-entry tracker stops looking
         if: runner.os == 'Linux'
         run: python -I -B tests/test_table_track.py

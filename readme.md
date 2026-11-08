@@ -208,6 +208,7 @@ and changes, the bottom face button changes too, and the right one closes the me
 | FPS counter | Off, On |
 
 With Game speed on Per frame, the game runs slower whenever it is below 60 fps. Real time keeps it at normal speed.
+Upscaling and Sharpness also work when Frame generation is Off.
 
 ### Controls
 

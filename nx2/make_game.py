@@ -266,6 +266,41 @@ def check_linux_compiler():
              "libc6-dev on Debian and Ubuntu, glibc-devel on Fedora)" % (errors[0] if errors else "no message"))
 
 
+def free_memory_gb():
+    """The memory free for the compilers now, in GB (None: not known)"""
+    try:
+        if os.name == "nt":
+            import ctypes
+
+            class MS(ctypes.Structure):
+                _fields_ = [("len", ctypes.c_uint32), ("load", ctypes.c_uint32), ("total", ctypes.c_uint64),
+                            ("avail", ctypes.c_uint64), ("pt", ctypes.c_uint64), ("pa", ctypes.c_uint64),
+                            ("vt", ctypes.c_uint64), ("va", ctypes.c_uint64), ("ve", ctypes.c_uint64)]
+            m = MS()
+            m.len = ctypes.sizeof(MS)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(m)):
+                return m.avail / (1 << 30)
+            return None
+        for line in open("/proc/meminfo"):
+            if line.startswith("MemAvailable:"):
+                return int(line.split()[1]) / (1 << 20)
+    except Exception:
+        return None
+    return None
+
+
+def default_jobs():
+    """(issue 418) One compiler per CPU thread, as many as the free memory holds (a piece of the game takes ~2-3 GB to
+    compile): half the threads left 16-thread PCs at 8 and 4-thread ones at 2. HOOKSHOT_JOBS or --jobs choose"""
+    cpus = os.cpu_count() or 2
+    mem = free_memory_gb()
+    floor = max(1, min(4, cpus // 2))   # (as many as before at the least: Windows pages rather than fails)
+    jobs = cpus if mem is None else max(floor, min(cpus, int(mem // 2)))
+    print("build: %d compilers at once (%d CPU threads, %s GB of memory free; HOOKSHOT_JOBS=<n> to change)"
+          % (jobs, cpus, "?" if mem is None else "%.0f" % mem), flush=True)
+    return jobs
+
+
 def bundled_mingw():
     """(as TotK Recomp's installer) llvm-mingw in the tools folder: its clang, headers and libraries build the game, and nothing of
     Visual Studio or the Windows SDK is needed. HOOKSHOT_MINGW set already wins; HOOKSHOT_MSVC=1: the Visual Studio route"""
@@ -464,7 +499,7 @@ def main():
     p.add_argument("--work", default=os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"), "hookshot-builder")
                    if LINUX else os.path.join(os.environ.get("LOCALAPPDATA", ROOT), "HookshotBuilder"))
     # (HOOKSHOT_JOBS: fewer compilers on a PC short of memory; the AppImage's builds pass no --jobs)
-    p.add_argument("--jobs", type=int, default=int(os.environ.get("HOOKSHOT_JOBS") or 0) or max(1, (os.cpu_count() or 2) // 2))
+    p.add_argument("--jobs", type=int, default=int(os.environ.get("HOOKSHOT_JOBS") or 0) or default_jobs())
     p.add_argument("--language", default="en-US", help="the game's language: a code from LANGUAGES, written to language.txt")
     p.add_argument("--check", action="store_true")
     p.add_argument("--update", help="a game folder built before: built again from the game files it keeps (the game's update offer)")

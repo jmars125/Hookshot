@@ -2075,7 +2075,8 @@ void checkpoints_report() {
         if (i >= (1u << 16)) continue;
         const Checkpoint& k = checkpoints[i];
         auto kind = [](char c) {
-            return c == 'd' ? "draw of program" : c == 'c' ? "dispatch of program" : c == 'm' ? "mirror sync of pool"
+            return c == 'd' ? "draw of program" : c == 'c' ? "dispatch of program" : c == 'i' ? "INDIRECT dispatch of program"
+                 : c == 'm' ? "mirror sync of pool"
                  : c == 'b' ? "write-back of pool" : c == 'u' ? "upload of texture" : c == 'g' ? "GPU unswizzle of texture"
                  : "?";
         };
@@ -5123,6 +5124,7 @@ void dispatch(VkCommandBuffer cmd, NvnState& s, uint32_t x, uint32_t y, uint32_t
         if (indirect) {
             BufferRef args = gpu_buffer_bind(indirect, 12, false);
             if (!args) SKIP_HERE();
+            checkpoint(cmd, p, 'i');   // (a device lost's report names it: a grid read from GPU memory)
             vkCmdDispatchIndirect(cmd, args.buffer, args.offset);
         } else {
             vkCmdDispatch(cmd, x, y, z);

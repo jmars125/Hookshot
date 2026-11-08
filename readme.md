@@ -234,6 +234,9 @@ Bigger ways to help:
 - **Fixes in your own fork.** Fork the project, fix what you find and send the change back. Keep game files, keys and
   anything generated from your game out of it.
 
+[CONTRIBUTING.md](CONTRIBUTING.md) has the setup, the test commands, the code conventions and what a good pull request
+looks like.
+
 ## Credits
 
 Hookshot exists thanks to the work of many people:

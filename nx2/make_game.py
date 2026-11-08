@@ -62,6 +62,27 @@ def fail(text):
     sys.exit(1)
 
 
+def install_built_file(source, destination):
+    """Stage beside the destination: a failed copy or replace keeps the previous file intact."""
+    staged = None
+    try:
+        fd, staged = tempfile.mkstemp(prefix="." + os.path.basename(destination) + ".", suffix=".tmp",
+                                     dir=os.path.dirname(os.path.abspath(destination)))
+        os.close(fd)
+        shutil.copy2(source, staged)
+        os.replace(staged, destination)
+        staged = None
+    except PermissionError:
+        fail("Could not install the compiled file at %s. Close any running copy of Hookshot, check that the destination "
+             "file and folder are writable, then run the build again. The compiled files remain in %s."
+             % (destination, os.path.dirname(source)))
+    finally:
+        if staged is not None:
+            # Only our temporary file, including a copied read-only mode; never unlock the existing game file.
+            os.chmod(staged, stat.S_IREAD | stat.S_IWRITE)
+            os.remove(staged)
+
+
 def failure_reason(lines):
     """The line a stopped step is named with. Only the last 12 lines used to be kept, so a compiler's "error:" hundreds
     of lines earlier was replaced by "compiled in 790s, 1 failed"."""
@@ -628,10 +649,8 @@ def main():
     built = os.path.join(work, "sa", "build")
     for name in BESIDE:
         if os.path.exists(os.path.join(built, name)):
-            if os.path.exists(os.path.join(out, name)):   # (linux: not over a running copy's file: a new one in its place)
-                os.remove(os.path.join(out, name))
-            shutil.copy2(os.path.join(built, name), os.path.join(out, name))
-    shutil.copy2(os.path.join(work, "sa", "image", "image.bin"), os.path.join(out, "image.bin"))
+            install_built_file(os.path.join(built, name), os.path.join(out, name))
+    install_built_file(os.path.join(work, "sa", "image", "image.bin"), os.path.join(out, "image.bin"))
     # every shader of the game, for its first start to translate (gpu/vk/vk_shader.cpp seed_open). Without it the game still runs, compiling them
     # as it meets them: not worth stopping a finished build for
     if subprocess.call(shader_census_cmd(romfs, os.path.join(out, "hookshot_shaders.bin")), stdout=sys.stderr):

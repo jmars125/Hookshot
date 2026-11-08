@@ -18,6 +18,7 @@ on:
       - gpu/vk/vk_state.h
       - tests/test_same_bind.py
       - tests/test_cpm_discovery.py
+      - tests/test_finish_output.py
       - tests/test_failure_reason.py
       - tests/test_import_hold.py
       - gpu/vk/vk_replay.cpp
@@ -94,6 +95,7 @@ on:
       - gpu/vk/vk_state.h
       - tests/test_same_bind.py
       - tests/test_cpm_discovery.py
+      - tests/test_finish_output.py
       - tests/test_failure_reason.py
       - tests/test_import_hold.py
       - gpu/vk/vk_replay.cpp
@@ -216,6 +218,8 @@ jobs:
         run: python -I -B tests/test_child_unicode.py
       - name: Check packaged CPM discovery
         run: python -I -B tests/test_cpm_discovery.py
+      - name: Check safe installation of built files
+        run: python -I -B tests/test_finish_output.py
       - name: Check a failed step's error line
         run: python -I -B tests/test_failure_reason.py
       - name: C++ compiler for the import-hold check

@@ -76,6 +76,8 @@ on:
       - tests/global_load_16/**
       - gpu/vk/eden/shader_recompiler/backend/spirv/emit_spirv_memory.cpp
       - gpu/vk/eden/shader_recompiler/backend/spirv/emit_spirv_instructions.h
+      - gpu/vk/eden/shader_recompiler/backend/spirv/emit_spirv_mesh.cpp
+      - tests/test_mesh_stage_buffer_zero.py
       - .github/workflows/source-regressions.yml
   pull_request:
     branches: [main]
@@ -152,6 +154,8 @@ on:
       - tests/global_load_16/**
       - gpu/vk/eden/shader_recompiler/backend/spirv/emit_spirv_memory.cpp
       - gpu/vk/eden/shader_recompiler/backend/spirv/emit_spirv_instructions.h
+      - gpu/vk/eden/shader_recompiler/backend/spirv/emit_spirv_mesh.cpp
+      - tests/test_mesh_stage_buffer_zero.py
       - .github/workflows/source-regressions.yml
   workflow_dispatch:
 
@@ -243,6 +247,8 @@ jobs:
         run: python -I -B tests/test_table_track.py
       - name: Check descriptor timing stays off
         run: python -I -B tests/test_desc_clock.py
+      - name: Check a mesh program's stage buffer starts at zero
+        run: python -I -B tests/test_mesh_stage_buffer_zero.py
       - name: Check the replay clock skips the performance counter
         if: runner.os == 'Linux'
         run: python -I -B tests/test_prof_clock.py

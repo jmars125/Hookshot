@@ -243,6 +243,27 @@ void EmitMeshPrologue(EmitContext& ctx) {
     if (ctx.stage != Stage::Mesh) {
         return;
     }
+    // (local) The stage buffer's map and attribute regions start at zero, as they come out on NVIDIA: workgroup memory holds
+    // whatever the last workgroup on that unit left, and a vertex or an index byte the program left unwritten was that. On an
+    // RX 7700S the foliage drawn into the 2400 x 2400 shadow map around Link came out with hundreds of long thin triangles
+    // across the whole map (vertices from other meshlets' leftovers), dark lines on the ground, the water and Link that
+    // changed every frame. Zeroed, such a primitive is (0,0,0): no area. Straight-line stores, each clamped into its array
+    // (no branch: see below). RX_VK_MESH_NO_ZERO=1: as before
+    static const bool no_zero{std::getenv("RX_VK_MESH_NO_ZERO") != nullptr};
+    if (!no_zero && ctx.mesh_threads) {
+        const Id invocation{LocalInvocation(ctx)};
+        const auto zero_all = [&](Id array, u32 count) {
+            if (!Sirit::ValidId(array) || count == 0) {
+                return;
+            }
+            for (u32 first = 0; first < count; first += ctx.mesh_threads) {
+                const Id at{Clamped(ctx, ctx.OpIAdd(ctx.U32[1], invocation, ctx.Const(first)), count)};
+                ctx.OpStore(SharedWord(ctx, array, at), ctx.u32_zero_value);
+            }
+        };
+        zero_all(ctx.mesh_map, ctx.mesh_map_bytes);
+        zero_all(ctx.mesh_attributes, ctx.mesh_attribute_words);
+    }
     // Every invocation stores the zero: no branch here, the entry block's label is a phi
     // predecessor for later blocks.
     ctx.OpStore(ctx.mesh_primitive_count, ctx.u32_zero_value);

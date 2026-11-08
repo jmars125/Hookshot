@@ -15,6 +15,8 @@ static class Updater
 {
     const string Latest = "https://api.github.com/repos/NotRexed/Hookshot/releases/latest";
     const string Asset = "HookshotBuilder.zip";
+    const string SetupAsset = "HookshotBuilder-Setup.exe";      // (builder/setup/setup.c)
+    const string SetupList = "hookshot-setup.txt";              // (scripts/make_setup_parts.py)
 
     public static async void FromCommandLine(MainWindow w)
     {
@@ -47,21 +49,27 @@ static class Updater
             using var http = new HttpClient { Timeout = Timeout.InfiniteTimeSpan };
             http.DefaultRequestHeaders.UserAgent.ParseAdd("HookshotBuilder");
             w.Note("Asking GitHub for the latest release");
-            string? newTag = null, url = null;
+            string? newTag = null, url = null, setupUrl = null;
             long size = 0;
+            var hasList = false;
             using (var ask = new CancellationTokenSource(TimeSpan.FromSeconds(30)))
             using (var both = CancellationTokenSource.CreateLinkedTokenSource(token, ask.Token))
             using (var doc = JsonDocument.Parse(await http.GetStringAsync(Latest, both.Token)))
             {
                 newTag = doc.RootElement.GetProperty("tag_name").GetString();
                 foreach (var asset in doc.RootElement.GetProperty("assets").EnumerateArray())
-                    if (asset.GetProperty("name").GetString() == Asset)
+                {
+                    var assetName = asset.GetProperty("name").GetString();
+                    if (assetName == Asset)
                     {
                         url = asset.GetProperty("browser_download_url").GetString();
                         size = asset.GetProperty("size").GetInt64();
                     }
+                    else if (assetName == SetupAsset) setupUrl = asset.GetProperty("browser_download_url").GetString();
+                    else if (assetName == SetupList) hasList = true;
+                }
             }
-            if (newTag == null || url == null) throw new InvalidOperationException("The latest release has no " + Asset + ".");
+            if (newTag == null || (url == null && setupUrl == null)) throw new InvalidOperationException("The latest release has no " + Asset + ".");
             if (newTag == tools.Version)
             {
                 w.UpdateBuild(tools, folder);
@@ -70,6 +78,21 @@ static class Updater
             var name = string.Concat(newTag.Where(c => char.IsLetterOrDigit(c) || c == '-' || c == '_' || c == '.'));
             var cache = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "HookshotBuilder", "update");
             Directory.CreateDirectory(cache);
+            // (a release with the setup and its list: the setup downloads only the parts that changed since the version installed (a few MB
+            // when only the builder's code did), checks them and starts the new builder with these arguments. The whole zip is the fallback)
+            if (setupUrl != null && hasList)
+            {
+                w.Note($"Downloading the update for {newTag}");
+                var setup = Path.Combine(cache, SetupAsset);
+                var bytes = await http.GetByteArrayAsync(setupUrl, token);
+                await File.WriteAllBytesAsync(setup, bytes, token);
+                var ssi = new ProcessStartInfo(setup) { UseShellExecute = false, WorkingDirectory = cache };
+                foreach (var arg in new[] { "--update", folder, "--tag", newTag, "--fetched" }) ssi.ArgumentList.Add(arg);
+                Process.Start(ssi);
+                Application.Current.Shutdown();
+                return;
+            }
+            if (url == null) throw new InvalidOperationException("The latest release has no " + Asset + ".");
             var zip = Path.Combine(cache, "HookshotBuilder-" + name + ".zip");
             w.Note($"Downloading {Asset} of {newTag} ({size >> 20} MB)");
             using (var response = await http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, token))

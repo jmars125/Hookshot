@@ -402,7 +402,10 @@ def main():
     if PGO == "gen":
         hot_fl = [f if f != "-O2" else "-O1" for f in hot_fl] + ["-fprofile-instr-generate", "-mllvm", "-disable-vp=true"]
     elif PGO:
-        hot_fl = hot_fl + ["-fprofile-instr-use=" + PGO]
+        # (the profile's contents in the flags the object key hashes: its path alone stays the same across releases, so an update with a
+        # new profile kept the hot code built from the old one)
+        with open(PGO, "rb") as f:
+            hot_fl = hot_fl + ["-fprofile-instr-use=" + PGO, "-DHOOKSHOT_PROFILE_SHA1=" + hashlib.sha1(f.read()).hexdigest()[:16]]
     jobs = [(cc, s, os.path.join(obj_dir, os.path.basename(s)[:-2] + ".o"),
              hot_fl if os.path.basename(s).startswith("code_hot") else fl,
              shim_deps if os.path.dirname(s) == NX2_RT else deps) for s in srcs]

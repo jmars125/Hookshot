@@ -644,12 +644,20 @@ def main():
 
     say("stage", "finish", "Putting the game folder together")
     built = os.path.join(work, "sa", "build")
-    for name in BESIDE:
-        if os.path.exists(os.path.join(built, name)):
-            if os.path.exists(os.path.join(out, name)):   # (linux: not over a running copy's file: a new one in its place)
-                os.remove(os.path.join(out, name))
-            shutil.copy2(os.path.join(built, name), os.path.join(out, name))
-    shutil.copy2(os.path.join(work, "sa", "image", "image.bin"), os.path.join(out, "image.bin"))
+    # (the new files are copied in beside the old ones as <name>.new and swapped in only once all are complete: a build stopped while
+    # copying, or a full disk, left a half-written 460 MB hookshot.exe and no game to play. The old game stays playable until the swap)
+    staged = [(os.path.join(built, n), os.path.join(out, n)) for n in BESIDE if os.path.exists(os.path.join(built, n))]
+    staged.append((os.path.join(work, "sa", "image", "image.bin"), os.path.join(out, "image.bin")))
+    for src, dst in staged:
+        if os.path.exists(dst + ".new"):
+            os.remove(dst + ".new")
+        shutil.copy2(src, dst + ".new")
+    for src, dst in staged:
+        try:
+            os.replace(dst + ".new", dst)   # (linux: a running copy keeps its own file; windows: a running exe cannot be replaced)
+        except PermissionError:
+            fail("Close Hookshot first: the game is running from %s, so its files cannot be replaced. The new build is ready beside it; "
+                 "build again once the game is closed." % out)
     # every shader of the game, for its first start to translate (gpu/vk/vk_shader.cpp seed_open). Without it the game still runs, compiling them
     # as it meets them: not worth stopping a finished build for
     if subprocess.call(shader_census_cmd(romfs, os.path.join(out, "hookshot_shaders.bin")), stdout=sys.stderr):

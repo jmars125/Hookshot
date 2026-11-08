@@ -32,6 +32,7 @@
 static HWND g_win, g_text, g_bar;
 static wchar_t g_status[512];
 static volatile LONG g_percent = -1;
+static DWORD g_http_status;   /* (the last answer: 0 when the server was not reached) */
 static wchar_t g_cmdline[2048];
 
 typedef struct {
@@ -81,6 +82,7 @@ static int http_get(const char *url8, Sink sink, void *user, unsigned long long 
     if (r && WinHttpSendRequest(r, WINHTTP_NO_ADDITIONAL_HEADERS, 0, NULL, 0, 0, 0) && WinHttpReceiveResponse(r, NULL)) {
         DWORD code = 0, len = sizeof code;
         WinHttpQueryHeaders(r, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, NULL, &code, &len, NULL);
+        g_http_status = code;
         if (code == 200) {
             static char buf[1 << 16];
             unsigned long long got = 0;
@@ -169,6 +171,87 @@ static void mkdirs(const wchar_t *path) {
     CreateDirectoryW(p, NULL);
 }
 
+/* a folder and everything in it (a version folder, a half-unpacked one) */
+static void rmtree(const wchar_t *dir) {
+    wchar_t pat[MAX_PATH], p[MAX_PATH];
+    WIN32_FIND_DATAW fd;
+    swprintf(pat, MAX_PATH, L"%ls\\*", dir);
+    HANDLE h = FindFirstFileW(pat, &fd);
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..")) continue;
+            swprintf(p, MAX_PATH, L"%ls\\%ls", dir, fd.cFileName);
+            if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && !(fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) rmtree(p);
+            else if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) RemoveDirectoryW(p);   /* (a link: never what it points to) */
+            else SetFileAttributesW(p, FILE_ATTRIBUTE_NORMAL), DeleteFileW(p);
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+    }
+    RemoveDirectoryW(dir);
+}
+
+static void read_small(const wchar_t *path, char *out, int n) {
+    out[0] = 0;
+    HANDLE f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (f == INVALID_HANDLE_VALUE) return;
+    DWORD got = 0;
+    ReadFile(f, out, (DWORD)n - 1, &got, NULL);
+    CloseHandle(f);
+    out[got] = 0;
+    for (char *q = out; *q; q++)
+        if (*q == '\r' || *q == '\n') { *q = 0; break; }
+}
+
+static void write_small(const wchar_t *path, const char *text) {
+    HANDLE f = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
+    if (f == INVALID_HANDLE_VALUE) return;
+    DWORD n;
+    WriteFile(f, text, (DWORD)strlen(text), &n, NULL);
+    CloseHandle(f);
+}
+
+/* (as NX2navi's launcher keeps them: the version just installed and the one before it stay, older versions go, and so do downloads
+   the list no longer names; a part unchanged since the last release keeps its checksum and stays cached) */
+static void prune(const wchar_t *versions, const wchar_t *downloads, const char *tag, const Part *parts, int nparts) {
+    wchar_t cur[MAX_PATH], prev[MAX_PATH], pat[MAX_PATH], p[MAX_PATH];
+    char was[128], before[128];
+    swprintf(cur, MAX_PATH, L"%ls\\current.txt", versions);
+    swprintf(prev, MAX_PATH, L"%ls\\previous.txt", versions);
+    read_small(cur, was, sizeof was);
+    if (strcmp(was, tag)) {
+        if (was[0]) write_small(prev, was);
+        write_small(cur, tag);
+    }
+    read_small(prev, before, sizeof before);
+    WIN32_FIND_DATAW fd;
+    swprintf(pat, MAX_PATH, L"%ls\\*", versions);
+    HANDLE h = FindFirstFileW(pat, &fd);
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || !wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..")) continue;
+            char name[260];
+            WideCharToMultiByte(CP_UTF8, 0, fd.cFileName, -1, name, sizeof name, NULL, NULL);
+            if (!strcmp(name, tag) || (before[0] && !strcmp(name, before))) continue;
+            swprintf(p, MAX_PATH, L"%ls\\%ls", versions, fd.cFileName);
+            rmtree(p);
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+    }
+    swprintf(pat, MAX_PATH, L"%ls\\*.zip", downloads);
+    h = FindFirstFileW(pat, &fd);
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            char name[260];
+            WideCharToMultiByte(CP_UTF8, 0, fd.cFileName, -1, name, sizeof name, NULL, NULL);
+            int keep = 0;
+            for (int i = 0; i < nparts; i++)
+                if (!strncmp(name, parts[i].sha, 64)) keep = 1;
+            if (!keep) swprintf(p, MAX_PATH, L"%ls\\%ls", downloads, fd.cFileName), DeleteFileW(p);
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+    }
+}
+
 static void w(const char *s8, wchar_t *out, int n) { MultiByteToWideChar(CP_UTF8, 0, s8, -1, out, n); }
 
 /* (HOOKSHOT_SETUP_LIST=<url>: another list, for testing a release before it is the latest) */
@@ -189,8 +272,13 @@ static DWORD WINAPI work(LPVOID unused) {
 
     status(L"Looking for the latest Hookshot Builder...");
     Mem man = {0};
+    g_http_status = 0;
     if (!http_get(manifest_url(), mem_sink, &man, 0) || !man.p)
-        fail(L"Could not reach GitHub to get the Hookshot Builder. Check your internet connection and try again.");
+        fail(g_http_status == 404
+                 ? L"The latest Hookshot release has no setup files yet. Download HookshotBuilder.zip from the releases page for now: "
+                   L"https://github.com/NotRexed/Hookshot/releases/latest"
+             : g_http_status ? L"GitHub answered with an error. Try again in a few minutes."
+                             : L"Could not reach GitHub to get the Hookshot Builder. Check your internet connection and try again.");
 
     char tag[128] = "", run[260] = "";
     Part parts[MAX_PARTS];
@@ -205,14 +293,20 @@ static DWORD WINAPI work(LPVOID unused) {
     }
     if (!tag[0] || !run[0] || !nparts) fail(L"The release's setup list could not be read. Try again later.");
 
-    wchar_t install[MAX_PATH], marker[MAX_PATH], wtag[128], wrun[260], exe[MAX_PATH];
+    wchar_t install[MAX_PATH], marker[MAX_PATH], wtag[128], wrun[260], exe[MAX_PATH], versions[MAX_PATH], final_dir[MAX_PATH];
     w(tag, wtag, 128), w(run, wrun, 260);
-    swprintf(install, MAX_PATH, L"%ls\\%ls", base, wtag);
+    swprintf(versions, MAX_PATH, L"%ls\\versions", base);
+    swprintf(final_dir, MAX_PATH, L"%ls\\%ls", versions, wtag);
+    swprintf(install, MAX_PATH, L"%ls\\%ls", versions, wtag);
     swprintf(marker, MAX_PATH, L"%ls\\installed.txt", install);
     swprintf(exe, MAX_PATH, L"%ls\\%ls", install, wrun);
     for (wchar_t *q = exe; *q; q++) if (*q == L'/') *q = L'\\';
 
     if (GetFileAttributesW(marker) == INVALID_FILE_ATTRIBUTES || GetFileAttributesW(exe) == INVALID_FILE_ATTRIBUTES) {
+        /* (unpacked into <tag>.part and renamed once complete: a setup stopped half way never leaves a version that looks installed) */
+        swprintf(install, MAX_PATH, L"%ls\\%ls.part", versions, wtag);
+        rmtree(install);
+        rmtree(final_dir);
         mkdirs(install);
         for (int i = 0; i < nparts; i++) {
             Part *p = &parts[i];
@@ -262,11 +356,16 @@ static DWORD WINAPI work(LPVOID unused) {
                     fail(L"Could not set up part %d of %d (renaming %ls).", i + 1, nparts, wf);
             }
         }
-        if (GetFileAttributesW(exe) == INVALID_FILE_ATTRIBUTES)
-            fail(L"The builder is missing after unpacking (%ls). Your antivirus may have removed it: allow the folder %ls and run the setup again.", exe, base);
-        HANDLE m = CreateFileW(marker, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
-        if (m != INVALID_HANDLE_VALUE) { DWORD n; WriteFile(m, tag, (DWORD)strlen(tag), &n, NULL); CloseHandle(m); }
+        wchar_t staged_exe[MAX_PATH];
+        swprintf(staged_exe, MAX_PATH, L"%ls\\%ls", install, wrun);
+        for (wchar_t *q = staged_exe; *q; q++) if (*q == L'/') *q = L'\\';
+        if (GetFileAttributesW(staged_exe) == INVALID_FILE_ATTRIBUTES)
+            fail(L"The builder is missing after unpacking (%ls). Your antivirus may have removed it: allow the folder %ls and run the setup again.", staged_exe, base);
+        if (!MoveFileW(install, final_dir)) fail(L"Could not finish installing into %ls.", final_dir);
+        wcscpy(install, final_dir);
+        write_small(marker, tag);
     }
+    prune(versions, downloads, tag, parts, nparts);
 
     status(L"Starting the Hookshot Builder...");
     wchar_t cmd[4096], dir[MAX_PATH];

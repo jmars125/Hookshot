@@ -57,11 +57,7 @@ struct Pipe {
 struct State {
     bool init = false, failed = false;
     uint32_t w = 0, h = 0;
-    Pipe copy, luma, flow, median, synth, scale;
-    Img cropped;
-    uint32_t cropped_w = 0, cropped_h = 0;
-    Img scaled;   // (the Insert menu's upscaling: at the window's size)
-    uint32_t scaled_w = 0, scaled_h = 0;
+    Pipe copy, luma, flow, median, synth;
     VkSampler nearest = VK_NULL_HANDLE, linear = VK_NULL_HANDLE;
     Img frames[2], lumas[2], flows[2];
     OutSet sets[3];   // (one shown, one waiting its place on the line, one being made: the pacer never holds the game back)
@@ -76,6 +72,15 @@ struct State {
     int64_t recorded_at = 0;
     int mult = 0;   // (the multiplier the sets' frames were made for)
 } fg;
+
+// Used only by present_image, whose lock serializes direct and interpolated presents.
+struct ScaleState {
+    bool init = false, failed = false;
+    Pipe pipe;
+    VkSampler linear = VK_NULL_HANDLE;
+    Img cropped, scaled;
+    uint32_t cropped_w = 0, cropped_h = 0, scaled_w = 0, scaled_h = 0;
+} scale;
 
 int64_t now_ns() {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -130,8 +135,7 @@ bool init() {
         !make_pipe(fg.luma, FG_LUMA_COMP_SPV, sizeof FG_LUMA_COMP_SPV, {S, I}, 0) ||
         !make_pipe(fg.flow, FG_FLOW_COMP_SPV, sizeof FG_FLOW_COMP_SPV, {S, S, I}, 0, &spec) ||
         !make_pipe(fg.median, FG_MEDIAN_COMP_SPV, sizeof FG_MEDIAN_COMP_SPV, {S, I}, 0) ||
-        !make_pipe(fg.synth, FG_SYNTH_COMP_SPV, sizeof FG_SYNTH_COMP_SPV, {S, S, S, I}, 4) ||
-        !make_pipe(fg.scale, FG_SCALE_COMP_SPV, sizeof FG_SCALE_COMP_SPV, {S, I}, 8))
+        !make_pipe(fg.synth, FG_SYNTH_COMP_SPV, sizeof FG_SYNTH_COMP_SPV, {S, S, S, I}, 4))
         return false;
     VkSamplerCreateInfo si{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
     si.addressModeU = si.addressModeV = si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
@@ -142,6 +146,28 @@ bool init() {
     fg.failed = false;
     logf("vk: frame interpolation ready: %dx the game's frames (made from its last two, shown evenly)", multiplier());
     return true;
+}
+
+bool init_scale() {
+    if (scale.init) return !scale.failed;
+    scale.init = scale.failed = true;
+    if (!dev.push_descriptor || !vkCmdPushDescriptorSetKHR) return false;
+    const VkDescriptorType S = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, I = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    if (make_pipe(scale.pipe, FG_SCALE_COMP_SPV, sizeof FG_SCALE_COMP_SPV, {S, I}, 8)) {
+        VkSamplerCreateInfo si{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+        si.addressModeU = si.addressModeV = si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        si.maxLod = 0.25f;
+        si.magFilter = si.minFilter = VK_FILTER_LINEAR;
+        if (vkCreateSampler(dev.device, &si, nullptr, &scale.linear) == VK_SUCCESS) {
+            scale.failed = false;
+            return true;
+        }
+    }
+    if (scale.pipe.pipe) vkDestroyPipeline(dev.device, scale.pipe.pipe, nullptr);
+    if (scale.pipe.layout) vkDestroyPipelineLayout(dev.device, scale.pipe.layout, nullptr);
+    if (scale.pipe.set) vkDestroyDescriptorSetLayout(dev.device, scale.pipe.set, nullptr);
+    scale.pipe = {};
+    return false;
 }
 
 bool make_img(Img& i, uint32_t w, uint32_t h, VkFormat f, VkImageUsageFlags usage) {
@@ -322,45 +348,64 @@ bool framegen_on() {
 
 VkImage framegen_scale(VkCommandBuffer cmd, VkImageView src, VkImage image, uint32_t sw, uint32_t sh, const int crop[4], uint32_t dw, uint32_t dh) {
     if (!opts.upscale && !opts.sharpness) return VK_NULL_HANDLE;
-    if (!src || !fg.scale.pipe) return VK_NULL_HANDLE;
+    if (!src || !image || !sw || !sh || !dw || !dh) return VK_NULL_HANDLE;
+    if (crop && crop[2] > 0 && crop[3] > 0 &&
+        (crop[0] < 0 || crop[1] < 0 || (uint32_t)crop[0] >= sw || (uint32_t)crop[1] >= sh)) return VK_NULL_HANDLE;
+    if (!init_scale()) return VK_NULL_HANDLE;
     // (the game draws into part of its window textures, 2048 x 1152 of 2560 x 1440 here: the filter was given the whole texture, and the
     // picture came out in the top left corner of the window with black around it. The crop first, then the filter)
     if (crop && crop[2] > 0 && crop[3] > 0 && (crop[0] || crop[1] || (uint32_t)crop[2] < sw || (uint32_t)crop[3] < sh)) {
         const uint32_t cw = std::min((uint32_t)crop[2], sw - (uint32_t)crop[0]), ch = std::min((uint32_t)crop[3], sh - (uint32_t)crop[1]);
-        if (fg.cropped_w != cw || fg.cropped_h != ch) {
+        if (scale.cropped_w != cw || scale.cropped_h != ch) {
             {
                 std::lock_guard qk(dev.present_mu);
                 queue_flush_locked();
                 vkDeviceWaitIdle(dev.device);
             }
-            drop_img(fg.cropped);
-            if (!make_img(fg.cropped, cw, ch, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT)) return VK_NULL_HANDLE;
-            fg.cropped_w = cw, fg.cropped_h = ch;
-            to_general(cmd, fg.cropped.image);
+            drop_img(scale.cropped);
+            scale.cropped_w = scale.cropped_h = 0;
+            if (!make_img(scale.cropped, cw, ch, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT)) {
+                drop_img(scale.cropped);
+                return VK_NULL_HANDLE;
+            }
+            scale.cropped_w = cw, scale.cropped_h = ch;
+            to_general(cmd, scale.cropped.image);
         }
         VkImageBlit b{};
         b.srcSubresource = b.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
         b.srcOffsets[0] = {crop[0], crop[1], 0};
         b.srcOffsets[1] = {crop[0] + (int)cw, crop[1] + (int)ch, 1};
         b.dstOffsets[1] = {(int)cw, (int)ch, 1};
-        vkCmdBlitImage(cmd, image, VK_IMAGE_LAYOUT_GENERAL, fg.cropped.image, VK_IMAGE_LAYOUT_GENERAL, 1, &b, VK_FILTER_NEAREST);
+        vkCmdBlitImage(cmd, image, VK_IMAGE_LAYOUT_GENERAL, scale.cropped.image, VK_IMAGE_LAYOUT_GENERAL, 1, &b, VK_FILTER_NEAREST);
         full_barrier(cmd);
-        src = fg.cropped.view;
+        src = scale.cropped.view;
     }
-    if (fg.scaled_w != dw || fg.scaled_h != dh) {
+    if (scale.scaled_w != dw || scale.scaled_h != dh) {
         {
             std::lock_guard qk(dev.present_mu);   // (the queue is idle only while nothing else submits to it)
             queue_flush_locked();
             vkDeviceWaitIdle(dev.device);
         }
-        drop_img(fg.scaled);
-        if (!make_img(fg.scaled, dw, dh, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT)) return VK_NULL_HANDLE;
-        fg.scaled_w = dw, fg.scaled_h = dh;
-        to_general(cmd, fg.scaled.image);
+        drop_img(scale.scaled);
+        scale.scaled_w = scale.scaled_h = 0;
+        if (!make_img(scale.scaled, dw, dh, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT)) {
+            drop_img(scale.scaled);
+            return VK_NULL_HANDLE;
+        }
+        scale.scaled_w = dw, scale.scaled_h = dh;
+        to_general(cmd, scale.scaled.image);
     }
     const struct { int mode; float sharp; } pc{opts.upscale, opts.sharpness / 100.0f};
-    pass(cmd, fg.scale, {{src, fg.linear}, {fg.scaled.view, VK_NULL_HANDLE}}, dw, dh, &pc, sizeof pc);
-    return fg.scaled.image;
+    pass(cmd, scale.pipe, {{src, scale.linear}, {scale.scaled.view, VK_NULL_HANDLE}}, dw, dh, &pc, sizeof pc);
+    static const bool report = getenv("RX_VK_UPSCALE_LOG") != nullptr;
+    static bool reported = false;
+    if (report && !reported) {
+        reported = true;
+        logf("vk: upscale dispatched: mode %d, sharpness %d, source %ux%u, crop request %d,%d %dx%d, destination %ux%u",
+             opts.upscale, opts.sharpness, sw, sh, crop ? crop[0] : 0, crop ? crop[1] : 0,
+             crop ? crop[2] : (int)sw, crop ? crop[3] : (int)sh, dw, dh);
+    }
+    return scale.scaled.image;
 }
 
 VkImage framegen_made_image(uint32_t* w, uint32_t* h) {

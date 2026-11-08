@@ -2269,6 +2269,7 @@ void do_present(const nvn_tex* t, const int crop[4]) {
     static const char* shots = getenv("RX_VK_SHOTS");
     static const int shot_every = getenv("RX_VK_SHOT_EVERY") ? std::max(1, atoi(getenv("RX_VK_SHOT_EVERY"))) : 300;
     VkImage src = VK_NULL_HANDLE;
+    VkImageView direct_view = VK_NULL_HANDLE;
     uint32_t sw = 0, sh = 0;
     bool shot = false, interpolated = false;
     VkImage made_src = VK_NULL_HANDLE;
@@ -2291,6 +2292,12 @@ void do_present(const nvn_tex* t, const int crop[4]) {
                  t ? t->d.width : 0, t ? t->d.height : 0, t ? t->d.format : 0,
                  tex ? (tex->gpu_written ? "rendered" : "never rendered") : "no image");
         if (tex) src = tex->image, sw = tex->width, sh = tex->height;
+        if (tex && !dev.offscreen && (opts.upscale || opts.sharpness)) {
+            // Keep the sampled view with the same cached image as the direct present, before advancing its age.
+            direct_view = texture_view(tex, t, nullptr, VK_IMAGE_VIEW_TYPE_2D, ViewUse::Sample);
+            tex->last_frame = texture_frame_no();
+            tex->last_value = std::max(tex->last_value, value);
+        }
         // (frame interpolation: made frames and this one shown by the display thread, vk_framegen.cpp. Recorded
         // after the submit that signals the present's value, in a submit of its own: the game waits for that value
         // before it submits its next frame, and the interpolation's GPU work (~1 ms) held it back. The display
@@ -2575,7 +2582,7 @@ void do_present(const nvn_tex* t, const int crop[4]) {
         log_frame_stats();
     }
     if (dev.offscreen || interpolated) return;
-    present_image(src, sw, sh, crop);
+    present_image(src, sw, sh, crop, direct_view);
 }
 
 } // namespace

@@ -1,4 +1,8 @@
-"""The controllers keep playing behind other windows only when the player asks for it.
+"""Exercise real scripted parsing, routing and Npad serialization with authored files/API spies.
+
+The parser, LIVE reader, input routing and Npad writer are extracted unmodified from production. Clock,
+foreground-window, keyboard, mouse and pad APIs are fakes; no real device, desktop or game is accessed.
+Each case starts a fresh process because production caches environment settings.
 
 Controllers counted only while the game's window was in front, so a game streamed from a screen of its own (Sunshine
 and Moonlight), or left running behind another window, ignored the pad. The Insert menu's "Controller in background"
@@ -7,11 +11,16 @@ row, or HOS_INPUT_BACKGROUND=1, lets the pads through; the keyboard and mouse st
 python -I -B tests/test_input_background.py [--cc gcc]
 """
 import argparse
+import os
+import re
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+CASES = ("foreground", "script-background", "headless", "noactivate", "live-background",
+         "no-script-background", "exclusive-foreground", "exclusive-background", "pads-env", "pads-menu", "pads-off")
 
 
 def block(text, marker):
@@ -27,6 +36,7 @@ def block(text, marker):
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--cc", default="gcc")
+    p.add_argument("--case", choices=CASES)
     a = p.parse_args()
     hid = (ROOT / "host" / "nn_hid.c").read_text(encoding="utf-8")
     replay = (ROOT / "gpu" / "vk" / "vk_replay.cpp").read_text(encoding="utf-8")
@@ -46,26 +56,60 @@ def main():
     if '"Controller in background", &opts.pad_background' not in menu:
         raise SystemExit("the Insert menu has no row for it")
 
-    fn = block(hid, "static int pads_in_background(")
-    fixture = r'''#include <stdio.h>
-#include <stdlib.h>
-#define CHECK(x) do { if (!(x)) { fprintf(stderr, "FAIL:%d %s\n", __LINE__, #x); exit(1); } } while (0)
-''' + fn + r'''
-int main(void) {
-    CHECK(!pads_in_background(NULL, 0));   /* out of the box: the window in front only */
-    CHECK(pads_in_background(NULL, 1));    /* the menu's row */
-    CHECK(pads_in_background("1", 0));     /* HOS_INPUT_BACKGROUND=1 without the menu */
-    CHECK(!pads_in_background("0", 1));    /* HOS_INPUT_BACKGROUND=0 wins over the menu */
-    printf("PASS: pads behind other windows only when asked\n");
-    return 0;
-}
-'''
+    api = (ROOT / "gpu/vk/vk_api.h").read_text(encoding="utf-8")
+    constants = block(hid, "enum { B_A") + ";\n" + block(api, "enum { HOS_SW_A") + ";\n"
+    for name in ("STATE_SIZE", "NPAD_NO1", "ATTR_CONNECTED"):
+        matches = re.findall(r"^#define " + name + r"\s+[^\n]+", hid, re.M)
+        assert len(matches) == 1, name
+        constants += matches[0] + "\n"
+    start = hid.index("typedef struct { int64_t start_ms, end_ms;")
+    script = block(hid, "static void scripted_input(")
+    end = hid.index(script) + len(script)
+    actual = "\n".join((block(hid, "static int key("), block(hid, "static int kmap_down("),
+        block(hid, "static int game_in_front("), hid[start:end], block(hid, "static void stick_max("),
+        block(hid, "static int pads_in_background("), read, block(hid, "static void npad_states(")))
+    glue = (ROOT / "host/mkw_glue.c").read_text(encoding="utf-8")
+    actual += "\n" + "\n".join(block(glue, "uint64_t " + name + "(")
+                                  for name in ("hos_title_input", "hos_frame_step_buttons"))
+    env = os.environ.copy()
+    for name in list(env):
+        if name.startswith("HOS_INPUT_") or name in ("HOS_HEADLESS", "HOS_WINDOW_NOACTIVATE"):
+            del env[name]
+    flags = subprocess.CREATE_NO_WINDOW | subprocess.BELOW_NORMAL_PRIORITY_CLASS if os.name == "nt" else 0
+    def run(command, environment=None):
+        result = subprocess.run(command, env=environment, capture_output=True, text=True,
+                                encoding="utf-8", errors="replace", creationflags=flags)
+        print(result.stdout, end="")
+        print(result.stderr, end="", file=sys.stderr)
+        result.check_returncode()
     with tempfile.TemporaryDirectory(prefix="input-background-") as tmp:
-        c = Path(tmp) / "fixture.c"
-        exe = Path(tmp) / "fixture"
-        c.write_text(fixture, encoding="utf-8")
-        subprocess.run([a.cc, "-std=c11", "-Wall", "-Wextra", "-Werror", str(c), "-o", str(exe)], check=True)
-        subprocess.run([str(exe)], check=True)
+        folder = Path(tmp).resolve()
+        assert folder.parent == Path(tempfile.gettempdir()).resolve() and folder.name.startswith("input-background-")
+        (folder / "input_constants.inc").write_text(constants, encoding="utf-8")
+        (folder / "input_actual.inc").write_text(actual, encoding="utf-8")
+        exe = folder / "fixture.exe"
+        # Production's button table deliberately leaves its unused axis fields zero-initialized.
+        run([a.cc, "-std=c11", "-Wall", "-Wextra", "-Werror", "-Wno-missing-field-initializers",
+             "-D_CRT_SECURE_NO_WARNINGS",
+             "-I" + str(folder), str(ROOT / "tests/input_background_test.c"), "-o", str(exe)])
+        for case in ((a.case,) if a.case else CASES):
+            case_env = dict(env)
+            if case not in ("live-background", "no-script-background"):
+                case_env["HOS_INPUT_SCRIPT"] = "0:A+LUP/200"
+            if case.startswith("exclusive-"):
+                case_env["HOS_INPUT_EXCLUSIVE"] = "1"
+            if case in ("pads-env", "pads-off"):
+                case_env["HOS_INPUT_BACKGROUND"] = "1" if case == "pads-env" else "0"
+            if case == "headless":
+                case_env["HOS_HEADLESS"] = "1"
+            if case == "noactivate":
+                case_env["HOS_WINDOW_NOACTIVATE"] = "1"
+            if case == "live-background":
+                live = folder / "live.txt"
+                live.write_bytes(b"")
+                case_env["HOS_INPUT_LIVE"] = str(live)
+            run([str(exe), case], case_env)
+        assert folder.parent == Path(tempfile.gettempdir()).resolve() and folder.name.startswith("input-background-")
 
 
 if __name__ == "__main__":

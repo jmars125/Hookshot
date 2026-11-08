@@ -79,7 +79,11 @@ on:
       - host/display.c
       - host/posix/display_sdl.c
       - host/nn_hid.c
+      - host/mkw_glue.c
+      - gpu/vk/vk_api.h
       - tests/test_alt_enter.py
+      - tests/test_input_background.py
+      - tests/input_background_test.c
       - nx2/test_import_windows.py
       - tests/test_handle_lookup.py
       - builder/linux/hookshot-launch
@@ -182,7 +186,11 @@ on:
       - host/display.c
       - host/posix/display_sdl.c
       - host/nn_hid.c
+      - host/mkw_glue.c
+      - gpu/vk/vk_api.h
       - tests/test_alt_enter.py
+      - tests/test_input_background.py
+      - tests/input_background_test.c
       - nx2/test_import_windows.py
       - tests/test_handle_lookup.py
       - builder/linux/hookshot-launch
@@ -369,6 +377,9 @@ jobs:
       - name: Check Alt+Enter is fullscreen, not Plus
         if: runner.os == 'Linux'
         run: python -I -B tests/test_alt_enter.py
+      - name: Check scripted input and physical focus routing
+        if: runner.os == 'Linux'
+        run: python -I -B tests/test_input_background.py --cc gcc
       - name: Check import windows
         if: runner.os == 'Linux'
         run: python -I -B nx2/test_import_windows.py --cxx g++

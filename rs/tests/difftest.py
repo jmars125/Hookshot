@@ -112,6 +112,27 @@ GROUPS = [
     ("fp_fma", FP | 0xFF800000, 0x1F000000),
     ("fp_fcvt", FP | 0xFFBF7C00, 0x1E224000),
     ("fp_cvt", FP | 0x7F20FC00, 0x1E200000),
+    # Advanced SIMD: vector forms, SIMD-scalar forms, structure loads and stores
+    ("n_copy", FP | 0x9FE08400, 0x0E000400),
+    ("n_3same", FP | 0x9F200400, 0x0E200400),
+    ("n_3diff", FP | 0x9F200C00, 0x0E200000),
+    ("n_2misc", FP | 0x9F3E0C00, 0x0E200800),
+    ("n_across", FP | 0x9F3E0C00, 0x0E300800),
+    ("n_perm", FP | 0xBF208C00, 0x0E000800),
+    ("n_ext", FP | 0xBFE08400, 0x2E000000),
+    ("n_modimm", FP | 0x9FF80400, 0x0F000400),
+    ("n_shift", FP | 0x9F800400, 0x0F000400),
+    ("n_elem", FP | 0x9F000400, 0x0F000000),
+    ("s_3same", FP | 0xDF200400, 0x5E200400),
+    ("s_2misc", FP | 0xDF3E0C00, 0x5E200800),
+    ("s_pair", FP | 0xDF3E0C00, 0x5E300800),
+    ("s_shift", FP | 0xDF800400, 0x5F000400),
+    ("s_elem", FP | 0xDF000400, 0x5F000000),
+    ("s_dup", FP | 0xFFE0FC00, 0x5E000400),
+    ("v_mult", 0xBFBF0000, 0x0C000000),
+    ("v_mult_post", 0xBFA00000, 0x0C800000),
+    ("v_single", 0xBF9F0000, 0x0D000000),
+    ("v_single_post", 0xBF800000, 0x0D800000),
 ]
 SYSTEM = [0xD503201F, 0xD503203F, 0xD503233F, 0xD50323BF, 0xD5033BBF, 0xD5033B9F, 0xD50339BF]
 SYS_RW = [0xD53B4200, 0xD51B4200, 0xD53BD040, 0xD51BD040]   # MRS/MSR NZCV, MRS/MSR TPIDR_EL0 (Rt added)

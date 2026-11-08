@@ -8,9 +8,12 @@
 
 use super::ctx;
 use cranelift_codegen::ir::condcodes::IntCC;
-use cranelift_codegen::ir::{types, FuncRef, Function, InstBuilder, MemFlagsData, Signature, Type, Value};
+use cranelift_codegen::ir::{
+    types, FuncRef, Function, InstBuilder, MemFlagsData, Signature, Type, Value,
+};
 
 mod fp;
+mod neon;
 use cranelift_frontend::{FunctionBuilder, Variable};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,7 +48,9 @@ pub trait Imports {
 
 impl<M: cranelift_module::Module> Imports for M {
     fn func(&mut self, name: &str, sig: &Signature, f: &mut Function) -> FuncRef {
-        let id = self.declare_function(name, cranelift_module::Linkage::Import, sig).expect("helper declaration");
+        let id = self
+            .declare_function(name, cranelift_module::Linkage::Import, sig)
+            .expect("helper declaration");
         self.declare_func_in_func(id, f)
     }
 }
@@ -56,7 +61,8 @@ pub struct NoImports;
 impl Imports for NoImports {
     fn func(&mut self, _name: &str, sig: &Signature, f: &mut Function) -> FuncRef {
         let sig = f.import_signature(sig.clone());
-        let name = f.declare_imported_user_function(cranelift_codegen::ir::UserExternalName::new(0, 0));
+        let name =
+            f.declare_imported_user_function(cranelift_codegen::ir::UserExternalName::new(0, 0));
         f.import_function(cranelift_codegen::ir::ExtFuncData {
             name: cranelift_codegen::ir::ExternalName::user(name),
             signature: sig,
@@ -100,7 +106,13 @@ fn ror(v: u64, r: u32, size: u32) -> u64 {
 }
 
 /// DecodeBitMasks of the Arm ARM: (wmask, tmask), None when the encoding is reserved
-pub fn decode_bit_masks(n: u32, imms: u32, immr: u32, immediate: bool, datasize: u32) -> Option<(u64, u64)> {
+pub fn decode_bit_masks(
+    n: u32,
+    imms: u32,
+    immr: u32,
+    immediate: bool,
+    datasize: u32,
+) -> Option<(u64, u64)> {
     let combined = (n << 6) | (!imms & 0x3f);
     if combined == 0 {
         return None;
@@ -143,7 +155,11 @@ impl Em<'_, '_> {
         }
     }
     fn k(&mut self, ty: Type, v: u64) -> Value {
-        let v = if ty == types::I32 { v as u32 as i32 as i64 } else { v as i64 };
+        let v = if ty == types::I32 {
+            v as u32 as i32 as i64
+        } else {
+            v as i64
+        };
         self.b.ins().iconst(ty, v)
     }
     /// a OP constant, the constant at a's type
@@ -186,7 +202,11 @@ impl Em<'_, '_> {
     }
     /// Xn / Wn, register 31 = SP
     pub fn xsp(&mut self, r: u32, sf: bool) -> Value {
-        let v = if r == 31 { self.b.use_var(self.r.sp) } else { self.b.use_var(self.r.x[r as usize]) };
+        let v = if r == 31 {
+            self.b.use_var(self.r.sp)
+        } else {
+            self.b.use_var(self.r.x[r as usize])
+        };
         self.narrow(v, sf)
     }
     /// Writes Xd (a W value is zero-extended); register 31 = zero, the write is dropped
@@ -245,9 +265,17 @@ impl Em<'_, '_> {
     /// a + b or a - b, setting the flags when `s`
     fn addsub(&mut self, a: Value, b: Value, sub: bool, s: bool, sf: bool) -> Value {
         if !s {
-            return if sub { self.b.ins().isub(a, b) } else { self.b.ins().iadd(a, b) };
+            return if sub {
+                self.b.ins().isub(a, b)
+            } else {
+                self.b.ins().iadd(a, b)
+            };
         }
-        let (b, cin) = if sub { (self.b.ins().bnot(b), 1) } else { (b, 0) };
+        let (b, cin) = if sub {
+            (self.b.ins().bnot(b), 1)
+        } else {
+            (b, 0)
+        };
         let cin = self.b.ins().iconst(types::I8, cin);
         let (res, [n, z, c, v]) = self.add_with_carry(a, b, cin, sf);
         self.set_flags(n, z, c, v);
@@ -288,7 +316,13 @@ impl Em<'_, '_> {
         }
     }
 
-    fn shift(&mut self, v: Value, kind: u32, amount: u32, allow_ror: bool) -> Result<Value, Unsupported> {
+    fn shift(
+        &mut self,
+        v: Value,
+        kind: u32,
+        amount: u32,
+        allow_ror: bool,
+    ) -> Result<Value, Unsupported> {
         if amount == 0 {
             return Ok(v);
         }
@@ -321,7 +355,11 @@ impl Em<'_, '_> {
                 self.b.ins().uextend(types::I64, n)
             }
         };
-        let v = if sh != 0 { self.b.ins().ishl_imm_u(v, sh as i64) } else { v };
+        let v = if sh != 0 {
+            self.b.ins().ishl_imm_u(v, sh as i64)
+        } else {
+            v
+        };
         self.narrow(v, sf)
     }
 
@@ -354,7 +392,9 @@ impl Em<'_, '_> {
         let v = if size == 3 {
             v
         } else {
-            self.b.ins().ireduce([types::I8, types::I16, types::I32][size as usize], v)
+            self.b
+                .ins()
+                .ireduce([types::I8, types::I16, types::I32][size as usize], v)
         };
         self.store(v, addr);
     }
@@ -378,7 +418,11 @@ impl Em<'_, '_> {
             0b000 | 0b001 => {
                 // ADR / ADRP
                 let imm = sx(((bits(w, 23, 5) as u64) << 2) | bits(w, 30, 29) as u64, 21);
-                let v = if w >> 31 != 0 { (self.pc & !0xfff).wrapping_add((imm << 12) as u64) } else { self.pc.wrapping_add(imm as u64) };
+                let v = if w >> 31 != 0 {
+                    (self.pc & !0xfff).wrapping_add((imm << 12) as u64)
+                } else {
+                    self.pc.wrapping_add(imm as u64)
+                };
                 let v = self.k(types::I64, v);
                 self.set(rd, v);
                 Ok(())
@@ -404,7 +448,9 @@ impl Em<'_, '_> {
                     return Err(Unsupported);
                 }
                 let datasize = if sf { 64 } else { 32 };
-                let (imm, _) = decode_bit_masks(n, bits(w, 15, 10), bits(w, 21, 16), true, datasize).ok_or(Unsupported)?;
+                let (imm, _) =
+                    decode_bit_masks(n, bits(w, 15, 10), bits(w, 21, 16), true, datasize)
+                        .ok_or(Unsupported)?;
                 let a = self.x(rn, sf);
                 let r = match bits(w, 30, 29) {
                     0 | 3 => self.band_k(a, imm),
@@ -467,7 +513,12 @@ impl Em<'_, '_> {
 
     fn bitfield(&mut self, w: u32) -> R {
         let sf = w >> 31 != 0;
-        let (opc, n, immr, imms) = (bits(w, 30, 29), bits(w, 22, 22), bits(w, 21, 16), bits(w, 15, 10));
+        let (opc, n, immr, imms) = (
+            bits(w, 30, 29),
+            bits(w, 22, 22),
+            bits(w, 21, 16),
+            bits(w, 15, 10),
+        );
         let (rd, rn) = (bits(w, 4, 0), bits(w, 9, 5));
         if opc == 3 || (n != 0) != sf || (!sf && (immr >= 32 || imms >= 32)) {
             return Err(Unsupported);
@@ -475,7 +526,11 @@ impl Em<'_, '_> {
         let size = if sf { 64 } else { 32 };
         let (wmask, tmask) = decode_bit_masks(n, imms, immr, false, size).ok_or(Unsupported)?;
         let src = self.x(rn, sf);
-        let rot = if immr == 0 { src } else { self.b.ins().rotr_imm_u(src, immr as i64) };
+        let rot = if immr == 0 {
+            src
+        } else {
+            self.b.ins().rotr_imm_u(src, immr as i64)
+        };
         let bot = self.band_k(rot, wmask);
         let r = match opc {
             0 => {
@@ -514,7 +569,11 @@ impl Em<'_, '_> {
             let a = self.x(rn, sf);
             let b = self.x(rm, sf);
             let b = self.shift(b, bits(w, 23, 22), imm6, true)?;
-            let b = if bits(w, 21, 21) != 0 { self.b.ins().bnot(b) } else { b };
+            let b = if bits(w, 21, 21) != 0 {
+                self.b.ins().bnot(b)
+            } else {
+                b
+            };
             let opc = bits(w, 30, 29);
             let r = match opc {
                 0 | 3 => self.b.ins().band(a, b),
@@ -578,15 +637,26 @@ impl Em<'_, '_> {
             }
             let sub = bits(w, 30, 30) != 0;
             let a = self.x(rn, sf);
-            let b = if bits(w, 11, 11) != 0 { self.k(Self::ty(sf), rm as u64) } else { self.x(rm, sf) };
-            let (b, cin) = if sub { (self.b.ins().bnot(b), 1) } else { (b, 0) };
+            let b = if bits(w, 11, 11) != 0 {
+                self.k(Self::ty(sf), rm as u64)
+            } else {
+                self.x(rm, sf)
+            };
+            let (b, cin) = if sub {
+                (self.b.ins().bnot(b), 1)
+            } else {
+                (b, 0)
+            };
             let cin = self.b.ins().iconst(types::I8, cin);
             let (_, f) = self.add_with_carry(a, b, cin, sf);
             let holds = self.cond(bits(w, 15, 12));
             let nzcv = bits(w, 3, 0);
             let vars = [self.r.n, self.r.z, self.r.c, self.r.v];
             for i in 0..4 {
-                let imm = self.b.ins().iconst(types::I8, ((nzcv >> (3 - i)) & 1) as i64);
+                let imm = self
+                    .b
+                    .ins()
+                    .iconst(types::I8, ((nzcv >> (3 - i)) & 1) as i64);
                 let v = self.b.ins().select(holds, f[i as usize], imm);
                 self.b.def_var(vars[i as usize], v);
             }
@@ -662,11 +732,19 @@ impl Em<'_, '_> {
                     if (sz == 3) != sf {
                         return Err(Unsupported);
                     }
-                    let poly: i64 = if op & 4 != 0 { 0x82F6_3B78 } else { 0xEDB8_8320 };
+                    let poly: i64 = if op & 4 != 0 {
+                        0x82F6_3B78
+                    } else {
+                        0xEDB8_8320
+                    };
                     let acc = self.x(rn, false);
                     let acc = self.b.ins().uextend(types::I64, acc);
                     let data = self.x(rm, true);
-                    let data = if sz == 3 { data } else { self.band_k(data, ones(8 << sz)) };
+                    let data = if sz == 3 {
+                        data
+                    } else {
+                        self.band_k(data, ones(8 << sz))
+                    };
                     let mut t = self.b.ins().bxor(acc, data);
                     let p = self.k(types::I64, poly as u64);
                     for _ in 0..(8 << sz) {
@@ -695,7 +773,11 @@ impl Em<'_, '_> {
                 (0, _) => self.b.ins().bitrev(a),
                 (1, _) => {
                     // REV16: the bytes of each halfword swapped
-                    let m = if sf { 0x00ff_00ff_00ff_00ffu64 } else { 0x00ff_00ff };
+                    let m = if sf {
+                        0x00ff_00ff_00ff_00ffu64
+                    } else {
+                        0x00ff_00ff
+                    };
                     let lo = self.band_k(a, m);
                     let lo = self.b.ins().ishl_imm_u(lo, 8);
                     let hi = self.b.ins().ushr_imm_u(a, 8);
@@ -739,9 +821,15 @@ impl Em<'_, '_> {
                     let a = self.x(rn, false);
                     let b = self.x(rm, false);
                     let (a, b) = if op31 == 1 {
-                        (self.b.ins().sextend(types::I64, a), self.b.ins().sextend(types::I64, b))
+                        (
+                            self.b.ins().sextend(types::I64, a),
+                            self.b.ins().sextend(types::I64, b),
+                        )
                     } else {
-                        (self.b.ins().uextend(types::I64, a), self.b.ins().uextend(types::I64, b))
+                        (
+                            self.b.ins().uextend(types::I64, a),
+                            self.b.ins().uextend(types::I64, b),
+                        )
                     };
                     let p = self.b.ins().imul(a, b);
                     let acc = self.x(ra, true);
@@ -782,7 +870,9 @@ impl Em<'_, '_> {
         let (rt, rn) = (bits(w, 4, 0), bits(w, 9, 5));
         if w & 0x3B00_0000 == 0x1800_0000 {
             // LDR (literal)
-            let addr = self.pc.wrapping_add((sx(bits(w, 23, 5) as u64, 19) * 4) as u64);
+            let addr = self
+                .pc
+                .wrapping_add((sx(bits(w, 23, 5) as u64, 19) * 4) as u64);
             let a = self.k(types::I64, addr);
             let v = match bits(w, 31, 30) {
                 0 => self.load_ext(2, None, a),
@@ -801,7 +891,12 @@ impl Em<'_, '_> {
         // (address, written-back address or None)
         let (addr, wb): (Value, Option<Value>) = if w & 0x3B00_0000 == 0x3900_0000 {
             let base = self.xsp(rn, true);
-            (self.b.ins().iadd_imm_s(base, ((bits(w, 21, 10) as u64) << size) as i64), None)
+            (
+                self.b
+                    .ins()
+                    .iadd_imm_s(base, ((bits(w, 21, 10) as u64) << size) as i64),
+                None,
+            )
         } else if w & 0x3B20_0000 == 0x3800_0000 {
             let imm = sx(bits(w, 20, 12) as u64, 9);
             let base = self.xsp(rn, true);
@@ -860,10 +955,14 @@ impl Em<'_, '_> {
         self.host(a)
     }
     fn ctx_store(&mut self, v: Value, off: i32) {
-        self.b.ins().store(MemFlagsData::trusted(), v, self.ctx, off);
+        self.b
+            .ins()
+            .store(MemFlagsData::trusted(), v, self.ctx, off);
     }
     fn ctx_load(&mut self, ty: Type, off: i32) -> Value {
-        self.b.ins().load(ty, MemFlagsData::trusted(), self.ctx, off)
+        self.b
+            .ins()
+            .load(ty, MemFlagsData::trusted(), self.ctx, off)
     }
     /// Xt narrowed to an access of 1 << size bytes
     fn x_sized(&mut self, r: u32, size: u32) -> Value {
@@ -878,8 +977,14 @@ impl Em<'_, '_> {
     /// Exclusives, load-acquire / store-release and CAS. The monitor is a64-kit's (rt/a64_rt.c recomp_ldxr,
     /// recomp_stxr): LDXR records the address, size and value it saw; STXR compare-and-swaps against that value.
     fn exclusive(&mut self, w: u32) -> R {
-        let (size, o2, l, o1, rs, rt2) =
-            (bits(w, 31, 30), bits(w, 23, 23), bits(w, 22, 22) != 0, bits(w, 21, 21), bits(w, 20, 16), bits(w, 14, 10));
+        let (size, o2, l, o1, rs, rt2) = (
+            bits(w, 31, 30),
+            bits(w, 23, 23),
+            bits(w, 22, 22) != 0,
+            bits(w, 21, 21),
+            bits(w, 20, 16),
+            bits(w, 14, 10),
+        );
         let (rt, rn) = (bits(w, 4, 0), bits(w, 9, 5));
         let ty = Self::ity(size);
         match (o2, o1) {
@@ -921,7 +1026,11 @@ impl Em<'_, '_> {
                 self.b.switch_to_block(try_b);
                 self.b.seal_block(try_b);
                 let expect = self.ctx_load(types::I64, ctx::EXCL_LO);
-                let expect = if size == 3 { expect } else { self.b.ins().ireduce(ty, expect) };
+                let expect = if size == 3 {
+                    expect
+                } else {
+                    self.b.ins().ireduce(ty, expect)
+                };
                 let val = self.x_sized(rt, size);
                 let old = self.b.ins().atomic_cas(MemFlagsData::new(), h, expect, val);
                 let neq = self.b.ins().icmp(IntCC::NotEqual, old, expect);
@@ -966,12 +1075,20 @@ impl Em<'_, '_> {
         if bits(w, 26, 26) != 0 {
             return Err(Unsupported);
         }
-        let (size, rs, o3, opc) = (bits(w, 31, 30), bits(w, 20, 16), bits(w, 15, 15), bits(w, 14, 12));
+        let (size, rs, o3, opc) = (
+            bits(w, 31, 30),
+            bits(w, 20, 16),
+            bits(w, 15, 15),
+            bits(w, 14, 12),
+        );
         let (rt, rn) = (bits(w, 4, 0), bits(w, 9, 5));
         if (o3, opc, rs, bits(w, 23, 22)) == (1, 4, 31, 2) {
             // LDAPR{B,H,}: a load-acquire (RCpc ordering is weaker than LDAR's, so LDAR's lowering is correct for it)
             let h = self.host_addr(rn);
-            let v = self.b.ins().atomic_load(Self::ity(size), MemFlagsData::new(), h);
+            let v = self
+                .b
+                .ins()
+                .atomic_load(Self::ity(size), MemFlagsData::new(), h);
             let v = self.widen(v);
             self.set(rt, v);
             return Ok(());
@@ -990,8 +1107,15 @@ impl Em<'_, '_> {
         };
         let h = self.host_addr(rn);
         let v = self.x_sized(rs, size);
-        let v = if (o3, opc) == (0, 1) { self.b.ins().bnot(v) } else { v };
-        let old = self.b.ins().atomic_rmw(Self::ity(size), MemFlagsData::new(), op, h, v);
+        let v = if (o3, opc) == (0, 1) {
+            self.b.ins().bnot(v)
+        } else {
+            v
+        };
+        let old = self
+            .b
+            .ins()
+            .atomic_rmw(Self::ity(size), MemFlagsData::new(), op, h, v);
         let old = self.widen(old);
         self.set(rt, old);
         Ok(())
@@ -1056,11 +1180,24 @@ impl Em<'_, '_> {
         if w & 0xFFF0_0000 == 0xD530_0000 {
             // MRS
             let v = match key {
-                0x5E82 => self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, ctx::TPIDR_EL0),
-                0x5E83 => self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, ctx::TPIDRRO_EL0),
+                0x5E82 => self.b.ins().load(
+                    types::I64,
+                    MemFlagsData::trusted(),
+                    self.ctx,
+                    ctx::TPIDR_EL0,
+                ),
+                0x5E83 => self.b.ins().load(
+                    types::I64,
+                    MemFlagsData::trusted(),
+                    self.ctx,
+                    ctx::TPIDRRO_EL0,
+                ),
                 0x5A10 => {
                     let mut acc = self.b.ins().iconst(types::I64, 0);
-                    for (i, var) in [self.r.n, self.r.z, self.r.c, self.r.v].into_iter().enumerate() {
+                    for (i, var) in [self.r.n, self.r.z, self.r.c, self.r.v]
+                        .into_iter()
+                        .enumerate()
+                    {
                         let f = self.b.use_var(var);
                         let f = self.b.ins().uextend(types::I64, f);
                         let f = self.b.ins().ishl_imm_u(f, 31 - i as i64);
@@ -1078,11 +1215,16 @@ impl Em<'_, '_> {
             match key {
                 0x5E82 => {
                     let v = self.x(rt, true);
-                    self.b.ins().store(MemFlagsData::trusted(), v, self.ctx, ctx::TPIDR_EL0);
+                    self.b
+                        .ins()
+                        .store(MemFlagsData::trusted(), v, self.ctx, ctx::TPIDR_EL0);
                 }
                 0x5A10 => {
                     let v = self.x(rt, true);
-                    for (i, var) in [self.r.n, self.r.z, self.r.c, self.r.v].into_iter().enumerate() {
+                    for (i, var) in [self.r.n, self.r.z, self.r.c, self.r.v]
+                        .into_iter()
+                        .enumerate()
+                    {
                         let f = self.b.ins().ushr_imm_u(v, 31 - i as i64);
                         let f = self.b.ins().band_imm_u(f, 1);
                         let f = self.b.ins().ireduce(types::I8, f);

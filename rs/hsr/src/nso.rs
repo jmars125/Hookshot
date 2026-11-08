@@ -10,8 +10,10 @@ use std::fs;
 use std::path::Path;
 
 const ZBIC_FLAG: u32 = 1 << 7;
-pub const NAMES: [&str; 13] =
-    ["rtld", "main", "subsdk0", "subsdk1", "subsdk2", "subsdk3", "subsdk4", "subsdk5", "subsdk6", "subsdk7", "subsdk8", "subsdk9", "sdk"];
+pub const NAMES: [&str; 13] = [
+    "rtld", "main", "subsdk0", "subsdk1", "subsdk2", "subsdk3", "subsdk4", "subsdk5", "subsdk6",
+    "subsdk7", "subsdk8", "subsdk9", "sdk",
+];
 
 pub enum Unpacked {
     NotNso,
@@ -32,7 +34,14 @@ pub fn unpack_nso(path: &Path) -> Result<Unpacked> {
     if flags & ZBIC_FLAG == 0 {
         return Ok(Unpacked::Kept);
     }
-    let segs: Vec<(usize, usize)> = (0..3).map(|i| (u32_at(&raw, 0x10 + 0x10 * i) as usize, u32_at(&raw, 0x18 + 0x10 * i) as usize)).collect();
+    let segs: Vec<(usize, usize)> = (0..3)
+        .map(|i| {
+            (
+                u32_at(&raw, 0x10 + 0x10 * i) as usize,
+                u32_at(&raw, 0x18 + 0x10 * i) as usize,
+            )
+        })
+        .collect();
     // the three segments decompress in parallel: main's text is most of the time
     let datas: Vec<Result<Vec<u8>>> = std::thread::scope(|s| {
         let hs: Vec<_> = (0..3)
@@ -42,11 +51,17 @@ pub fn unpack_nso(path: &Path) -> Result<Unpacked> {
                 s.spawn(move || -> Result<Vec<u8>> {
                     let cs = u32_at(raw, 0x60 + 4 * i) as usize;
                     let d = &raw[foff..foff + cs];
-                    let d = if flags & (1 << i) != 0 { zbic::decompress(d, size)? } else { d.to_vec() };
+                    let d = if flags & (1 << i) != 0 {
+                        zbic::decompress(d, size)?
+                    } else {
+                        d.to_vec()
+                    };
                     if d.len() != size {
                         bail!("segment {i}: {} bytes, {size} expected", d.len());
                     }
-                    if flags & (8 << i) != 0 && Sha256::digest(&d)[..] != raw[0xa0 + 0x20 * i..0xc0 + 0x20 * i] {
+                    if flags & (8 << i) != 0
+                        && Sha256::digest(&d)[..] != raw[0xa0 + 0x20 * i..0xc0 + 0x20 * i]
+                    {
                         bail!("segment {i}: hash mismatch after ZBIC");
                     }
                     Ok(d)
@@ -60,7 +75,8 @@ pub fn unpack_nso(path: &Path) -> Result<Unpacked> {
     let mut body = raw[0x100..first].to_vec();
     for (i, d) in datas.into_iter().enumerate() {
         let d = d.map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
-        hdr[0x10 + 0x10 * i..0x14 + 0x10 * i].copy_from_slice(&(0x100 + body.len() as u32).to_le_bytes());
+        hdr[0x10 + 0x10 * i..0x14 + 0x10 * i]
+            .copy_from_slice(&(0x100 + body.len() as u32).to_le_bytes());
         hdr[0x60 + 4 * i..0x64 + 4 * i].copy_from_slice(&(d.len() as u32).to_le_bytes());
         body.extend_from_slice(&d);
     }

@@ -17,16 +17,26 @@ pub fn isa() -> cranelift_codegen::isa::OwnedTargetIsa {
     f.set("opt_level", "speed").unwrap();
     f.set("is_pic", "false").unwrap();
     f.set("use_colocated_libcalls", "false").unwrap();
-    cranelift_native::builder().unwrap().finish(settings::Flags::new(f)).unwrap()
+    cranelift_native::builder()
+        .unwrap()
+        .finish(settings::Flags::new(f))
+        .unwrap()
 }
 
 /// Loads every register and flag from the context into the variables
 pub fn load_all(b: &mut FunctionBuilder, r: &Regs, c: Value) {
     for i in 0..31 {
-        let v = b.ins().load(types::I64, MemFlagsData::trusted(), c, ctx::X + 8 * i as i32);
+        let v = b.ins().load(
+            types::I64,
+            MemFlagsData::trusted(),
+            c,
+            ctx::X + 8 * i as i32,
+        );
         b.def_var(r.x[i], v);
     }
-    let v = b.ins().load(types::I64, MemFlagsData::trusted(), c, ctx::X + 8 * 31);
+    let v = b
+        .ins()
+        .load(types::I64, MemFlagsData::trusted(), c, ctx::X + 8 * 31);
     b.def_var(r.sp, v);
     for (var, off) in [(r.n, ctx::N), (r.z, ctx::Z), (r.c, ctx::C), (r.v, ctx::V)] {
         let v = b.ins().load(types::I8, MemFlagsData::trusted(), c, off);
@@ -38,10 +48,12 @@ pub fn load_all(b: &mut FunctionBuilder, r: &Regs, c: Value) {
 pub fn store_all(b: &mut FunctionBuilder, r: &Regs, c: Value) {
     for i in 0..31 {
         let v = b.use_var(r.x[i]);
-        b.ins().store(MemFlagsData::trusted(), v, c, ctx::X + 8 * i as i32);
+        b.ins()
+            .store(MemFlagsData::trusted(), v, c, ctx::X + 8 * i as i32);
     }
     let v = b.use_var(r.sp);
-    b.ins().store(MemFlagsData::trusted(), v, c, ctx::X + 8 * 31);
+    b.ins()
+        .store(MemFlagsData::trusted(), v, c, ctx::X + 8 * 31);
     for (var, off) in [(r.n, ctx::N), (r.z, ctx::Z), (r.c, ctx::C), (r.v, ctx::V)] {
         let v = b.use_var(var);
         b.ins().store(MemFlagsData::trusted(), v, c, off);
@@ -59,11 +71,23 @@ const REGS_SIZE: usize = 4 + 4 + 8 + 32 * 8 + 8 + 32 * 16;
 const CASE_SIZE: usize = REGS_SIZE + TEST_PAGE_SIZE;
 
 fn map_test_page() -> *mut u8 {
-    use windows_sys::Win32::System::Memory::{VirtualAlloc, MEM_COMMIT, MEM_RESERVE, PAGE_READWRITE};
+    use windows_sys::Win32::System::Memory::{
+        VirtualAlloc, MEM_COMMIT, MEM_RESERVE, PAGE_READWRITE,
+    };
     let want = (ctx::MEM_BASE as u64 + TEST_PAGE) as *const core::ffi::c_void;
     // SAFETY: a fresh reservation at a fixed address nothing else uses; checked below
-    let p = unsafe { VirtualAlloc(want, TEST_PAGE_SIZE, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE) } as *mut u8;
-    assert_eq!(p as usize, want as usize, "could not map the test page at the guest window");
+    let p = unsafe {
+        VirtualAlloc(
+            want,
+            TEST_PAGE_SIZE,
+            MEM_RESERVE | MEM_COMMIT,
+            PAGE_READWRITE,
+        )
+    } as *mut u8;
+    assert_eq!(
+        p as usize, want as usize,
+        "could not map the test page at the guest window"
+    );
     p
 }
 
@@ -90,7 +114,14 @@ pub fn difftest(input: &[u8]) -> anyhow::Result<(Vec<u8>, usize, usize)> {
             let c = b.block_params(entry)[0];
             let regs = Regs::declare(&mut b);
             load_all(&mut b, &regs, c);
-            let r = Em { b: &mut b, r: &regs, ctx: c, pc, m: &mut module }.emit(word);
+            let r = Em {
+                b: &mut b,
+                r: &regs,
+                ctx: c,
+                pc,
+                m: &mut module,
+            }
+            .emit(word);
             store_all(&mut b, &regs, c);
             b.ins().return_(&[]);
             b.finalize(module.isa().frontend_config());
@@ -121,7 +152,12 @@ pub fn difftest(input: &[u8]) -> anyhow::Result<(Vec<u8>, usize, usize)> {
         };
         let mut c = ctx::Ctx::default();
         let nzcv = u32::from_le_bytes(case[4..8].try_into().unwrap());
-        (c.n, c.z, c.c, c.v) = ((nzcv >> 31) as u8 & 1, (nzcv >> 30) as u8 & 1, (nzcv >> 29) as u8 & 1, (nzcv >> 28) as u8 & 1);
+        (c.n, c.z, c.c, c.v) = (
+            (nzcv >> 31) as u8 & 1,
+            (nzcv >> 30) as u8 & 1,
+            (nzcv >> 29) as u8 & 1,
+            (nzcv >> 28) as u8 & 1,
+        );
         for i in 0..32 {
             c.x[i] = u64::from_le_bytes(case[16 + 8 * i..24 + 8 * i].try_into().unwrap());
         }
@@ -136,12 +172,14 @@ pub fn difftest(input: &[u8]) -> anyhow::Result<(Vec<u8>, usize, usize)> {
             }
         }
         mem.copy_from_slice(&case[REGS_SIZE..]);
-        let f: extern "C" fn(*mut ctx::Ctx) = unsafe { std::mem::transmute(module.get_finalized_function(*id)) };
+        let f: extern "C" fn(*mut ctx::Ctx) =
+            unsafe { std::mem::transmute(module.get_finalized_function(*id)) };
         f(&mut c);
         run += 1;
         out.extend_from_slice(&0u32.to_le_bytes());
         out.extend_from_slice(&case[0..4]);
-        let nzcv = (c.n as u32) << 31 | (c.z as u32) << 30 | (c.c as u32) << 29 | (c.v as u32) << 28;
+        let nzcv =
+            (c.n as u32) << 31 | (c.z as u32) << 30 | (c.c as u32) << 29 | (c.v as u32) << 28;
         out.extend_from_slice(&nzcv.to_le_bytes());
         out.extend_from_slice(&case[8..16]);
         for x in c.x {
@@ -170,9 +208,16 @@ pub fn control_kind(w: u32) -> Option<&'static str> {
         "cbz"
     } else if w & 0x7E00_0000 == 0x3600_0000 {
         "tbz"
-    } else if w & 0xFFFF_FC1F == 0xD61F_0000 || w & 0xFFFF_FC1F == 0xD63F_0000 || w & 0xFFFF_FC1F == 0xD65F_0000 {
+    } else if w & 0xFFFF_FC1F == 0xD61F_0000
+        || w & 0xFFFF_FC1F == 0xD63F_0000
+        || w & 0xFFFF_FC1F == 0xD65F_0000
+    {
         "br/blr/ret"
-    } else if w == 0xD65F_0BFF || w == 0xD65F_0FFF || w & 0xFEFF_F800 == 0xD61F_0800 || w & 0xFEFF_F800 == 0xD63F_0800 {
+    } else if w == 0xD65F_0BFF
+        || w == 0xD65F_0FFF
+        || w & 0xFEFF_F800 == 0xD61F_0800
+        || w & 0xFEFF_F800 == 0xD63F_0800
+    {
         "pac branch" // RETAA/RETAB, BRAA*/BRAB*, BLRAA*/BLRAB* (nx2/insn.py classify_ext)
     } else if w & 0xFFE0_001F == 0xD400_0001 {
         "svc"
@@ -211,7 +256,14 @@ pub fn coverage(words: &[u32]) -> (u64, u64, Vec<(u32, u64)>, Vec<(u32, u64)>) {
         let c = b.block_params(entry)[0];
         let regs = Regs::declare(&mut b);
         load_all(&mut b, &regs, c);
-        let r = Em { b: &mut b, r: &regs, ctx: c, pc: 0x8000_0000, m: &mut a64::NoImports }.emit(w);
+        let r = Em {
+            b: &mut b,
+            r: &regs,
+            ctx: c,
+            pc: 0x8000_0000,
+            m: &mut a64::NoImports,
+        }
+        .emit(w);
         b.ins().return_(&[]);
         b.finalize(isa.frontend_config());
         if r.is_ok() {
@@ -239,7 +291,10 @@ fn helper_lookup() -> Box<dyn Fn(&str) -> Option<*const u8> + Send> {
         assert!(!h.is_null(), "could not load HSR_A64RT");
         h as usize
     });
-    let own: Vec<(&str, usize)> = rt::symbols().into_iter().map(|(n, p)| (n, p as usize)).collect();
+    let own: Vec<(&str, usize)> = rt::symbols()
+        .into_iter()
+        .map(|(n, p)| (n, p as usize))
+        .collect();
     Box::new(move |name| {
         if let Some(&(_, p)) = own.iter().find(|(n, _)| *n == name) {
             return Some(p as *const u8);

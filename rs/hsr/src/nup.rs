@@ -111,7 +111,8 @@ impl Reader {
 
 /// Writes the frame's content into `out`, at most `limit` bytes; the count written
 fn unzstd(src: impl Read, out: &mut impl Write, limit: u64) -> Result<u64> {
-    let mut d = ruzstd::decoding::StreamingDecoder::new(src).map_err(|e| anyhow::anyhow!("zstd: {e}"))?;
+    let mut d =
+        ruzstd::decoding::StreamingDecoder::new(src).map_err(|e| anyhow::anyhow!("zstd: {e}"))?;
     let mut buf = vec![0u8; CHUNK];
     let mut got = 0u64;
     loop {
@@ -176,7 +177,8 @@ impl Nup {
         let strings_at = 0x80 + soff;
         let mut meta = vec![0u8; strings_at + ssz];
         f.seek(SeekFrom::Start(0))?;
-        f.read_exact(&mut meta).context("reading the package's table of contents")?;
+        f.read_exact(&mut meta)
+            .context("reading the package's table of contents")?;
         let titles = (0..nt)
             .map(|i| {
                 let o = 0xb0 + 0x40 * i;
@@ -192,7 +194,12 @@ impl Nup {
         let dirs = (0..nd)
             .map(|i| {
                 let o = dirs_at + 24 * i;
-                Dir { name_off: u32_at(&meta, o), name_len: u32_at(&meta, o + 4), first: u32_at(&meta, o + 8), count: u32_at(&meta, o + 12) }
+                Dir {
+                    name_off: u32_at(&meta, o),
+                    name_len: u32_at(&meta, o + 4),
+                    first: u32_at(&meta, o + 8),
+                    count: u32_at(&meta, o + 12),
+                }
             })
             .collect();
         let files = (0..nf)
@@ -208,16 +215,29 @@ impl Nup {
                 }
             })
             .collect();
-        let kids = (0..(strings_at - kids_at) / 4).map(|i| u32_at(&meta, kids_at + 4 * i)).collect();
-        Ok(Nup { path: path.to_path_buf(), file_size, titles, dirs, files, kids, strings: meta[strings_at..].to_vec() })
+        let kids = (0..(strings_at - kids_at) / 4)
+            .map(|i| u32_at(&meta, kids_at + 4 * i))
+            .collect();
+        Ok(Nup {
+            path: path.to_path_buf(),
+            file_size,
+            titles,
+            dirs,
+            files,
+            kids,
+            strings: meta[strings_at..].to_vec(),
+        })
     }
 
     pub fn reader(&self) -> Result<Reader> {
-        Ok(Reader { f: File::open(&self.path)? })
+        Ok(Reader {
+            f: File::open(&self.path)?,
+        })
     }
 
     fn name(&self, off: u32, len: u32) -> Result<&str> {
-        std::str::from_utf8(&self.strings[off as usize..(off + len) as usize]).context("a name in the package is not UTF-8")
+        std::str::from_utf8(&self.strings[off as usize..(off + len) as usize])
+            .context("a name in the package is not UTF-8")
     }
 
     /// (relative path, entry) for every file under dir `d`
@@ -233,7 +253,11 @@ impl Nup {
             let k = k as usize;
             if k < self.dirs.len() {
                 let c = self.dirs[k];
-                self.walk_into(k as u32, format!("{prefix}{}/", self.name(c.name_off, c.name_len)?), out)?;
+                self.walk_into(
+                    k as u32,
+                    format!("{prefix}{}/", self.name(c.name_off, c.name_len)?),
+                    out,
+                )?;
             } else {
                 let e = self.files[k - self.dirs.len()];
                 out.push((format!("{prefix}{}", self.name(e.name_off, e.name_len)?), e));
@@ -245,11 +269,19 @@ impl Nup {
     /// The newest title (the update over the base), or the one named by index, version or title id
     pub fn pick_title(&self, want: Option<&str>) -> Result<Title> {
         match want {
-            None => Ok(*self.titles.iter().max_by_key(|t| t.version).context("the package has no titles")?),
+            None => Ok(*self
+                .titles
+                .iter()
+                .max_by_key(|t| t.version)
+                .context("the package has no titles")?),
             Some(w) => self
                 .titles
                 .iter()
-                .find(|t| t.index.to_string() == w || t.version.to_string() == w || format!("{:016x}", t.id) == w.to_lowercase())
+                .find(|t| {
+                    t.index.to_string() == w
+                        || t.version.to_string() == w
+                        || format!("{:016x}", t.id) == w.to_lowercase()
+                })
                 .copied()
                 .with_context(|| format!("no title {w}")),
         }
@@ -295,12 +327,25 @@ impl Nup {
     }
 
     /// The file, as itself, into `out` (nx2/nup.py Nup.copy_to)
-    pub fn copy_to(&self, r: &mut Reader, e: &Entry, name: &str, out: &mut impl Write) -> Result<()> {
+    pub fn copy_to(
+        &self,
+        r: &mut Reader,
+        e: &Entry,
+        name: &str,
+        out: &mut impl Write,
+    ) -> Result<()> {
         if self.is_packed(r, e, name)? {
-            let span = if e.codec == 1 { e.stored } else { e.size + (1 << 16) };
+            let span = if e.codec == 1 {
+                e.stored
+            } else {
+                e.size + (1 << 16)
+            };
             let got = unzstd(r.section(e.offset, span)?, out, e.size)?;
             if got != e.size {
-                bail!("{name}: a compressed file came out as {got} bytes, {} expected", e.size);
+                bail!(
+                    "{name}: a compressed file came out as {got} bytes, {} expected",
+                    e.size
+                );
             }
             return Ok(());
         }
@@ -333,7 +378,12 @@ const WINDOWS_DEVICES: [&str; 6] = ["CON", "CONIN$", "CONOUT$", "PRN", "AUX", "N
 /// device names (nx2/nup.py extraction_path)
 pub fn extraction_path(out: &Path, part: &str, rel: &str) -> Result<PathBuf> {
     let bad_part = |p: &str| {
-        let stem = p.split('.').next().unwrap_or("").trim_end_matches(' ').to_uppercase();
+        let stem = p
+            .split('.')
+            .next()
+            .unwrap_or("")
+            .trim_end_matches(' ')
+            .to_uppercase();
         p.is_empty()
             || p == "."
             || p == ".."
@@ -363,7 +413,13 @@ pub struct Extracted {
 
 /// Extracts the title's exefs and romfs (or one of them) under `out`, in parallel. A file already there at its size is
 /// kept (a re-run picks up where it stopped); each is written to <name>.part and renamed when complete.
-pub fn extract(nup: &Nup, t: &Title, out: &Path, only: Option<&str>, progress: impl Fn(u64, u64) + Sync) -> Result<Extracted> {
+pub fn extract(
+    nup: &Nup,
+    t: &Title,
+    out: &Path,
+    only: Option<&str>,
+    progress: impl Fn(u64, u64) + Sync,
+) -> Result<Extracted> {
     use rayon::prelude::*;
     let mut jobs = Vec::new();
     for (part, dir) in [("exefs", t.exefs), ("romfs", t.romfs)] {
@@ -388,7 +444,10 @@ pub fn extract(nup: &Nup, t: &Title, out: &Path, only: Option<&str>, progress: i
         || nup.reader(),
         |r, (dst, rel, e)| -> Result<()> {
             let r = r.as_mut().map_err(|e| anyhow::anyhow!("{e}"))?;
-            if fs::metadata(dst).map(|m| m.len() == e.size).unwrap_or(false) {
+            if fs::metadata(dst)
+                .map(|m| m.len() == e.size)
+                .unwrap_or(false)
+            {
                 skipped.fetch_add(1, Ordering::Relaxed);
                 return Ok(());
             }
@@ -396,8 +455,12 @@ pub fn extract(nup: &Nup, t: &Title, out: &Path, only: Option<&str>, progress: i
             tmp.push(".part");
             let tmp = PathBuf::from(tmp);
             {
-                let mut g = io::BufWriter::with_capacity(1 << 20, File::create(&tmp).with_context(|| format!("{}", tmp.display()))?);
-                nup.copy_to(r, e, rel, &mut g).with_context(|| rel.clone())?;
+                let mut g = io::BufWriter::with_capacity(
+                    1 << 20,
+                    File::create(&tmp).with_context(|| format!("{}", tmp.display()))?,
+                );
+                nup.copy_to(r, e, rel, &mut g)
+                    .with_context(|| rel.clone())?;
                 g.flush()?;
             }
             fs::rename(&tmp, dst).with_context(|| format!("{}", dst.display()))?;
@@ -409,5 +472,9 @@ pub fn extract(nup: &Nup, t: &Title, out: &Path, only: Option<&str>, progress: i
             Ok(())
         },
     )?;
-    Ok(Extracted { files: files.into_inner(), bytes: bytes.into_inner(), skipped: skipped.into_inner() })
+    Ok(Extracted {
+        files: files.into_inner(),
+        bytes: bytes.into_inner(),
+        skipped: skipped.into_inner(),
+    })
 }

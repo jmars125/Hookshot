@@ -39,7 +39,12 @@ fn subdivision(lo: usize, hi: usize, out: &mut Vec<(usize, usize, usize)>) {
 }
 
 /// Decodes one interpolative table at buf[pos..end]: (counts, accuracy log, bytes used)
-fn read_ncount_bic(buf: &[u8], pos: usize, end: usize, max_sv: usize) -> Result<(Vec<i32>, u32, usize)> {
+fn read_ncount_bic(
+    buf: &[u8],
+    pos: usize,
+    end: usize,
+    max_sv: usize,
+) -> Result<(Vec<i32>, u32, usize)> {
     if pos >= end {
         bail!("table description past the end of the block");
     }
@@ -151,7 +156,12 @@ impl Bits {
 
 /// Encodes a normalised distribution in the NCount format of RFC 8878 section 4.1.1
 fn write_ncount(counts: &[i32], log: u32) -> Result<Vec<u8>> {
-    let mut b = Bits { out: Vec::new(), acc: 0, n: 0, total: 0 };
+    let mut b = Bits {
+        out: Vec::new(),
+        acc: 0,
+        n: 0,
+        total: 0,
+    };
     b.put((log - 5) as u64, 4);
     let size = counts.len();
     let mut remaining: i64 = (1 << log) + 1;
@@ -222,7 +232,10 @@ fn literals(blk: &[u8]) -> Result<(Vec<u8>, usize)> {
         let (size, hl) = match fmt {
             0 | 2 => ((b0 >> 3) as usize, 1),
             1 => (((b0 >> 4) as usize) | ((blk[1] as usize) << 4), 2),
-            _ => (((b0 >> 4) as usize) | ((blk[1] as usize) << 4) | ((blk[2] as usize) << 12), 3),
+            _ => (
+                ((b0 >> 4) as usize) | ((blk[1] as usize) << 4) | ((blk[2] as usize) << 12),
+                3,
+            ),
         };
         let n = hl + if typ == 0 { size } else { 1 };
         return Ok((blk[..n].to_vec(), n));
@@ -285,7 +298,13 @@ fn sequences(blk: &[u8], pos: usize, out: &mut Vec<u8>) -> Result<()> {
         out.extend_from_slice(&blk[pos..]);
         return Ok(());
     }
-    let hl = if b0 < 128 { 1 } else if b0 < 255 { 2 } else { 3 };
+    let hl = if b0 < 128 {
+        1
+    } else if b0 < 255 {
+        2
+    } else {
+        3
+    };
     out.extend_from_slice(&blk[pos..pos + hl + 1]);
     let modes = blk[pos + hl];
     let mut p = pos + hl + 1;
@@ -326,7 +345,10 @@ pub fn to_zstd(data: &[u8]) -> Result<Vec<u8>> {
         let zbic = magic == ZBIC_MAGIC;
         let fhd = data[pos + 4];
         let single = (fhd >> 5) & 1 != 0;
-        let hsize = 5 + usize::from(!single) + [0, 1, 2, 4][(fhd & 3) as usize] + [usize::from(single), 2, 4, 8][(fhd >> 6) as usize];
+        let hsize = 5
+            + usize::from(!single)
+            + [0, 1, 2, 4][(fhd & 3) as usize]
+            + [usize::from(single), 2, 4, 8][(fhd >> 6) as usize];
         out.extend_from_slice(&ZSTD_MAGIC.to_le_bytes());
         out.extend_from_slice(&data[pos + 4..pos + hsize]);
         pos += hsize;
@@ -360,7 +382,11 @@ pub fn to_zstd(data: &[u8]) -> Result<Vec<u8>> {
                 _ => bail!("reserved block type"),
             };
             // a type-1 (RLE) block keeps its regenerated size; the others take their payload's
-            let size = if btype == 1 { bsize as u64 } else { payload.len() as u64 };
+            let size = if btype == 1 {
+                bsize as u64
+            } else {
+                payload.len() as u64
+            };
             out.extend_from_slice(&(last | btype << 1 | size << 3).to_le_bytes()[..3]);
             out.extend_from_slice(&payload);
             if last != 0 {
@@ -381,7 +407,8 @@ pub fn decompress(data: &[u8], size: usize) -> Result<Vec<u8>> {
     let mut out = Vec::with_capacity(size);
     let mut src = &std[..];
     while !src.is_empty() {
-        let mut d = ruzstd::decoding::StreamingDecoder::new(&mut src).map_err(|e| anyhow!("zstd: {e}"))?;
+        let mut d =
+            ruzstd::decoding::StreamingDecoder::new(&mut src).map_err(|e| anyhow!("zstd: {e}"))?;
         d.read_to_end(&mut out).map_err(|e| anyhow!("zstd: {e}"))?;
     }
     if out.len() != size {

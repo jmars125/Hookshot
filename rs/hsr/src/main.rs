@@ -39,17 +39,32 @@ fn cmd_nup(args: &[String]) -> Result<()> {
     }
     let t0 = Instant::now();
     let nup = nup::Nup::open(&path)?;
-    let name = path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-    println!("{}: {:.2} GB, {} titles, {} files", name, nup.file_size as f64 / 1e9, nup.titles.len(), nup.files.len());
+    let name = path
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    println!(
+        "{}: {:.2} GB, {} titles, {} files",
+        name,
+        nup.file_size as f64 / 1e9,
+        nup.titles.len(),
+        nup.files.len()
+    );
     if let Some((what, out)) = cat {
         let t = nup.pick_title(title.as_deref())?;
-        let (part, rel) = what.split_once('/').context("--cat wants exefs/<path> or romfs/<path>")?;
+        let (part, rel) = what
+            .split_once('/')
+            .context("--cat wants exefs/<path> or romfs/<path>")?;
         let dir = match part {
             "exefs" => t.exefs,
             "romfs" => t.romfs,
             _ => bail!("--cat wants exefs/<path> or romfs/<path>"),
         };
-        let (_, e) = nup.walk(dir)?.into_iter().find(|(p, _)| p == rel).with_context(|| format!("no {what} in title {}", t.index))?;
+        let (_, e) = nup
+            .walk(dir)?
+            .into_iter()
+            .find(|(p, _)| p == rel)
+            .with_context(|| format!("no {what} in title {}", t.index))?;
         let mut r = nup.reader()?;
         std::fs::write(&out, nup.read(&mut r, &e, rel)?)?;
         return Ok(());
@@ -74,7 +89,12 @@ fn cmd_nup(args: &[String]) -> Result<()> {
     }
     let out = extract.unwrap();
     let t = nup.pick_title(title.as_deref())?;
-    println!("extracting title {} (v{}) to {}", t.index, t.version, out.display());
+    println!(
+        "extracting title {} (v{}) to {}",
+        t.index,
+        t.version,
+        out.display()
+    );
     let r = nup::extract(&nup, &t, Path::new(&out), only.as_deref(), |n, b| {
         println!("  {n} files, {:.1} GB", b as f64 / 1e9);
     })?;
@@ -99,11 +119,14 @@ fn cmd_unpack(exefs: &str) -> Result<()> {
         let p = Path::new(exefs).join(n);
         if p.exists() {
             let r = nso::unpack_nso(&p)?;
-            println!("{n:<8} {}", match r {
-                nso::Unpacked::NotNso => "not an NSO",
-                nso::Unpacked::Kept => "not ZBIC, kept",
-                nso::Unpacked::Plain => "ZBIC -> plain",
-            });
+            println!(
+                "{n:<8} {}",
+                match r {
+                    nso::Unpacked::NotNso => "not an NSO",
+                    nso::Unpacked::Kept => "not ZBIC, kept",
+                    nso::Unpacked::Plain => "ZBIC -> plain",
+                }
+            );
         }
     }
     Ok(())
@@ -115,7 +138,10 @@ fn cmd_difftest(args: &[String]) -> Result<()> {
     let t0 = Instant::now();
     let (out, run, skipped) = lift::difftest(&std::fs::read(input)?)?;
     std::fs::write(output, out)?;
-    println!("{run} cases run, {skipped} not translated, {:.2} s", t0.elapsed().as_secs_f64());
+    println!(
+        "{run} cases run, {skipped} not translated, {:.2} s",
+        t0.elapsed().as_secs_f64()
+    );
     Ok(())
 }
 
@@ -123,15 +149,25 @@ fn cmd_difftest(args: &[String]) -> Result<()> {
 fn cmd_cover(args: &[String]) -> Result<()> {
     let [path] = args else { usage() };
     let raw = std::fs::read(path)?;
-    let words: Vec<u32> = raw.chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
+    let words: Vec<u32> = raw
+        .chunks_exact(4)
+        .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+        .collect();
     let t0 = Instant::now();
     let (ok, bad, by, missing) = lift::coverage(&words);
-    let control = words.iter().filter(|&&w| lift::control_kind(w).is_some()).count();
+    let control = words
+        .iter()
+        .filter(|&&w| lift::control_kind(w).is_some())
+        .count();
     println!("{} words: {control} control flow, {ok} translated, {bad} not ({:.1}% of the rest), {:.1} s",
              words.len(), 100.0 * ok as f64 / (ok + bad).max(1) as f64, t0.elapsed().as_secs_f64());
     for (top, n) in by.iter().take(25) {
-        let eg: Vec<String> =
-            missing.iter().filter(|(w, _)| w >> 21 == *top).take(5).map(|(w, n)| format!("{w:08x}x{n}")).collect();
+        let eg: Vec<String> = missing
+            .iter()
+            .filter(|(w, _)| w >> 21 == *top)
+            .take(5)
+            .map(|(w, n)| format!("{w:08x}x{n}"))
+            .collect();
         println!("  {:03x}xxxxx  {n:7}  {}", top << 1, eg.join(" "));
     }
     Ok(())

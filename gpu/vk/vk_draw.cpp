@@ -1059,6 +1059,25 @@ VkPipeline build_graphics(const Program& p, const NvnState& s, const Targets& at
         // (-13 here) or takes minutes on some Ocarina shaders it builds in seconds unoptimized (Lichii #200, #210).
         static const bool noopt = getenv("RX_VK_NOOPT") != nullptr;
         if (noopt) ci.flags |= VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT;
+        // (from PR 430, YunaraDebugs: on AMD the task and mesh programs (OoT's foliage culling, following pointers through its
+        // tables) hung the GPU when the driver's optimizer built them: a device lost one to four minutes into Kokiri, each time with
+        // another of them first (RX 6600, issues 461 and 484); never in runs where they were built without it. They are built
+        // without it on AMD. RX_VK_MESH_OPT=1: with it, as the others)
+        static const bool amd = [] {
+            VkPhysicalDeviceProperties pr{};
+            vkGetPhysicalDeviceProperties(dev.physical, &pr);
+            return pr.vendorID == 0x1002;
+        }();
+        static const bool mesh_opt = getenv("RX_VK_MESH_OPT") != nullptr;
+        if (amd && !mesh_opt) {
+            bool mesh = false;
+            for (const Stage& st : p.stages) mesh |= (st.vk_stage & (VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_MESH_BIT_EXT)) != 0;
+            if (mesh) {
+                ci.flags |= VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT;
+                static std::atomic<int> told{0};
+                if (told++ < 1) logf("vk: task and mesh programs built without the driver's optimizer (AMD; RX_VK_MESH_OPT=1: with it)");
+            }
+        }
     }
     const VkResult r = guarded_graphics(part >= 0 ? VK_NULL_HANDLE : pcache, &ci, &pl);
     if (part >= 0) {

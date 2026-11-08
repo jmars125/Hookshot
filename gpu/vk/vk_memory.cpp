@@ -1685,6 +1685,51 @@ void mirror_sync(Pool& p) {
 
 } // namespace
 
+// ---- (from PR 430, YunaraDebugs) Readback pages: GPU results the CPU reads (invalidate) and then writes, as OoT's exposure meter (a
+// sum the GPU adds into each frame; the CPU reads it and stores 0 back). On the console the GPU adds into that memory as it is when
+// its work runs, the CPU's 0 included. Here it adds into the pool's mirror, which takes the CPU's 0 only at a mirror sync of a submit
+// made after it: one made just before (the game's threads overlap) added onto the old sum, the CPU read 2x the next frame and 0 the
+// one after, and the exposure stepped (the light dimming or flaring for a frame in Kokiri). So each submission first copies those
+// pages from guest memory into the mirror, on the GPU as its work starts, last of the uploads: what the CPU wrote by then is what the
+// GPU adds to. RX_VK_NO_RB_REFRESH=1: off ----
+namespace {
+std::unordered_map<uint32_t, uint64_t> rb_pages;   // (guest page -> mirror_epoch it was last read at)
+std::atomic<int64_t> st_rb_refresh{0};
+}
+void memory_note_readback(uint64_t guest, uint64_t size) {
+    static const bool off = getenv("RX_VK_NO_RB_REFRESH") != nullptr;
+    if (off || !size || size > 0x4000) return;   // (small results only: meters and counters)
+    std::lock_guard lk(pools_mu);
+    for (uint64_t pg = guest >> kPageShift; pg <= (guest + size - 1) >> kPageShift; pg++) rb_pages[(uint32_t)pg] = mirror_epoch;
+}
+/// Records the refresh copies into the submission's upload command buffer; true when it recorded any
+bool memory_rb_refresh(VkCommandBuffer up) {
+    std::lock_guard lk(pools_mu);
+    if (rb_pages.empty() || !up) return false;
+    std::map<Pool*, std::vector<VkBufferCopy>> by_pool;
+    for (auto it = rb_pages.begin(); it != rb_pages.end();) {
+        if (it->second + 600 < mirror_epoch) { it = rb_pages.erase(it); continue; }   // (not read for a while)
+        const uint64_t g = (uint64_t)it->first << kPageShift;
+        ++it;
+        auto pit = imported.upper_bound(g);
+        if (pit == imported.begin()) continue;
+        --pit;
+        Pool& p = pit->second;
+        if (g < p.lo || g >= p.hi || p.mstate != Pool::MIRROR_ON || !p.mirror) continue;
+        const uint64_t a = g - p.lo, b = std::min(g + 4096, p.hi) - p.lo;
+        by_pool[&p].push_back({a, a, b - a});
+    }
+    if (by_pool.empty()) return false;
+    full_barrier(up);   // (after the older submissions' write-backs into guest memory and this one's other uploads)
+    for (auto& [pp, rs] : by_pool) {
+        vkCmdCopyBuffer(up, pp->buffer, pp->mirror, (uint32_t)rs.size(), rs.data());
+        st_rb_refresh += (int64_t)rs.size();
+    }
+    static std::atomic<int64_t> n{0};
+    if (++n % 3000 == 1) logf("vk: readback pages refreshed from guest memory: %lld pages so far", (long long)st_rb_refresh.load());
+    return true;
+}
+
 BufferRef gpu_buffer(uint64_t gpu, uint64_t size) {
     uint64_t avail = 0;
     if (!host->gpu_ptr(gpu, &avail) || avail < size) return {};

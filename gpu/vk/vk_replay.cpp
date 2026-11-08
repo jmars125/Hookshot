@@ -1947,6 +1947,7 @@ void invalidate(uint64_t gpu, uint64_t size) {
         static const bool off = getenv("RX_VK_NO_READBACK_WAIT") != nullptr;
         bool ever = false;
         if (!off && (memory_writeback_value(host->gpu_guest(gpu), size, &ever), ever)) {
+            memory_note_readback(host->gpu_guest(gpu), size);   // (PR 430: the CPU may write it back: memory_rb_refresh)
             static std::atomic<int64_t> calls{0}, waited{0}, ns{0};
             const auto w0 = std::chrono::steady_clock::now();
             bool w = false;

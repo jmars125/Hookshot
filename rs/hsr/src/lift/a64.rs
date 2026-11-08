@@ -30,6 +30,9 @@ pub struct Regs {
     pub z: Variable,
     pub c: Variable,
     pub v: Variable,
+    /// Which variables the lifted code has written: bit n for Xn, 31 for SP, 32 for the flags (func.rs stores only
+    /// these back to the context)
+    pub dirty: std::cell::Cell<u64>,
 }
 
 impl Regs {
@@ -37,7 +40,15 @@ impl Regs {
         let x = std::array::from_fn(|_| b.declare_var(types::I64));
         let sp = b.declare_var(types::I64);
         let [n, z, c, v] = std::array::from_fn(|_| b.declare_var(types::I8));
-        Regs { x, sp, n, z, c, v }
+        Regs {
+            x,
+            sp,
+            n,
+            z,
+            c,
+            v,
+            dirty: Default::default(),
+        }
     }
 }
 
@@ -78,6 +89,8 @@ pub struct Em<'a, 'b> {
     pub ctx: Value,
     pub pc: u64,
     pub m: &'a mut dyn Imports,
+    /// The host calling convention of the runtime helpers (the function being built may use another)
+    pub cc: cranelift_codegen::isa::CallConv,
 }
 
 fn bits(w: u32, hi: u32, lo: u32) -> u32 {
@@ -215,18 +228,25 @@ impl Em<'_, '_> {
             return;
         }
         let v = self.widen(v);
+        self.mark(r);
         self.b.def_var(self.r.x[r as usize], v);
     }
     /// Writes Xd (a W value is zero-extended); register 31 = SP
     pub fn setsp(&mut self, r: u32, v: Value) {
         let v = self.widen(v);
+        self.mark(r);
         if r == 31 {
             self.b.def_var(self.r.sp, v);
         } else {
             self.b.def_var(self.r.x[r as usize], v);
         }
     }
+    /// Records a write of register variable `bit` (Regs::dirty)
+    pub(crate) fn mark(&self, bit: u32) {
+        self.r.dirty.set(self.r.dirty.get() | 1 << bit);
+    }
     fn set_flags(&mut self, n: Value, z: Value, c: Value, v: Value) {
+        self.mark(32);
         self.b.def_var(self.r.n, n);
         self.b.def_var(self.r.z, z);
         self.b.def_var(self.r.c, c);
@@ -658,6 +678,7 @@ impl Em<'_, '_> {
                     .ins()
                     .iconst(types::I8, ((nzcv >> (3 - i)) & 1) as i64);
                 let v = self.b.ins().select(holds, f[i as usize], imm);
+                self.mark(32);
                 self.b.def_var(vars[i as usize], v);
             }
             return Ok(());
@@ -1228,6 +1249,7 @@ impl Em<'_, '_> {
                         let f = self.b.ins().ushr_imm_u(v, 31 - i as i64);
                         let f = self.b.ins().band_imm_u(f, 1);
                         let f = self.b.ins().ireduce(types::I8, f);
+                        self.mark(32);
                         self.b.def_var(var, f);
                     }
                 }

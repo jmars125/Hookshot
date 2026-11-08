@@ -3,6 +3,8 @@
 
 pub mod a64;
 pub mod ctx;
+pub mod fntest;
+pub mod func;
 pub mod rt;
 
 use a64::{Em, Regs, Unsupported};
@@ -17,6 +19,8 @@ pub fn isa() -> cranelift_codegen::isa::OwnedTargetIsa {
     f.set("opt_level", "speed").unwrap();
     f.set("is_pic", "false").unwrap();
     f.set("use_colocated_libcalls", "false").unwrap();
+    // (Cranelift implements return_call, the guest tail calls of func.rs, only with frame pointers)
+    f.set("preserve_frame_pointers", "true").unwrap();
     cranelift_native::builder()
         .unwrap()
         .finish(settings::Flags::new(f))
@@ -64,13 +68,13 @@ pub fn store_all(b: &mut FunctionBuilder, r: &Regs, c: Value) {
 
 /// The guest page the test cases address (rs/tests/difftest.py PAGE)
 pub const TEST_PAGE: u64 = 0x10000;
-const TEST_PAGE_SIZE: usize = 0x1000;
+pub(crate) const TEST_PAGE_SIZE: usize = 0x1000;
 /// One case: u32 word, u32 nzcv (bits 31:28), u64 pc, 32 x u64 (x31 = SP), u32 fpcr, u32 fpsr, 32 x 16-byte V
 /// registers, the page
-const REGS_SIZE: usize = 4 + 4 + 8 + 32 * 8 + 8 + 32 * 16;
+pub(crate) const REGS_SIZE: usize = 4 + 4 + 8 + 32 * 8 + 8 + 32 * 16;
 const CASE_SIZE: usize = REGS_SIZE + TEST_PAGE_SIZE;
 
-fn map_test_page() -> *mut u8 {
+pub(crate) fn map_test_page() -> *mut u8 {
     use windows_sys::Win32::System::Memory::{
         VirtualAlloc, MEM_COMMIT, MEM_RESERVE, PAGE_READWRITE,
     };
@@ -98,6 +102,7 @@ pub fn difftest(input: &[u8]) -> anyhow::Result<(Vec<u8>, usize, usize)> {
     let mut jb = JITBuilder::with_isa(isa(), default_libcall_names());
     jb.symbol_lookup_fn(helper_lookup());
     let mut module = JITModule::new(jb);
+    let cc = module.isa().default_call_conv();
     let mut cx = module.make_context();
     let mut fbc = FunctionBuilderContext::new();
     let mut ids = Vec::with_capacity(cases.len());
@@ -120,6 +125,7 @@ pub fn difftest(input: &[u8]) -> anyhow::Result<(Vec<u8>, usize, usize)> {
                 ctx: c,
                 pc,
                 m: &mut module,
+                cc,
             }
             .emit(word);
             store_all(&mut b, &regs, c);
@@ -262,6 +268,7 @@ pub fn coverage(words: &[u32]) -> (u64, u64, Vec<(u32, u64)>, Vec<(u32, u64)>) {
             ctx: c,
             pc: 0x8000_0000,
             m: &mut a64::NoImports,
+            cc: isa.default_call_conv(),
         }
         .emit(w);
         b.ins().return_(&[]);
@@ -282,7 +289,7 @@ pub fn coverage(words: &[u32]) -> (u64, u64, Vec<(u32, u64)>, Vec<(u32, u64)>) {
 
 /// Resolves the helpers lifted code calls: rt.rs's, then the C runtime's exact FP bodies from the DLL named by
 /// HSR_A64RT (a64_suyu.c built with `-shared -Wl,--export-all-symbols`), when set
-fn helper_lookup() -> Box<dyn Fn(&str) -> Option<*const u8> + Send> {
+pub(crate) fn helper_lookup() -> Box<dyn Fn(&str) -> Option<*const u8> + Send> {
     use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryA};
     let dll = std::env::var("HSR_A64RT").ok().map(|p| {
         let p = std::ffi::CString::new(p).unwrap();
@@ -293,6 +300,7 @@ fn helper_lookup() -> Box<dyn Fn(&str) -> Option<*const u8> + Send> {
     });
     let own: Vec<(&str, usize)> = rt::symbols()
         .into_iter()
+        .chain(fntest::test_symbols())
         .map(|(n, p)| (n, p as usize))
         .collect();
     Box::new(move |name| {

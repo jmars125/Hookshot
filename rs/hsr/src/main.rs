@@ -145,6 +145,19 @@ fn cmd_difftest(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// Runs rs/tests/difftest_fn.py's programs through the function builder
+fn cmd_difftest_fn(args: &[String]) -> Result<()> {
+    let [input, output] = args else { usage() };
+    let t0 = Instant::now();
+    let (out, ran, untr, trapped) = lift::fntest::difftest_fn(&std::fs::read(input)?)?;
+    std::fs::write(output, out)?;
+    println!(
+        "{ran} programs run, {untr} not translated, {trapped} trapped, {:.2} s",
+        t0.elapsed().as_secs_f64()
+    );
+    Ok(())
+}
+
 /// How much of a code dump (raw little-endian words) the Rust translation covers
 fn cmd_cover(args: &[String]) -> Result<()> {
     let [path] = args else { usage() };
@@ -179,6 +192,7 @@ fn main() {
         Some("nup") => cmd_nup(&args[1..]),
         Some("cover") => cmd_cover(&args[1..]),
         Some("difftest") => cmd_difftest(&args[1..]),
+        Some("difftest-fn") => cmd_difftest_fn(&args[1..]),
         Some("unpack") => cmd_unpack(args.get(1).map(String::as_str).unwrap_or_else(|| usage())),
         _ => usage(),
     };

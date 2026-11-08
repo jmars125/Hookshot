@@ -153,7 +153,7 @@ impl Em<'_, '_> {
 
     /// Calls a C helper by name: (ctx, args...) -> u64
     pub(super) fn call_c(&mut self, name: &str, args: &[Value]) -> Value {
-        let mut sig = Signature::new(self.b.func.signature.call_conv);
+        let mut sig = Signature::new(self.cc);
         sig.params.push(AbiParam::new(types::I64));
         for _ in args {
             sig.params.push(AbiParam::new(types::I64));
@@ -301,6 +301,7 @@ impl Em<'_, '_> {
         let lt = self.b.ins().fcmp(FloatCC::LessThan, fa, fb);
         // N = lt, Z = eq, C = !lt (or unordered), V = unordered
         let nlt = self.b.ins().bxor_imm_u(lt, 1);
+        self.mark(32);
         self.b.def_var(self.r.n, lt);
         self.b.def_var(self.r.z, eq);
         self.b.def_var(self.r.c, nlt);

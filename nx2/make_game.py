@@ -21,6 +21,7 @@ import re
 import shutil
 import stat
 import subprocess
+import time
 import sys
 import tempfile
 
@@ -414,6 +415,50 @@ def check_windows_sdk():
     fail("The compiler could not run a test build: %s" % why)
 
 
+def stop_stray_compilers(work, default_work):
+    """(issues 501, 530) A build left running by an earlier one on this work folder (the builder closed, crashed, or replaced by an
+    update mid-build) keeps its files open: the next build stopped at once with 'OSError: [Errno 22]' writing sa/gen/a64_fpx.h, or
+    WinError 1224 on the play profile. Only that build goes: an earlier make_game on this work folder, the build and lift steps
+    whose make_game is gone, and compilers whose command line names this work folder. Never this build or what started it."""
+    if LINUX:
+        return
+    ps = ("Get-CimInstance Win32_Process | Where-Object { $_.Name -like 'clang*' -or $_.Name -like 'ld.lld*' -or $_.Name -like 'python*' } "
+          "| Select-Object ProcessId,ParentProcessId,Name,CommandLine | ConvertTo-Json -Compress")
+    try:
+        import json
+        r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps], capture_output=True, text=True, timeout=90)
+        procs = json.loads(r.stdout or "[]")
+        if isinstance(procs, dict):
+            procs = [procs]
+        alive = {q["ProcessId"]: q for q in procs}
+        mine, pid = set(), os.getpid()        # (this process and the chain that started it)
+        while pid in alive and pid not in mine:
+            mine.add(pid)
+            pid = alive[pid]["ParentProcessId"]
+        mine.add(pid)
+        w = os.path.normcase(os.path.abspath(work))
+        names = lambda c: os.path.normcase((c or "").replace("/", "\\"))
+        doomed = {}
+        for q in procs:
+            c, n = names(q.get("CommandLine")), q["Name"].lower()
+            if q["ProcessId"] in mine:
+                continue
+            if "make_game.py" in c and (w in c or ("--work" not in c and w == os.path.normcase(default_work))):
+                doomed[q["ProcessId"]] = n
+            elif ("build.py" in c or "lift.py" in c) and "--standalone" in c and q["ParentProcessId"] not in alive:
+                doomed[q["ProcessId"]] = n           # (its make_game is gone)
+            elif not n.startswith("python") and w in c:
+                doomed[q["ProcessId"]] = n
+        for k in doomed:
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(k)], capture_output=True, timeout=60)
+        if doomed:
+            print("stopped %d process(es) an earlier build left running on this work folder: %s"
+                  % (len(doomed), " ".join(sorted(set(doomed.values())))), flush=True)
+            time.sleep(2)
+    except Exception as e:   # (not finding them is no reason to stop)
+        print("could not look for an earlier build's processes: %s" % e, flush=True)
+
+
 def drop_stale_objects(work):
     """(issue 231) Objects compiled against other system headers are not reused. A first build that compiled with an old Visual Studio's
     stdio.h (before 2015) left its objects in the cache; once the PC was fixed every later build reused them and the link failed on
@@ -556,6 +601,7 @@ def main():
     # compiler is still said before the long compile, not after the package has been read
     if not LINUX:
         check_windows_sdk()
+    stop_stray_compilers(work, p.get_default("work"))
     drop_stale_objects(work)
     exefs = os.path.join(work, "exefs")
     romfs = os.path.join(out, "romfs")

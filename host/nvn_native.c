@@ -464,8 +464,19 @@ NV(nvnSamplerPoolSetDebugLabel) {}
 NV(nvnSamplerPoolRegisterSampler) { rx_nvn_register_sampler(I(1), &((const nvn_samp *)P(2))->p); }
 
 /* ---- textures ---- */
-#define TB(p) ((nvn_tex_builder *)(p))
-#define CTB(p) ((const nvn_tex_builder *)(p))
+/* (hookshot) A texture builder of no address: a scratch one instead, said once. The game passed 0 after a long freeze (the
+   ocarina note sheet's first build, combat in Hyrule Field) and nvnTextureBuilderSetSwizzle read A64_MEM + 0x5c (issue 500);
+   a builder set up wrongly is a missing texture, not a crash. As PR 510 for memory pools. */
+static nvn_tex_builder *tb_or_scratch(void *p, uint64_t lr) {
+    static nvn_tex_builder scratch;
+    if (p) return (nvn_tex_builder *)p;
+    static volatile LONG told;
+    if (InterlockedIncrement(&told) <= 4) hos_log("nvn: a texture builder of no address (lr %#llx): a scratch one", (unsigned long long)lr);
+    memset(&scratch, 0, sizeof scratch);
+    return &scratch;
+}
+#define TB(p) tb_or_scratch((p), c->x[30])
+#define CTB(p) ((const nvn_tex_builder *)tb_or_scratch((p), c->x[30]))
 #define TX(p) ((nvn_tex *)(p))
 #define CTX(p) ((const nvn_tex *)(p))
 NV(nvnTextureBuilderSetDefaults) {

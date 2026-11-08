@@ -51,10 +51,58 @@ const char* tx_resolution(int v) {
     return t[v];
 }
 const char* tx_speed(int v) { return v ? "Real time" : "Per frame"; }
+const char* tx_text_speed(int v) {
+    static const char* t[] = {"Normal", "2x", "4x", "Instant"};
+    if ((unsigned)v >= sizeof t / sizeof t[0]) return t[0];
+    return t[v];
+}
 const char* tx_handheld(int v) { return v ? "On (restart)" : "Off (restart)"; }
 const char* tx_ultrawide(int v) { return v ? "Monitor's shape (restart)" : "16:9 (restart)"; }
+const char* tx_preset(int v) {
+    static const char* t[] = {"Custom", "Minimum (4GB)", "Low (6GB)", "Balanced (8GB)", "High (12GB)", "Ultra (16GB+)"};
+    return t[std::min(std::max(v, 0), 5)];
+}
+void sync_preset_budgets(int p) {
+    switch (p) {
+    case 1: opts.vram_mb = 2200;  opts.mirror_mb = 256;  break;
+    case 2: opts.vram_mb = 3600;  opts.mirror_mb = 512;  break;
+    case 3: opts.vram_mb = 4800;  opts.mirror_mb = 1024; break;
+    case 4: opts.vram_mb = 7500;  opts.mirror_mb = 2048; break;
+    case 5: opts.vram_mb = 11000; opts.mirror_mb = 3072; break;
+    default: opts.vram_mb = 0;    opts.mirror_mb = 0;    break;
+    }
+}
+void apply_preset(int p) {
+    switch (p) {
+    case 1: // Minimum (4GB VRAM / iGPU)
+        opts.resolution = 4; opts.upscale = 2; opts.sharpness = 50;
+        opts.framegen = 2;   opts.pace = 1;    opts.realtime = 1; opts.handheld = 1;
+        break;
+    case 2: // Low (6GB VRAM)
+        opts.resolution = 2; opts.upscale = 2; opts.sharpness = 35;
+        opts.framegen = 2;   opts.pace = 1;    opts.realtime = 1; opts.handheld = 1;
+        break;
+    case 3: // Balanced (8GB VRAM)
+        opts.resolution = 1; opts.upscale = 1; opts.sharpness = 25;
+        opts.framegen = 2;   opts.pace = 1;    opts.realtime = 1; opts.handheld = 0;
+        break;
+    case 4: // High (12GB VRAM)
+        opts.resolution = 1; opts.upscale = 2; opts.sharpness = 30;
+        opts.framegen = 2;   opts.pace = 1;    opts.realtime = 1; opts.handheld = 0;
+        break;
+    case 5: // Ultra (16GB+ VRAM)
+        opts.resolution = 1; opts.upscale = 2; opts.sharpness = 40;
+        opts.framegen = 3;   opts.pace = 1;    opts.realtime = 1; opts.handheld = 0;
+        break;
+    default:
+        break;
+    }
+    sync_preset_budgets(p);
+}
 
 Row rows[] = {
+    {"Quality preset", &opts.preset, 0, 5, 1, tx_preset,
+     "Automatically configures resolution, upscaling, frame generation, and dynamic VRAM limits tailored to your GPU tier."},
     {"Fullscreen", &opts.fullscreen, 0, 1, 1, tx_onoff,
      "Fills the whole screen with the game, without the window's border. The same as F11."},
     {"Frame generation", &opts.framegen, 0, 8, 1, tx_framegen,
@@ -81,6 +129,10 @@ Row rows[] = {
     {"Controller in background", &opts.pad_background, 0, 1, 1, tx_onoff,
      "On: the controller keeps playing the game while another window has the focus, for streaming or playing beside other "
      "apps. The keyboard and mouse still need the game's window."},
+    {"Text speed", &opts.text_speed, 0, 3, 1, tx_text_speed,
+     "How fast the letters of dialogue and other messages appear. Normal is the game's own pace, with its pauses. Instant shows "
+     "each page at once, as pressing A does."},
+
     {"Controls", nullptr, 0, 0, 0, nullptr,   // (hookshot: opens its page)
      "Which gamepad button and which keys press each of the Switch's buttons."},
 };
@@ -527,6 +579,7 @@ void menu_init() {
         // reported. An options file from before kept the old default whether chosen or not: Real time for it too)
         if (!v2) opts.realtime = 1;
     }
+    if (opts.preset > 0) sync_preset_budgets(opts.preset);
     if (opts.framegen == 1) opts.framegen = 2;
     if (const char* e = getenv("RX_VK_FRAMEGEN_MULT")) opts.framegen = std::min(std::max(atoi(e), 2), 8);
     if (const char* e = getenv("RX_VK_PACE")) opts.pace = atoi(e) != 0;
@@ -677,6 +730,12 @@ void menu_tick() {
             int v = *r.value + (press[4] ? r.step : -r.step);
             if (r.value == &opts.framegen && v == 1) v = press[4] ? 2 : 0;   // (off, 2x ... 8x)
             *r.value = v > r.hi ? r.lo : v < r.lo ? r.hi : v;
+            if (r.value == &opts.preset) {
+                apply_preset(*r.value);
+            } else if (r.value != &opts.fullscreen && r.value != &opts.show_fps) {
+                opts.preset = 0; // Custom
+                sync_preset_budgets(0);
+            }
             changed = true;
             save();
         }

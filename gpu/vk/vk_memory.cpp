@@ -1708,9 +1708,30 @@ uint64_t gpu_pool_start(uint64_t gpu) {   // (EvilOOT) where it begins
     return p ? p->lo : 0;
 }
 
+// (pools leaving, a mirror made, or the next submission: a remembered read binding is looked up again)
 uint64_t gpu_bind_stamp() {
     return pools_gen.load(std::memory_order_relaxed) ^ (mirror_epoch * 0x9E3779B97F4A7C15ull);
 }
+
+uint32_t bind_slot(uint64_t guest, uint64_t size) {
+    // (a page-aligned range's low bits are zero: fold the rest in, or every one of them lands in one slot)
+    uint64_t h = guest ^ (size * 0x9E3779B97F4A7C15ull);
+    h *= 0x9E3779B97F4A7C15ull;
+    h ^= h >> 32;
+    h ^= h >> 16;
+    return (uint32_t)(h & 255u);
+}
+
+bool bind_memo_hit(uint64_t guest, uint64_t size, uint64_t stamp, uint64_t cached_guest, uint64_t cached_size,
+                   uint64_t cached_stamp, int has_buffer) {
+    return has_buffer && size && guest == cached_guest && size == cached_size && stamp == cached_stamp;
+}
+
+struct BindMemo {
+    uint64_t guest = 0, size = 0, stamp = 0;
+    BufferRef ref{};
+};
+thread_local BindMemo bind_memo[256];
 
 BufferRef gpu_buffer_bind(uint64_t gpu, uint64_t size, bool written) {
     if (written) texture_gpu_wrote(gpu, size);
@@ -1721,6 +1742,18 @@ BufferRef gpu_buffer_bind(uint64_t gpu, uint64_t size, bool written) {
         uint64_t avail = 0;
         if (!host->gpu_ptr(gpu, &avail) || avail < size) return {};
         guest = host->gpu_guest(gpu);
+    }
+    // (the same read, while that stamp still stands: the buffer and the offset are the ones found before. a miss
+    // runs the lookup below, including a mirror sync, and remembers what it returned. a write is not remembered)
+    auto remember = [&](BufferRef ref) {
+        if (!written && ref.buffer != VK_NULL_HANDLE && size)
+            bind_memo[bind_slot(guest, size)] = BindMemo{guest, size, gpu_bind_stamp(), ref};
+        return ref;
+    };
+    if (!written) {
+        const BindMemo& m = bind_memo[bind_slot(guest, size)];
+        if (bind_memo_hit(guest, size, gpu_bind_stamp(), m.guest, m.size, m.stamp, m.ref.buffer != VK_NULL_HANDLE))
+            return m.ref;
     }
     // (a read binding of a pool this thread found before and whose mirror is in use this submission or that has none,
     // without the lock: every thread's, the replay thread's too (each draw binds several uniform buffers: the pool's
@@ -1733,9 +1766,9 @@ BufferRef gpu_buffer_bind(uint64_t gpu, uint64_t size, bool written) {
         const uint64_t off = guest - p->lo;
         if (p->last_value < mem_rec_value) p->last_value = mem_rec_value;
         if (!mirror_on() || !mirror_upload || p->mstate == Pool::MIRROR_REFUSED || p->mstate == Pool::MIRROR_WANTED)
-            return {p->buffer, off, size, 0};
+            return remember({p->buffer, off, size, 0});
         if (p->mstate == Pool::MIRROR_ON && p->synced_epoch == mirror_epoch && p->sync_seg <= texture_segment())
-            return {p->mirror, off, size, 0};
+            return remember({p->mirror, off, size, 0});
     }
     ParLock plk;   // (before pools_mu, always: a mirror sync records into the shared upload command buffer)
     std::lock_guard lk(pools_mu);
@@ -1747,7 +1780,7 @@ BufferRef gpu_buffer_bind(uint64_t gpu, uint64_t size, bool written) {
     const uint64_t off = guest - p->lo;
     if (!mirror_on() || !mirror_upload || p->mstate == Pool::MIRROR_REFUSED) {
         if (mirror_on()) { auto& e = direct_by_pool[p->lo]; e.first++, e.second = mirror_upload ? (int)p->mstate : 9; }
-        return {p->buffer, off, size, 0};
+        return remember({p->buffer, off, size, 0});
     }
     // (a pool's mirror is made at its first binding, in this part's uploads: bound in guest memory until the next
     // submission, the GPU read it there while the game's threads wrote it for their next frames, and a pass that drew
@@ -1772,11 +1805,11 @@ BufferRef gpu_buffer_bind(uint64_t gpu, uint64_t size, bool written) {
         if (written) p->direct_write_epoch = mirror_epoch;
         if (written && size <= (1u << 20))   // (EvilBoyce: GPU results written in place; small ones: the readbacks are)
             wb_pages_note(p->lo + off, p->lo + std::min(off + size, p->hi - p->lo), mem_rec_value);
-        return {p->buffer, off, size, 0};
+        return remember({p->buffer, off, size, 0});
     }
     if (p->synced_epoch != mirror_epoch || p->sync_seg > texture_segment()) mirror_sync(*p);
     if (written) writebacks.push_back({p, off, std::min(off + size, p->hi - p->lo)});
-    return {p->mirror, off, size, 0};
+    return remember({p->mirror, off, size, 0});
 }
 
 // ---- mirrors given back ----

@@ -6,6 +6,7 @@ on:
     paths:
       - nx2/nup.py
       - nx2/make_game.py
+      - nx2/build.py
       - nx2/unpack.py
       - nx2/test_nup_paths.py
       - tests/test_make_game_cache.py
@@ -16,6 +17,7 @@ on:
       - gpu/vk/vk_replay.cpp
       - gpu/vk/vk_state.h
       - tests/test_same_bind.py
+      - tests/test_cpm_discovery.py
       - tests/test_failure_reason.py
       - tests/test_import_hold.py
       - gpu/vk/vk_replay.cpp
@@ -40,9 +42,12 @@ on:
       - gpu/vk/vk_replay.cpp
       - gpu/vk/vk_draw.h
       - tests/test_ub_memo.py
+      - tests/test_ub_gap.py
+      - tests/test_bind_memo.py
       - tests/test_shader_census_cmd.py
       - gpu/vk/vk_shader.cpp
       - tests/test_same_draw.py
+      - tests/test_pass_hazard.py
       - nx2/version.py
       - nx2/test_version.py
       - host/nn_audio.c
@@ -54,6 +59,10 @@ on:
       - gpu/vk/movie_upscale_policy.h
       - tests/test_movie_upscale_policy.cpp
       - tests/test_movie_upscale_policy.py
+      - host/display.c
+      - host/posix/display_sdl.c
+      - host/nn_hid.c
+      - tests/test_alt_enter.py
       - nx2/test_import_windows.py
       - tests/test_handle_lookup.py
       - builder/linux/hookshot-launch
@@ -61,12 +70,17 @@ on:
       - builder/linux/hookshot-builder.desktop
       - scripts/linux/appimage.sh
       - tests/test_hookshot_launch.py
+      - tests/global_load_16_ir.cpp
+      - tests/global_load_16/**
+      - gpu/vk/eden/shader_recompiler/backend/spirv/emit_spirv_memory.cpp
+      - gpu/vk/eden/shader_recompiler/backend/spirv/emit_spirv_instructions.h
       - .github/workflows/source-regressions.yml
   pull_request:
     branches: [main]
     paths:
       - nx2/nup.py
       - nx2/make_game.py
+      - nx2/build.py
       - nx2/unpack.py
       - nx2/test_nup_paths.py
       - tests/test_make_game_cache.py
@@ -77,6 +91,7 @@ on:
       - gpu/vk/vk_replay.cpp
       - gpu/vk/vk_state.h
       - tests/test_same_bind.py
+      - tests/test_cpm_discovery.py
       - tests/test_failure_reason.py
       - tests/test_import_hold.py
       - gpu/vk/vk_replay.cpp
@@ -101,9 +116,12 @@ on:
       - gpu/vk/vk_replay.cpp
       - gpu/vk/vk_draw.h
       - tests/test_ub_memo.py
+      - tests/test_ub_gap.py
+      - tests/test_bind_memo.py
       - tests/test_shader_census_cmd.py
       - gpu/vk/vk_shader.cpp
       - tests/test_same_draw.py
+      - tests/test_pass_hazard.py
       - nx2/version.py
       - nx2/test_version.py
       - host/nn_audio.c
@@ -115,6 +133,10 @@ on:
       - gpu/vk/movie_upscale_policy.h
       - tests/test_movie_upscale_policy.cpp
       - tests/test_movie_upscale_policy.py
+      - host/display.c
+      - host/posix/display_sdl.c
+      - host/nn_hid.c
+      - tests/test_alt_enter.py
       - nx2/test_import_windows.py
       - tests/test_handle_lookup.py
       - builder/linux/hookshot-launch
@@ -122,6 +144,10 @@ on:
       - builder/linux/hookshot-builder.desktop
       - scripts/linux/appimage.sh
       - tests/test_hookshot_launch.py
+      - tests/global_load_16_ir.cpp
+      - tests/global_load_16/**
+      - gpu/vk/eden/shader_recompiler/backend/spirv/emit_spirv_memory.cpp
+      - gpu/vk/eden/shader_recompiler/backend/spirv/emit_spirv_instructions.h
       - .github/workflows/source-regressions.yml
   workflow_dispatch:
 
@@ -184,6 +210,8 @@ jobs:
           if errorlevel 1 exit /b 1
       - name: Check isolated child Unicode output
         run: python -I -B tests/test_child_unicode.py
+      - name: Check packaged CPM discovery
+        run: python -I -B tests/test_cpm_discovery.py
       - name: Check a failed step's error line
         run: python -I -B tests/test_failure_reason.py
       - name: C++ compiler for the import-hold check
@@ -220,9 +248,18 @@ jobs:
       - name: Check a captured page is read once
         if: runner.os == 'Linux'
         run: python -I -B tests/test_submitted_page.py
+      - name: Check uniform words skip a known gap
+        if: runner.os == 'Linux'
+        run: python -I -B tests/test_ub_gap.py
       - name: Check a repeated uniform word is not read again
         if: runner.os == 'Linux'
         run: python -I -B tests/test_ub_memo.py
+      - name: Check a pass hazard skips textures that are not targets
+        if: runner.os == 'Linux'
+        run: python -I -B tests/test_pass_hazard.py
+      - name: Check a repeated read bind is not looked up again
+        if: runner.os == 'Linux'
+        run: python -I -B tests/test_bind_memo.py
       - name: Check the shader list's text encoding
         run: python -I -B tests/test_shader_census_cmd.py
       - name: Check the build's version stamp
@@ -245,6 +282,9 @@ jobs:
       - name: Check movie upscale fallback policy
         if: runner.os == 'Linux'
         run: python -I -B tests/test_movie_upscale_policy.py
+      - name: Check Alt+Enter is fullscreen, not Plus
+        if: runner.os == 'Linux'
+        run: python -I -B tests/test_alt_enter.py
       - name: Check import windows
         if: runner.os == 'Linux'
         run: python -I -B nx2/test_import_windows.py --cxx g++
@@ -256,3 +296,37 @@ jobs:
       - name: Check the game launcher
         if: runner.os == 'Linux'
         run: python -I -B tests/test_hookshot_launch.py
+
+  spirv-global16:
+    name: SPIR-V global halfword lowering
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Check out pinned SPIR-V headers
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          repository: KhronosGroup/SPIRV-Headers
+          ref: 496543121ce6419f23d6fa5d7194ba66c36212d2
+          path: _deps/spirv-headers
+          persist-credentials: false
+      - name: Install Clang C++20 and SPIR-V validator
+        run: sudo apt-get update && sudo apt-get install -y clang spirv-tools
+      - name: Configure the focused real-IR fixture
+        run: >-
+          CC=clang CXX=clang++ cmake -S tests/global_load_16 -B ${{ runner.temp }}/global-load-16
+          -DREPO_ROOT=${{ github.workspace }}
+          -DSPIRV_HEADERS_ROOT=${{ github.workspace }}/_deps/spirv-headers
+      - name: Build the focused fixture
+        run: cmake --build ${{ runner.temp }}/global-load-16 --parallel 2
+      - name: Emit and inspect real IR modules
+        run: ${{ runner.temp }}/global-load-16/global_load_16_ir ${{ runner.temp }}/global-load-16/modules
+      - name: Validate every emitted module
+        shell: bash
+        run: |
+          for module in "${{ runner.temp }}"/global-load-16/modules/*.spv; do
+            spirv-val --target-env vulkan1.3 "$module"
+          done

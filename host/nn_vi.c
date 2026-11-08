@@ -185,11 +185,24 @@ extern volatile uint64_t hos_gfx_module;
 volatile int hos_fixed_resolution = 0;   /* (the lifted code reads these: nx2/oot_patches.py) */
 volatile uint32_t hos_fixed_scale_bits = 0x3f800000;   /* (HOS_RES_SCALE: the fixed path's scale) */
 volatile int hos_dynres_runs = 0;   /* (the dynamic path's frames: it fills fields the 3D reads, +8 +16 +168) */
+volatile float hos_text_scale = 1.0f;   /* (the letters' clock of a text pane, f_80b1e140: nx2/oot_patches.py) */
+/* The Insert menu's Text speed (0 Normal, 1 2x, 2 4x, 3 Instant), HOS_TEXT_SPEED=<0..3> over it: what the time of a letter
+   animation's step is multiplied by. Instant: the page at once, as the game's own skip on A */
+static float text_scale(const char *env, int menu) {
+    const int v = env && *env ? atoi(env) : menu;
+    return v == 1 ? 2.0f : v == 2 ? 4.0f : v >= 3 ? 1e6f : 1.0f;
+}
 static void realtime_step(int64_t now) {
     int rx_option(int id, int otherwise);
     /* (Resolution 100% from the start: the fixed path skipped the dynamic block from the first frame, its fields stayed
        unset and the 3D came out black. The dynamic path runs a few frames first, as when the menu turns it on in game) */
     hos_fixed_resolution = !rx_option(2, 1) && hos_dynres_runs >= 30;
+    {
+        static const char *env;
+        static int looked;
+        if (!looked) looked = 1, env = getenv("HOS_TEXT_SPEED");
+        hos_text_scale = text_scale(env, rx_option(5, 0));
+    }
     {   /* (the Insert menu's Resolution: the fixed path's scale, live; HOS_RES_SCALE below stays over it) */
         const int percent = rx_option(3, 0);
         if (percent > 0 && !getenv("HOS_RES_SCALE")) {

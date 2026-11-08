@@ -28,6 +28,7 @@
 #include <vector>
 
 #include "vk_texture.h"
+#include "vk_menu.h"
 #include "vk_draw.h"
 #include "vk_dump.h"
 
@@ -2049,6 +2050,7 @@ bool readback_submit_wait() {
     vkResetFences(dev.device, 1, &rb_fence);
     {
         std::lock_guard qk(dev.present_mu);   // (one queue: submits and presents take turns)
+        queue_flush_locked();
         if (vkQueueSubmit2(dev.queue, 1, &si, rb_fence) != VK_SUCCESS) return false;
     }
     return vkWaitForFences(dev.device, 1, &rb_fence, VK_TRUE, 5000000000ull) == VK_SUCCESS;
@@ -2383,6 +2385,7 @@ bool sparse_flush(Texture* tex) {
         static const bool no_idle = getenv("RX_VK_SPARSE_IDLE") == nullptr;
         static int64_t binds;
         std::lock_guard qk(dev.present_mu);
+        queue_flush_locked();
         if (!no_idle) vkQueueWaitIdle(dev.queue);
         res = vkQueueBindSparse(dev.queue, 1, &bi, fence);
         if (++binds % 200 == 0) logf("vk: %lld sparse binds", (long long)binds);
@@ -2595,7 +2598,11 @@ void texture_frame(uint64_t completed) {
               : known                ? std::min<uint64_t>(allowed / 10 * 7, 6144ull << 20)   // (hookshot: at most 6 GB. A 16 GB
                                                                                              // card's 10.8 GB filled up, read as a leak: 105, 106)
                                      : 4096ull << 20;
-    uint64_t budget = own;
+    uint64_t budget = (opts.vram_mb > 0) ? ((uint64_t)opts.vram_mb << 20) : own;
+    if (opts.vram_mb > 0 && known) {
+        // Safety clamp: do not exceed 75% of driver-allowed memory on constrained VRAM (prevents VK_ERROR_DEVICE_LOST)
+        budget = std::min(budget, (allowed / 4) * 3);
+    }
     // (near what the driver allows, the budget shrinks by the excess. The excess of what the process holds less the
     // free space in VMA's blocks, which new images take before VMA makes a block: measured by the blocks alone, the
     // textures evicted freed space inside them that the driver still counted, so 10 frames later the budget shrank

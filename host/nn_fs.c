@@ -434,7 +434,7 @@ HLE(_ZN2nn2fs12GetEntryTypeEPNS0_18DirectoryEntryTypeEPKc) {
     RET(0);
 }
 
-/* ---- directories: DirectoryEntry = { char name[0x301]; pad; u8 type at 0x302; pad; s64 size at 0x308 } ---- */
+/* ---- directories: DirectoryEntry = { char name[0x301]; pad[3]; s8 type at 0x304 (0 directory, 1 file); pad[3]; s64 size at 0x308 } ---- */
 static void add_extra(void *arg, const char *name, int is_dir, uint64_t size) {
     Handle *dh = (Handle *)arg;
     if (!(dh->nextras & 15)) dh->extras = (ExtraEntry *)realloc(dh->extras, sizeof *dh->extras * (size_t)(dh->nextras + 16));
@@ -471,7 +471,7 @@ HLE(_ZN2nn2fs13ReadDirectoryEPlPNS0_14DirectoryEntryENS0_15DirectoryHandleEl) {
             uint64_t e = ARG(1) + 0x310 * n;
             memset(GP(e), 0, 0x310);
             snprintf((char *)GP(e), 0x301, "%s", fd->cFileName);
-            *(uint8_t *)GP(e + 0x302) = isdir ? 0 : 1;
+            *(uint8_t *)GP(e + 0x304) = isdir ? 0 : 1;
             G64(e + 0x308) = ((uint64_t)fd->nFileSizeHigh << 32) | fd->nFileSizeLow;
             n++;
         }
@@ -483,7 +483,7 @@ HLE(_ZN2nn2fs13ReadDirectoryEPlPNS0_14DirectoryEntryENS0_15DirectoryHandleEl) {
         uint64_t e = ARG(1) + 0x310 * n;
         memset(GP(e), 0, 0x310);
         snprintf((char *)GP(e), 0x301, "%s", x->name);
-        *(uint8_t *)GP(e + 0x302) = x->is_dir ? 0 : 1;
+        *(uint8_t *)GP(e + 0x304) = x->is_dir ? 0 : 1;
         G64(e + 0x308) = x->size;
         n++;
     }

@@ -18,7 +18,7 @@ import tempfile
 
 from unicorn import Uc, UcError, UC_ARCH_ARM64, UC_MODE_ARM, UC_PROT_ALL
 from unicorn.arm64_const import (UC_ARM64_REG_X0, UC_ARM64_REG_X29, UC_ARM64_REG_X30, UC_ARM64_REG_SP,
-                                 UC_ARM64_REG_NZCV, UC_ARM64_REG_TPIDR_EL0)
+                                 UC_ARM64_REG_NZCV, UC_ARM64_REG_TPIDR_EL0, UC_CPU_ARM64_MAX)
 
 PAGE, PAGE_SIZE = 0x10000, 0x1000
 PC = PAGE + 0x800
@@ -46,6 +46,8 @@ GROUPS = [
     ("ldst_reg", 0x3F200C00, 0x38200800),
     ("ldst_pair", 0x3E000000, 0x28000000),
     ("ldr_lit", 0x3F000000, 0x18000000),
+    ("exclusive", 0x3F000000, 0x08000000),
+    ("atomic", 0x3F200C00, 0x38200000),
 ]
 SYSTEM = [0xD503201F, 0xD503203F, 0xD503233F, 0xD50323BF, 0xD5033BBF, 0xD5033B9F, 0xD50339BF]
 SYS_RW = [0xD53B4200, 0xD51B4200, 0xD53BD040, 0xD51BD040]   # MRS/MSR NZCV, MRS/MSR TPIDR_EL0 (Rt added)
@@ -60,6 +62,31 @@ def unpredictable(word):
     if word & 0x3B200000 == 0x38000000 and (word >> 10) & 3 in (1, 3):   # pre/post-indexed
         return rn != 31 and rn == rt
     return False
+
+
+def lse_signed_model(word, nzcv, x, mem):
+    """LDSMAX / LDSMIN by the Arm ARM. Unicorn 2.1 gets them wrong (32-bit LDSMIN came out as an unsigned minimum),
+    so these words are checked against this model instead"""
+    size, rs, rn, rt, opc = word >> 30, (word >> 16) & 31, (word >> 5) & 31, word & 31, (word >> 12) & 7
+    n = 1 << size
+    a = (x[rn] if rn != 31 else x[31]) - PAGE
+    if not 0 <= a <= PAGE_SIZE - n:
+        raise UcError(0)
+    bits = 8 * n
+    old = int.from_bytes(mem[a:a + n], "little")
+    s = (x[rs] if rs != 31 else 0) & ((1 << bits) - 1)
+    sg = lambda v: v - (1 << bits) if v >> (bits - 1) else v
+    new = (max if opc == 4 else min)(sg(old), sg(s)) & ((1 << bits) - 1)
+    out = list(x)
+    m = bytearray(mem)
+    m[a:a + n] = new.to_bytes(n, "little")
+    if rt != 31:
+        out[rt] = old
+    return nzcv, out, bytes(m)
+
+
+def is_lse_signed(word):
+    return word & 0x3F20FC00 in (0x38204000, 0x38205000) and not word & 0x04000000
 
 
 def regs_for(word, rng):
@@ -77,7 +104,7 @@ def regs_for(word, rng):
 
 
 def unicorn_run(word, nzcv, x, mem):
-    uc = Uc(UC_ARCH_ARM64, UC_MODE_ARM)
+    uc = Uc(UC_ARCH_ARM64, UC_MODE_ARM, cpu=UC_CPU_ARM64_MAX)
     uc.mem_map(PAGE, PAGE_SIZE, UC_PROT_ALL)
     uc.mem_write(PAGE, bytes(mem))
     for i in range(29):
@@ -115,7 +142,7 @@ def main():
         mem = bytearray(rng.getrandbits(8) for _ in range(PAGE_SIZE))
         mem[PC - PAGE:PC - PAGE + 4] = struct.pack("<I", word)
         try:
-            exp = unicorn_run(word, nzcv, x, mem)
+            exp = (lse_signed_model if is_lse_signed(word) else unicorn_run)(word, nzcv, x, mem)
         except UcError:
             refused[name] += 1
             continue
@@ -148,10 +175,10 @@ def main():
         bad += ["%s %#x != %#x" % ("sp" if j == 31 else "x%d" % j, gx[j], ex[j]) for j in range(32) if gx[j] != ex[j]]
         if gmem != emem:
             k = next(j for j in range(PAGE_SIZE) if gmem[j] != emem[j])
-            bad.append("mem +%#x" % k)
+            bad.append("mem +%#x got %s want %s" % (k, gmem[k:k + 8].hex(), emem[k:k + 8].hex()))
         if bad:
             stats[name]["wrong"] += 1
-            if shown[name] < 3:
+            if shown[name] < int(os.environ.get("SHOW", "3")):
                 shown[name] += 1
                 print("WRONG %-11s %08x: %s" % (name, word, "; ".join(bad[:4])))
         else:

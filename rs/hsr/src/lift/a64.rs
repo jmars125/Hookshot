@@ -579,6 +579,16 @@ impl Em<'_, '_> {
             self.set(rd, r);
             return Ok(());
         }
+        // Pointer authentication is the identity, as in nx2/insn.py: PAC*/AUT* and XPAC* leave Xd unchanged, PACGA
+        // writes 0 (no pointer the game uses is ever signed)
+        if w & 0xFFFF_C000 == 0xDAC1_0000 || w & 0xFFFF_FBE0 == 0xDAC1_43E0 {
+            return Ok(());
+        }
+        if w & 0xFFE0_FC00 == 0x9AC0_3000 {
+            let z = self.k(types::I64, 0);
+            self.set(rd, z);
+            return Ok(());
+        }
         if w & 0x5FE0_0000 == 0x1AC0_0000 {
             // data processing (2 source)
             if bits(w, 29, 29) != 0 {
@@ -704,6 +714,12 @@ impl Em<'_, '_> {
 
     // ---- loads and stores ----------------------------------------------------------------------------------------
     fn ldst(&mut self, w: u32) -> R {
+        if w & 0x3F00_0000 == 0x0800_0000 {
+            return self.exclusive(w);
+        }
+        if w & 0x3F20_0C00 == 0x3820_0000 {
+            return self.atomic(w);
+        }
         if bits(w, 26, 26) != 0 {
             return Err(Unsupported); // SIMD&FP registers
         }
@@ -780,6 +796,143 @@ impl Em<'_, '_> {
         Ok(())
     }
 
+    fn ity(size: u32) -> Type {
+        [types::I8, types::I16, types::I32, types::I64][size as usize]
+    }
+    fn host_addr(&mut self, rn: u32) -> Value {
+        let a = self.xsp(rn, true);
+        self.host(a)
+    }
+    fn ctx_store(&mut self, v: Value, off: i32) {
+        self.b.ins().store(MemFlagsData::trusted(), v, self.ctx, off);
+    }
+    fn ctx_load(&mut self, ty: Type, off: i32) -> Value {
+        self.b.ins().load(ty, MemFlagsData::trusted(), self.ctx, off)
+    }
+    /// Xt narrowed to an access of 1 << size bytes
+    fn x_sized(&mut self, r: u32, size: u32) -> Value {
+        let v = self.x(r, true);
+        if size == 3 {
+            v
+        } else {
+            self.b.ins().ireduce(Self::ity(size), v)
+        }
+    }
+
+    /// Exclusives, load-acquire / store-release and CAS. The monitor is a64-kit's (rt/a64_rt.c recomp_ldxr,
+    /// recomp_stxr): LDXR records the address, size and value it saw; STXR compare-and-swaps against that value.
+    fn exclusive(&mut self, w: u32) -> R {
+        let (size, o2, l, o1, rs, rt2) =
+            (bits(w, 31, 30), bits(w, 23, 23), bits(w, 22, 22) != 0, bits(w, 21, 21), bits(w, 20, 16), bits(w, 14, 10));
+        let (rt, rn) = (bits(w, 4, 0), bits(w, 9, 5));
+        let ty = Self::ity(size);
+        match (o2, o1) {
+            (0, 0) => {
+                let a = self.xsp(rn, true);
+                let h = self.host(a);
+                if l {
+                    // LDXR / LDAXR
+                    let v = self.b.ins().atomic_load(ty, MemFlagsData::new(), h);
+                    let v = self.widen(v);
+                    self.ctx_store(a, ctx::EXCL_ADDR);
+                    let sz = self.b.ins().iconst(types::I32, 1 << size);
+                    self.ctx_store(sz, ctx::EXCL_SIZE);
+                    self.ctx_store(v, ctx::EXCL_LO);
+                    let one = self.b.ins().iconst(types::I32, 1);
+                    self.ctx_store(one, ctx::EXCL_VALID);
+                    self.set(rt, v);
+                    return Ok(());
+                }
+                // STXR / STLXR: Ws = 0 when stored, 1 when not
+                if rs == rt || (rs == rn && rn != 31) {
+                    return Err(Unsupported);
+                }
+                let valid = self.ctx_load(types::I32, ctx::EXCL_VALID);
+                let ea = self.ctx_load(types::I64, ctx::EXCL_ADDR);
+                let es = self.ctx_load(types::I32, ctx::EXCL_SIZE);
+                let same_a = self.b.ins().icmp(IntCC::Equal, ea, a);
+                let same_s = self.b.ins().icmp_imm_s(IntCC::Equal, es, 1 << size);
+                let v_ok = self.b.ins().icmp_imm_s(IntCC::NotEqual, valid, 0);
+                let ok = self.b.ins().band(same_a, same_s);
+                let ok = self.b.ins().band(ok, v_ok);
+                let zero = self.b.ins().iconst(types::I32, 0);
+                self.ctx_store(zero, ctx::EXCL_VALID);
+                let try_b = self.b.create_block();
+                let done = self.b.create_block();
+                self.b.append_block_param(done, types::I64);
+                let fail = self.b.ins().iconst(types::I64, 1);
+                self.b.ins().brif(ok, try_b, &[], done, &[fail.into()]);
+                self.b.switch_to_block(try_b);
+                self.b.seal_block(try_b);
+                let expect = self.ctx_load(types::I64, ctx::EXCL_LO);
+                let expect = if size == 3 { expect } else { self.b.ins().ireduce(ty, expect) };
+                let val = self.x_sized(rt, size);
+                let old = self.b.ins().atomic_cas(MemFlagsData::new(), h, expect, val);
+                let neq = self.b.ins().icmp(IntCC::NotEqual, old, expect);
+                let st = self.b.ins().uextend(types::I64, neq);
+                self.b.ins().jump(done, &[st.into()]);
+                self.b.switch_to_block(done);
+                self.b.seal_block(done);
+                let st = self.b.block_params(done)[0];
+                self.set(rs, st);
+                Ok(())
+            }
+            (1, 0) => {
+                // LDAR / STLR (o0 = 1) and LDLAR / STLLR (o0 = 0): sequentially consistent here
+                let h = self.host_addr(rn);
+                if l {
+                    let v = self.b.ins().atomic_load(ty, MemFlagsData::new(), h);
+                    let v = self.widen(v);
+                    self.set(rt, v);
+                } else {
+                    let v = self.x_sized(rt, size);
+                    self.b.ins().atomic_store(MemFlagsData::new(), v, h);
+                }
+                Ok(())
+            }
+            (1, 1) if rt2 == 31 => {
+                // CAS / CASA / CASL / CASAL: Xs = the old value; stored when it equals Xs
+                let h = self.host_addr(rn);
+                let e = self.x_sized(rs, size);
+                let v = self.x_sized(rt, size);
+                let old = self.b.ins().atomic_cas(MemFlagsData::new(), h, e, v);
+                let old = self.widen(old);
+                self.set(rs, old);
+                Ok(())
+            }
+            _ => Err(Unsupported),
+        }
+    }
+
+    /// LSE atomic memory operations: LDADD, LDCLR, LDEOR, LDSET, LDSMAX, LDSMIN, LDUMAX, LDUMIN, SWP
+    fn atomic(&mut self, w: u32) -> R {
+        use cranelift_codegen::ir::AtomicRmwOp as Op;
+        if bits(w, 26, 26) != 0 {
+            return Err(Unsupported);
+        }
+        let (size, rs, o3, opc) = (bits(w, 31, 30), bits(w, 20, 16), bits(w, 15, 15), bits(w, 14, 12));
+        let (rt, rn) = (bits(w, 4, 0), bits(w, 9, 5));
+        let op = match (o3, opc) {
+            (0, 0) => Op::Add,
+            (0, 1) => Op::And, // LDCLR: AND with the complement
+            (0, 2) => Op::Xor,
+            (0, 3) => Op::Or,
+            (0, 4) => Op::Smax,
+            (0, 5) => Op::Smin,
+            (0, 6) => Op::Umax,
+            (0, 7) => Op::Umin,
+            (1, 0) => Op::Xchg,
+            _ => return Err(Unsupported), // LDAPR and the rest
+        };
+        let h = self.host_addr(rn);
+        let v = self.x_sized(rs, size);
+        let v = if (o3, opc) == (0, 1) { self.b.ins().bnot(v) } else { v };
+        let old = self.b.ins().atomic_rmw(Self::ity(size), MemFlagsData::new(), op, h, v);
+        let old = self.widen(old);
+        self.set(rt, old);
+        Ok(())
+    }
+
     fn ldst_pair(&mut self, w: u32) -> R {
         let (opc, mode, l) = (bits(w, 31, 30), bits(w, 24, 23), bits(w, 22, 22) != 0);
         let (rt, rn, rt2) = (bits(w, 4, 0), bits(w, 9, 5), bits(w, 14, 10));
@@ -822,6 +975,12 @@ impl Em<'_, '_> {
     fn system(&mut self, w: u32) -> R {
         if w & 0xFFFF_F01F == 0xD503_201F {
             return Ok(()); // hints: NOP, YIELD, BTI, PAC*SP and the rest
+        }
+        if w & 0xFFFF_F0FF == 0xD503_305F {
+            // CLREX
+            let zero = self.b.ins().iconst(types::I32, 0);
+            self.ctx_store(zero, ctx::EXCL_VALID);
+            return Ok(());
         }
         if w & 0xFFFF_F0DF == 0xD503_309F {
             // DSB / DMB

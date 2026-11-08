@@ -153,6 +153,8 @@ pub fn control_kind(w: u32) -> Option<&'static str> {
         "tbz"
     } else if w & 0xFFFF_FC1F == 0xD61F_0000 || w & 0xFFFF_FC1F == 0xD63F_0000 || w & 0xFFFF_FC1F == 0xD65F_0000 {
         "br/blr/ret"
+    } else if w == 0xD65F_0BFF || w == 0xD65F_0FFF || w & 0xFEFF_F800 == 0xD61F_0800 || w & 0xFEFF_F800 == 0xD63F_0800 {
+        "pac branch" // RETAA/RETAB, BRAA*/BRAB*, BLRAA*/BLRAB* (nx2/insn.py classify_ext)
     } else if w & 0xFFE0_001F == 0xD400_0001 {
         "svc"
     } else if w & 0xFFE0_001F == 0xD420_0000 || w & 0xFFE0_001F == 0xD440_0000 {

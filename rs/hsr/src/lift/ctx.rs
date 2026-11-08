@@ -43,6 +43,10 @@ pub const TPIDRRO_EL0: i32 = off!(tpidrro_el0);
 pub const FPCR: i32 = off!(fpcr);
 pub const FPSR: i32 = off!(fpsr);
 pub const POLL: i32 = off!(poll);
+pub const EXCL_ADDR: i32 = off!(excl_addr);
+pub const EXCL_LO: i32 = off!(excl_lo);
+pub const EXCL_SIZE: i32 = off!(excl_size);
+pub const EXCL_VALID: i32 = off!(excl_valid);
 
 /// Host address of guest address 0: the 64-bit guest window (nx2/rtgen.py A64_ADDR64, a64.h A64_HOST_BASE)
 pub const MEM_BASE: i64 = 0x1000_0000_0000;

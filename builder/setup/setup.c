@@ -74,6 +74,8 @@ static int http_get(const char *url8, Sink sink, void *user, unsigned long long 
     HINTERNET s = WinHttpOpen(L"HookshotBuilder-Setup/1.0", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, NULL, NULL, 0);
     if (!s) s = WinHttpOpen(L"HookshotBuilder-Setup/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, NULL, NULL, 0);
     if (!s) return 0;
+    /* (a stalled download fails after a minute without data, with the message, instead of waiting forever: a GitHub 504 hour) */
+    WinHttpSetTimeouts(s, 30000, 30000, 30000, 60000);
     HINTERNET c = WinHttpConnect(s, host, uc.nPort, 0);
     HINTERNET r = c ? WinHttpOpenRequest(c, L"GET", path, NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
                                          uc.nScheme == INTERNET_SCHEME_HTTPS ? WINHTTP_FLAG_SECURE : 0)
@@ -281,12 +283,28 @@ static DWORD WINAPI work(LPVOID unused) {
 
     status(L"Looking for the latest Hookshot Builder...");
     Mem man = {0};
-    g_http_status = 0;
-    if (!http_get(manifest_url(), mem_sink, &man, 0) || !man.p)
+    /* (tried again on a server error or no answer: GitHub's release downloads answered 504 for an hour, 2026-11-08, and every
+       start failed at once) */
+    static const int waits[] = {3, 6, 12, 20};
+    int ok = 0;
+    for (int attempt = 0; attempt <= 4 && !ok; attempt++) {
+        if (attempt) {
+            status(L"GitHub didn't answer (%lu). Trying again in %d s...", g_http_status, waits[attempt - 1]);
+            Sleep(waits[attempt - 1] * 1000);
+            status(L"Looking for the latest Hookshot Builder...");
+        }
+        free(man.p);
+        man = (Mem){0};
+        g_http_status = 0;
+        ok = http_get(manifest_url(), mem_sink, &man, 0) && man.p;
+        if (!ok && g_http_status && g_http_status < 500) break;   /* (404 and the like: trying again changes nothing) */
+    }
+    if (!ok)
         fail(g_http_status == 404
                  ? L"The latest Hookshot release has no setup files yet. Download HookshotBuilder.zip from the releases page for now: "
                    L"https://github.com/NotRexed/Hookshot/releases/latest"
-             : g_http_status ? L"GitHub answered with an error. Try again in a few minutes."
+             : g_http_status ? L"GitHub's download servers are failing right now (an error 500 or above, tried 5 times). This is on "
+                               L"GitHub's side: try again in a few minutes, or later today."
                              : L"Could not reach GitHub to get the Hookshot Builder. Check your internet connection and try again.");
 
     char tag[128] = "", run[260] = "";
@@ -324,24 +342,37 @@ static DWORD WINAPI work(LPVOID unused) {
             swprintf(zip, MAX_PATH, L"%ls\\%ls.zip", downloads, wsha);
             char have[65] = "";
             if (!(GetFileAttributesW(zip) != INVALID_FILE_ATTRIBUTES && file_sha256(zip, have) && !strcmp(have, p->sha))) {
-                status(L"Downloading part %d of %d (%llu MB)...", i + 1, nparts, p->size >> 20);
                 wchar_t part[MAX_PATH];
                 swprintf(part, MAX_PATH, L"%ls.part", zip);
-                FileSink fs;
-                BCRYPT_ALG_HANDLE a;
-                fs.f = CreateFileW(part, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_FLAG_SEQUENTIAL_SCAN, NULL);
-                if (fs.f == INVALID_HANDLE_VALUE) fail(L"Could not write to %ls.", downloads);
-                BCryptOpenAlgorithmProvider(&a, BCRYPT_SHA256_ALGORITHM, NULL, 0);
-                BCryptCreateHash(a, &fs.h, NULL, 0, NULL, 0, 0);
-                const int got = http_get(p->url, file_sink, &fs, p->size);
-                CloseHandle(fs.f);
-                unsigned char d[32];
-                BCryptFinishHash(fs.h, d, 32, 0);
-                BCryptDestroyHash(fs.h);
-                BCryptCloseAlgorithmProvider(a, 0);
-                InterlockedExchange(&g_percent, -1);
-                hex(d, 32, have);
-                if (!got) DeleteFileW(part), fail(L"Downloading part %d of %d failed. Check your connection and free space, then try again.", i + 1, nparts);
+                int got = 0;
+                for (int attempt = 0; attempt < 4 && !got; attempt++) {   /* (a server error or a dropped connection: again) */
+                    if (attempt) {
+                        status(L"Part %d of %d: GitHub didn't answer (%lu). Trying again in %d s...", i + 1, nparts, g_http_status,
+                               waits[attempt - 1]);
+                        Sleep(waits[attempt - 1] * 1000);
+                    }
+                    status(L"Downloading part %d of %d (%llu MB)...", i + 1, nparts, p->size >> 20);
+                    FileSink fs;
+                    BCRYPT_ALG_HANDLE a;
+                    fs.f = CreateFileW(part, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_FLAG_SEQUENTIAL_SCAN, NULL);
+                    if (fs.f == INVALID_HANDLE_VALUE) fail(L"Could not write to %ls.", downloads);
+                    BCryptOpenAlgorithmProvider(&a, BCRYPT_SHA256_ALGORITHM, NULL, 0);
+                    BCryptCreateHash(a, &fs.h, NULL, 0, NULL, 0, 0);
+                    g_http_status = 0;
+                    got = http_get(p->url, file_sink, &fs, p->size);
+                    CloseHandle(fs.f);
+                    unsigned char d[32];
+                    BCryptFinishHash(fs.h, d, 32, 0);
+                    BCryptDestroyHash(fs.h);
+                    BCryptCloseAlgorithmProvider(a, 0);
+                    InterlockedExchange(&g_percent, -1);
+                    hex(d, 32, have);
+                    if (!got && g_http_status && g_http_status < 500) break;
+                }
+                if (!got) DeleteFileW(part), fail(g_http_status >= 500
+                    ? L"Downloading part %d of %d failed: GitHub's download servers are failing right now (tried 4 times). This is on "
+                      L"GitHub's side: try again in a few minutes, or later today."
+                    : L"Downloading part %d of %d failed. Check your connection and free space, then try again.", i + 1, nparts);
                 if (strcmp(have, p->sha)) DeleteFileW(part), fail(L"Part %d of %d did not download correctly (its checksum differs). Try again.", i + 1, nparts);
                 DeleteFileW(zip);
                 MoveFileW(part, zip);
